@@ -1,0 +1,123 @@
+vtest "cachetag purgemap Fellow direct probes work across multiple Fellow stevedores"
+
+server s1 {
+	rxreq
+	expect req.url == "/one"
+	txresp -hdr "Connection: close" -body "old-one"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/two"
+	txresp -hdr "Connection: close" -body "old-two"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/one"
+	txresp -hdr "Connection: close" -body "new-one"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/two"
+	txresp -body "new-two"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow1=fellow,${tmpdir}/purgemap-fellow-one.stv,100MB,1MB,64KB" \
+	-arg "-sfellow2=fellow,${tmpdir}/purgemap-fellow-two.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+		sub vcl_init {
+			slash.tune_fellow(storage.fellow1);
+			slash.tune_fellow(storage.fellow2);
+			new tags = cachetag.namespace("persistent_pm",
+			    persist_path = "${tmpdir}/tag-persist",
+			    sweep_interval = 0s);
+		}
+
+		sub vcl_recv {
+			if (req.method == "PURGE") {
+				set req.http.purged = tags.purge("multi-stevedore");
+				return (synth(200));
+			}
+		}
+
+	sub vcl_backend_response {
+		tags.add("multi-stevedore");
+		if (bereq.url == "/one") {
+			set beresp.storage = storage.fellow1;
+		} else {
+			set beresp.storage = storage.fellow2;
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/one"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "old-one"
+
+	txreq -url "/two"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "old-two"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_objects_written == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+
+vinyl v1 -stop
+vinyl v1 -start
+vinyl v1 -expect n_vampireobject == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_direct_probes == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+
+client c2 {
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+
+	txreq -url "/one"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "new-one"
+
+	txreq -url "/two"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "new-two"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_direct_probes >= 2
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_namespace_records_probed >= 2
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_probe_hard_hits >= 2
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_invalid == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_read_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_store_invariant_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
+
+server s1 -wait

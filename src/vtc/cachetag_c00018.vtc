@@ -1,0 +1,81 @@
+vtest "cachetag VMOD limit and parse counters"
+
+server s1 -repeat 2 {
+	rxreq
+	txresp -body "limited"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new many = cachetag.namespace("many", max_keys_per_object = 1);
+		new long = cachetag.namespace("long", max_key_length = 3);
+		new bytes = cachetag.namespace("bytes", max_tag_header_bytes = 5);
+		new parsed = cachetag.namespace("parsed");
+		new tokened = cachetag.namespace("tokened");
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE_BAD") {
+			set req.http.purged =
+			    parsed.purge_header("one,bad token");
+			return (synth(200));
+		}
+		if (req.method == "PURGE_BIG") {
+			set req.http.purged = bytes.purge_header("one,two");
+			return (synth(200));
+		}
+		if (req.method == "PURGE_TOKENS") {
+			set req.http.purged =
+			    tokened.purge_header(req.http.Tags);
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/many") {
+			many.add_header("one,two");
+		} else if (bereq.url == "/long") {
+			long.add("toolong");
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/many"
+	rxresp
+	expect resp.status == 503
+
+	txreq -url "/long"
+	rxresp
+	expect resp.status == 503
+
+	txreq -req PURGE_BAD
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -3
+
+	txreq -req PURGE_BIG
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -2
+
+	# 257 tokens: the former independent 256-token purge_header ceiling
+	# was removed; token count is bounded only by max_tag_header_bytes.
+	txreq -req PURGE_TOKENS -hdr "Tags: a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_many_many.limit_rejections == 1
+vinyl v1 -expect CACHETAG.vcl1_long_long.limit_rejections == 1
+vinyl v1 -expect CACHETAG.vcl1_bytes_bytes.limit_rejections == 1
+vinyl v1 -expect CACHETAG.vcl1_parsed_parsed.parse_errors == 1
+vinyl v1 -expect CACHETAG.vcl1_tokened_tokened.limit_rejections == 0

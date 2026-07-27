@@ -1,0 +1,136 @@
+vtest "segmented object vector grows and drains across boundaries"
+
+server s1 -repeat 65 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("segmented_growth", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+		if (req.method == "LOWREADY") {
+			if (tags.test_resize_low_water_ready()) {
+				return (synth(200));
+			}
+			return (synth(204));
+		}
+		set req.hash_always_miss = true;
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/drop") {
+			tags.add("drop");
+		} else {
+			tags.add("keep");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_drop_40 -repeat 40 {
+	txreq -url "/drop"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_keep_63 -repeat 23 {
+	txreq -url "/keep"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 63
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 128
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.object_emergency_segment_allocations >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.object_emergency_segment_old_capacity_max == 0
+
+client c_keep_64 {
+	txreq -url "/keep"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 64
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 128
+
+client c_keep_65 {
+	txreq -url "/keep"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 65
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 128
+
+client c_compact_drop {
+	txreq -req PURGE -hdr "Tag: drop"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 40
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 25
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_edges == 25
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 128
+
+client c_drain_drop {
+	txreq -req LOWREADY
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 64
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_shrinks >= 1
+
+client c_compact_keep {
+	txreq -req PURGE -hdr "Tag: keep"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 25
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 64
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_side_table_buckets == 128
+
+client c_drain_keep {
+	txreq -req LOWREADY
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_side_table_buckets == 0
+
+server s1 -wait

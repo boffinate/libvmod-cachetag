@@ -1,0 +1,72 @@
+vtest "tag purge between assignment and publication"
+
+barrier b_tagged sock 2
+barrier b_body cond 2
+
+server s1 {
+	rxreq
+	expect req.url == "/race"
+	txresp -nolen -hdr "Transfer-Encoding: chunked" -hdr "X-Tag-Barrier: 1"
+	barrier b_body sync
+	chunked "old"
+	chunkedlen 0
+
+	rxreq
+	expect req.url == "/race"
+	txresp -body "new"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge("race");
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		set beresp.do_stream = false;
+		tags.add("race");
+		if (beresp.http.X-Tag-Barrier) {
+			unset beresp.http.X-Tag-Barrier;
+			vtc.barrier_sync("${b_tagged_sock}");
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/race"
+	rxresp
+	expect resp.status == 200
+} -start
+
+barrier b_tagged sync
+
+client c2 {
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+} -run
+
+barrier b_body sync
+client c1 -wait
+
+client c3 {
+	txreq -url "/race"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "new"
+} -run

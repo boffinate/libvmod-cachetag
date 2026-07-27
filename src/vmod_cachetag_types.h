@@ -1,0 +1,254 @@
+/*-
+ * SPDX-License-Identifier: MPL-2.0
+ *
+ * Shared purge-map types.  Cachetag has one invalidation implementation.
+ */
+
+#ifndef VMOD_TAG_TYPES_H
+#define VMOD_TAG_TYPES_H
+
+#include <stdint.h>
+
+struct objcore;
+struct cachetag_index;
+struct worker;
+
+enum cachetag_purge_mode {
+	TAG_PURGE_HARD,
+	TAG_PURGE_SOFT
+};
+
+struct cachetag_registration_snapshot {
+	uint64_t digest_hi;
+	uint64_t digest_lo;
+	uint64_t reg_seq;
+};
+
+struct cachetag_resize_counters {
+	uint64_t calls;
+	uint64_t old_capacity_last;
+	uint64_t new_capacity_last;
+	uint64_t usec;
+	uint64_t max_usec;
+	uint64_t last_usec;
+	uint64_t failures;
+	uint64_t compact_active_calls;
+};
+
+struct cachetag_lockwait_counters {
+	uint64_t calls;
+	uint64_t wait_usec;
+	uint64_t wait_max_usec;
+	uint64_t wait_over_50us;
+	uint64_t wait_over_250us;
+	uint64_t wait_over_1ms;
+	uint64_t wait_over_10ms;
+	uint64_t wait_over_50ms;
+};
+
+struct cachetag_counters {
+	uint64_t index_memory_bytes;
+	uint64_t volatile_side_table_bytes;
+	uint64_t volatile_side_table_buckets;
+	uint64_t volatile_side_table_grows;
+	uint64_t volatile_side_table_shrinks;
+	uint64_t volatile_object_table_bytes;
+	uint64_t volatile_object_count_sidecar_bytes;
+	uint64_t volatile_object_count_overflow_bytes;
+	uint64_t volatile_object_table_slots;
+	uint64_t volatile_object_table_shrinks;
+	uint64_t volatile_objects;
+	uint64_t volatile_edges;
+	uint64_t volatile_inline_folds;
+	uint64_t volatile_attached;
+	uint64_t volatile_attach_failures;
+	struct cachetag_lockwait_counters request_probe;
+	struct cachetag_lockwait_counters request_attach;
+	struct cachetag_lockwait_counters request_invalidate;
+	struct cachetag_resize_counters object_grow;
+	struct cachetag_resize_counters object_shrink;
+	struct cachetag_resize_counters side_grow_rehash;
+	struct cachetag_resize_counters side_shrink_rehash;
+	struct cachetag_resize_counters zero_container_free;
+	uint64_t record_shrink_calls;
+	uint64_t record_shrink_obj_mtx_wait_usec;
+	uint64_t record_shrink_obj_mtx_wait_max_usec;
+	uint64_t record_shrink_obj_mtx_hold_usec;
+	uint64_t record_shrink_obj_mtx_hold_max_usec;
+	uint64_t record_shrink_obj_mtx_hold_last_usec;
+	uint64_t object_segments;
+	uint64_t object_published_slots;
+	uint64_t object_published_bytes;
+	uint64_t object_count_published_bytes;
+	uint64_t object_segment_grow_publishes;
+	uint64_t object_emergency_segment_allocations;
+	uint64_t object_emergency_segment_old_capacity_max;
+	uint64_t object_segment_detach_batches;
+	uint64_t object_segment_alloc_usec;
+	uint64_t object_segment_alloc_max_usec;
+	uint64_t object_segment_alloc_last_usec;
+	uint64_t object_segment_alloc_failures;
+	uint64_t object_segment_free_usec;
+	uint64_t object_segment_free_max_usec;
+	uint64_t object_segment_free_last_usec;
+	uint64_t side_primary_buckets;
+	uint64_t side_primary_bytes;
+	uint64_t side_primary_live;
+	uint64_t side_primary_tombstones;
+	uint64_t side_retiring_buckets;
+	uint64_t side_retiring_bytes;
+	uint64_t side_retiring_live;
+	uint64_t side_retiring_tombstones;
+	uint64_t side_resize_state;
+	uint64_t side_resize_reason;
+	uint64_t side_migration_cursor;
+	uint64_t side_migration_buckets_remaining;
+	uint64_t side_migration_live_remaining;
+	uint64_t side_migration_batches;
+	uint64_t side_migration_inspected_buckets;
+	uint64_t side_migration_moved_entries;
+	uint64_t side_migration_completions;
+	uint64_t side_destination_alloc_usec;
+	uint64_t side_destination_alloc_max_usec;
+	uint64_t side_destination_alloc_last_usec;
+	uint64_t side_destination_alloc_failures;
+	uint64_t side_retired_free_usec;
+	uint64_t side_retired_free_max_usec;
+	uint64_t side_retired_free_last_usec;
+	uint64_t side_resize_grow_publishes;
+	uint64_t side_resize_attach_grow_publishes;
+	uint64_t side_resize_attach_grow_old_buckets_max;
+	uint64_t side_resize_rebuild_publishes;
+	uint64_t side_resize_shrink_publishes;
+	uint64_t side_resize_shrink_cancellations;
+	uint64_t side_resize_shrink_rollbacks;
+	uint64_t resize_batch_obj_mtx_wait_usec;
+	uint64_t resize_batch_obj_mtx_wait_max_usec;
+	uint64_t resize_batch_obj_mtx_wait_last_usec;
+	uint64_t resize_batch_obj_mtx_hold_usec;
+	uint64_t resize_batch_obj_mtx_hold_max_usec;
+	uint64_t resize_batch_obj_mtx_hold_last_usec;
+	uint64_t resize_batch_obj_mtx_hold_over_2ms;
+	uint64_t resize_batch_obj_mtx_hold_over_5ms;
+	uint64_t resize_batch_obj_mtx_hold_over_10ms;
+	uint64_t resize_low_water_active;
+	uint64_t resize_low_water_starts;
+	uint64_t resize_low_water_restarts;
+	uint64_t resize_low_water_rearms;
+	uint64_t resize_low_water_elapsed_usec;
+	uint64_t resize_low_water_observed_live;
+	uint64_t resize_low_water_target_objects;
+	uint64_t resize_low_water_target_side_buckets;
+	uint64_t resize_low_water_cancellations;
+	uint64_t resize_low_water_cancellation_reason;
+	uint64_t resize_active_bytes;
+	uint64_t resize_retiring_bytes;
+	uint64_t resize_detached_bytes;
+	uint64_t resize_reconciled_bytes;
+	uint64_t parse_errors;
+	uint64_t limit_rejections;
+	uint64_t stale_calls;
+	uint64_t stale_detected;
+	uint64_t purgemap_entries;
+	uint64_t purgemap_table_slots;
+	uint64_t purgemap_tombstones;
+	uint64_t purgemap_empty_slots;
+	uint64_t purgemap_bytes;
+	uint64_t purgemap_hard_floor;
+	uint64_t purgemap_soft_floor;
+	uint64_t purgemap_seq;
+	uint64_t purgemap_prunes;
+	uint64_t purgemap_pruned_entries;
+	uint64_t purgemap_rebuilds_grow;
+	uint64_t purgemap_rebuilds_same_size;
+	uint64_t purgemap_rebuilds_shrink;
+	uint64_t purgemap_auto_reclaim_passes;
+	uint64_t purgemap_auto_reclaimed_entries;
+	uint64_t purgemap_auto_reclaimed_bytes;
+	uint64_t purgemap_auto_reclaim_deferred_pending;
+	uint64_t purgemap_auto_reclaim_defer_usec;
+	uint64_t purgemap_auto_reclaim_defer_max_usec;
+	uint64_t purgemap_auto_reclaim_defer_last_usec;
+	uint64_t purgemap_auto_reclaim_filter_usec;
+	uint64_t purgemap_auto_reclaim_filter_max_usec;
+	uint64_t purgemap_auto_reclaim_filter_last_usec;
+	uint64_t purgemap_auto_reclaim_transient_bytes;
+	uint64_t purgemap_auto_reclaim_transient_max_bytes;
+	uint64_t purgemap_auto_reclaim_table_slots_before;
+	uint64_t purgemap_auto_reclaim_table_slots_after;
+	uint64_t purgemap_auto_reclaim_table_bytes_before;
+	uint64_t purgemap_auto_reclaim_table_bytes_after;
+	uint64_t purgemap_probe_hard_hits;
+	uint64_t purgemap_probe_soft_hits;
+	uint64_t purgemap_insert_probe_hits;
+	uint64_t purgemap_fellow_attr_objects_written;
+	uint64_t purgemap_fellow_attr_bytes_written;
+	uint64_t purgemap_fellow_direct_probes;
+	uint64_t purgemap_fellow_attr_absent;
+	uint64_t purgemap_fellow_attr_invalid;
+	uint64_t purgemap_fellow_attr_read_failures;
+	uint64_t purgemap_fellow_namespace_records_probed;
+	uint64_t purgemap_fellow_store_invariant_failures;
+	uint64_t purgemap_volatile_fallback_attaches;
+	uint64_t sweep_passes;
+	uint64_t sweep_aborts;
+	uint64_t sweep_scanned;
+	uint64_t sweep_killed;
+	uint64_t sweep_reduced;
+	uint64_t sweep_batches;
+	uint64_t sweep_last_batches;
+	uint64_t sweep_batch_scanned_max;
+	uint64_t sweep_batch_hold_over_2ms;
+	uint64_t sweep_batch_hold_over_5ms;
+	uint64_t sweep_batch_hold_over_10ms;
+	uint64_t sweep_wakeups;
+	uint64_t sweep_iterations;
+	uint64_t sweep_remaining;
+	uint64_t sweep_obj_mtx_wait_usec;
+	uint64_t sweep_obj_mtx_wait_max_usec;
+	uint64_t sweep_obj_mtx_wait_last_usec;
+	uint64_t sweep_obj_mtx_hold_usec;
+	uint64_t sweep_obj_mtx_hold_max_usec;
+	uint64_t sweep_obj_mtx_hold_last_usec;
+	uint64_t sweep_unlocked_gap_usec;
+	uint64_t sweep_unlocked_gap_last_usec;
+	uint64_t sweep_per_object_max_usec;
+	uint64_t sweep_deferred_shrinks;
+	uint64_t sweep_total_usec;
+	uint64_t sweep_total_max_usec;
+	uint64_t sweep_total_last_usec;
+	uint64_t sweep_last_scanned;
+	uint64_t sweep_last_killed;
+	uint64_t sweep_last_reduced;
+	uint64_t sweep_last_objects_before;
+	uint64_t sweep_last_objects_after;
+	uint64_t sweep_last_object_slots_before;
+	uint64_t sweep_last_object_slots_after;
+	uint64_t sweep_last_object_bytes_before;
+	uint64_t sweep_last_object_bytes_after;
+	uint64_t sweep_last_side_buckets_before;
+	uint64_t sweep_last_side_buckets_after;
+	uint64_t sweep_last_side_bytes_before;
+	uint64_t sweep_last_side_bytes_after;
+	uint64_t publication_phase;
+	uint64_t publication_readers_phase0;
+	uint64_t publication_readers_phase1;
+	uint64_t publication_acquires;
+	uint64_t publication_releases;
+	uint64_t reclaim_pending;
+	uint64_t reclaim_phase;
+	uint64_t persist_wal_records;
+	uint64_t persist_wal_bytes;
+	uint64_t persist_checkpoint_entries;
+	uint64_t persist_checkpoint_wal_sequence;
+	uint64_t persist_checkpoint_bytes;
+	uint64_t persist_checkpoint_publications;
+	uint64_t persist_checkpoint_segments_collected;
+	uint64_t persist_orphan_files_collected;
+	uint64_t persist_replay_records;
+	uint64_t persist_failures;
+	uint64_t persist_degraded;
+	uint64_t fellow_replayed_records;
+};
+
+#endif

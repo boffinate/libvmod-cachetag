@@ -1,0 +1,48 @@
+vtest "cachetag VMOD pending attach cleanup for failed fetch"
+
+server s1 {
+	rxreq
+	txresp -status 503 -body "fail"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_backend_response {
+		tags.add("site");
+		set beresp.uncacheable = true;
+	}
+
+	sub vcl_recv {
+		if (req.url == "/probe") {
+			set req.http.pending = tags.pending();
+			set req.http.objects = tags.objects();
+			set req.http.edges = tags.edges();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.Tag-Pending = req.http.pending;
+		set resp.http.Tag-Objects = req.http.objects;
+		set resp.http.Tag-Edges = req.http.edges;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.status == 503
+
+	txreq -url "/probe"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.Tag-Pending == 0
+	expect resp.http.Tag-Objects == 0
+	expect resp.http.Tag-Edges == 0
+} -run

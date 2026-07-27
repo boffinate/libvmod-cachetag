@@ -1,0 +1,81 @@
+vtest "cachetag VMOD backend retry re-keys pending attach"
+
+server s1 {
+	rxreq
+	expect req.url == "/retry"
+	txresp -status 503 -body "first"
+	accept
+
+	rxreq
+	expect req.url == "/retry"
+	txresp -body "second"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE_OLD") {
+			set req.http.purged = tags.purge("old");
+			return (synth(200));
+		}
+		if (req.method == "PURGE_NEW") {
+			set req.http.purged = tags.purge("new");
+			return (synth(200));
+		}
+		if (req.method == "CHECK") {
+			set req.http.pending = tags.pending();
+			set req.http.objects = tags.objects();
+			set req.http.edges = tags.edges();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.retries == 0) {
+			tags.add("old");
+			return (retry);
+		}
+		tags.add("new");
+		set beresp.do_stream = false;
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		set resp.http.pending = req.http.pending;
+		set resp.http.objects = req.http.objects;
+		set resp.http.edges = req.http.edges;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/retry"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "second"
+
+	txreq -req CHECK
+	rxresp
+	expect resp.status == 200
+	expect resp.http.pending == 0
+	expect resp.http.objects == 1
+	expect resp.http.edges == 1
+
+	txreq -req PURGE_OLD
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+
+	txreq -req PURGE_NEW
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_default.publication_readers_phase0 == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.publication_readers_phase1 == 0

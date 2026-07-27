@@ -1,0 +1,33 @@
+vtest "cachetag VMOD duplicate keys collapse per object"
+
+server s1 {
+	rxreq
+	txresp -hdr "Cache-Tag: site, site, other" -body "ok"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_backend_response {
+		tags.add("site");
+		tags.add("site");
+		tags.add_header(beresp.http.Cache-Tag);
+	}
+
+	sub vcl_deliver {
+		set resp.http.Tag-Objects = tags.objects();
+		set resp.http.Tag-Edges = tags.edges();
+	}
+} -start
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.status == 200
+	expect resp.http.Tag-Objects == 1
+	expect resp.http.Tag-Edges == 2
+} -run

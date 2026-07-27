@@ -1,0 +1,32 @@
+diff --git a/src/fellow_storage.c b/src/fellow_storage.c
+index 3a63c0d..ddd45da 100644
+--- a/src/fellow_storage.c
++++ b/src/fellow_storage.c
+@@ -592,8 +592,8 @@ sfemem_objslim(struct worker *wrk, struct objcore *memoc)
+ 		vxid_t xid = ObjGetXID(wrk, memoc);
+ 
+ 		LRU_Remove(memoc);
+-		mutate_to_sfeexp(memoc, xid);
+ 		fellow_cache_obj_wait_written(fco);
++		mutate_to_sfeexp(memoc, xid);
+ 		fellow_cache_obj_deref(stvfe->fc, fco);
+ 
+ 		/* after this point, one or two HSH_Derefs follow from this
+@@ -1348,11 +1348,15 @@ mutate_to_sfeexp(struct objcore *oc, vxid_t xid)
+ {
+ 
+ 	CHECK_OBJ_NOTNULL(oc, OBJCORE_MAGIC);
+-	memset(oc->stobj, 0, sizeof oc->stobj);
+-	oc->stobj->stevedore = &sfeexp_stevedore;
+ 	//lint -e{506}
+ 	assert(sizeof xid == OA_VXID_LEN);
+ 	memcpy(&oc->stobj->priv2, &xid, (size_t)OA_VXID_LEN);
++	/*
++	 * EXP and LRU can call ObjGetXID() while the drain reference handoff is
++	 * in flight, so publish the fallback VXID before switching methods and
++	 * never expose a transient NULL stevedore.
++	 */
++	oc->stobj->stevedore = &sfeexp_stevedore;
+ }
+ 
+ /* ----------------------------------------------------------------------

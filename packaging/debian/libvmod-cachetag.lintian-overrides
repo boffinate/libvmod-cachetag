@@ -1,0 +1,14 @@
+# This package is not in Debian and has no Debian bug tracker, so there are no
+# bugs for its first upload to close. Revisit if the package is ever submitted
+# to Debian proper.
+libvmod-cachetag: initial-upload-closes-no-bugs
+
+# Deliberately NOT overridden here, and the omission is the point:
+#
+#   libvmod-cachetag: wrong-manual-section 3 != 4
+#
+# src/vmod_cachetag.vcc declares "$Module cachetag 4" while src/Makefile.am
+# installs the generated page as vmod_cachetag.3, so the .TH line disagrees
+# with the installed path. Vinyl Cache's own VMODs all declare section 3. The
+# fix is one character in the VCC, upstream, not a packaging override; hiding
+# it here would let a real inconsistency ship unnoticed.

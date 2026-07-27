@@ -1,0 +1,112 @@
+vtest "cachetag VMOD purge_header purges every hard and soft tag"
+
+server s1 {
+	rxreq
+	expect req.url == "/hard-site"
+	txresp -body "hard-site-old"
+
+	rxreq
+	expect req.url == "/hard-other"
+	txresp -body "hard-other-old"
+
+	rxreq
+	expect req.url == "/hard-site"
+	txresp -body "hard-site-new"
+
+	rxreq
+	expect req.url == "/hard-other"
+	txresp -body "hard-other-new"
+
+	rxreq
+	expect req.url == "/soft-site"
+	txresp -body "soft-site-old"
+
+	rxreq
+	expect req.url == "/soft-other"
+	txresp -body "soft-other-old"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE_HARD") {
+			set req.http.purged =
+				tags.purge_header("site,other", mode = hard);
+			return (synth(200));
+		}
+		if (req.method == "PURGE_SOFT") {
+			set req.http.purged =
+				tags.purge_header("site,other", mode = soft);
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/hard-site" || bereq.url == "/soft-site") {
+			tags.add("site");
+		} else if (bereq.url == "/hard-other" ||
+		    bereq.url == "/soft-other") {
+			tags.add("other");
+		}
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/hard-site"
+	rxresp
+	expect resp.body == "hard-site-old"
+
+	txreq -url "/hard-other"
+	rxresp
+	expect resp.body == "hard-other-old"
+
+	txreq -req PURGE_HARD
+	rxresp
+	expect resp.http.purged == -1
+
+	txreq -url "/hard-site"
+	rxresp
+	expect resp.body == "hard-site-new"
+
+	txreq -url "/hard-other"
+	rxresp
+	expect resp.body == "hard-other-new"
+
+	txreq -url "/soft-site"
+	rxresp
+	expect resp.body == "soft-site-old"
+
+	txreq -url "/soft-other"
+	rxresp
+	expect resp.body == "soft-other-old"
+
+	txreq -req PURGE_SOFT
+	rxresp
+	expect resp.http.purged == -1
+
+	txreq -url "/soft-site"
+	rxresp
+	expect resp.body == "soft-site-old"
+
+	txreq -url "/soft-other"
+	rxresp
+	expect resp.body == "soft-other-old"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_probe_soft_hits >= 2

@@ -1,0 +1,120 @@
+vtest "aborted certified sweep does not retire history or reuse blocked phase early"
+
+barrier b_block_tagged sock 2
+barrier b_block_continue sock 2
+
+server s1 {
+	rxreq
+	expect req.url == "/victim"
+	txresp -body "victim"
+	accept
+
+	rxreq
+	expect req.url == "/block"
+	txresp -body "block"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("abort_reclaim", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge("victim", hard);
+			return (synth(200));
+		}
+		if (req.method == "ABORTCOMPACT") {
+			if (!tags.test_abort_next_sweep()) {
+				return (synth(500));
+			}
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		set beresp.ttl = 1h;
+		if (bereq.url == "/victim") {
+			tags.add("victim");
+		}
+		if (bereq.url == "/block") {
+			tags.add("blocker");
+			vtc.barrier_sync("${b_block_tagged_sock}");
+			vtc.barrier_sync("${b_block_continue_sock}");
+		}
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/victim"
+	rxresp
+	expect resp.body == "victim"
+} -run
+
+client c_block {
+	txreq -url "/block"
+	rxresp
+	expect resp.body == "block"
+} -start
+
+barrier b_block_tagged sync
+
+client c2 {
+	txreq -req PURGE
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req ABORTCOMPACT
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_abort_reclaim.sweep_aborts == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_abort_reclaim.purgemap_entries == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_abort_reclaim.reclaim_pending == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_abort_reclaim.publication_phase == 1
+
+client c3 {
+	txreq -req COMPACT
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_abort_reclaim.purgemap_entries == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_abort_reclaim.reclaim_pending == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_abort_reclaim.publication_phase == 1
+
+barrier b_block_continue sync
+client c_block -wait
+
+client c4 {
+	txreq -req COMPACT
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_abort_reclaim.purgemap_entries == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_abort_reclaim.reclaim_pending == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_abort_reclaim.publication_readers_phase0 == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_abort_reclaim.publication_readers_phase1 == 0
+
+server s1 -wait

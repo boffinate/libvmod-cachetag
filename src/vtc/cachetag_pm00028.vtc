@@ -1,0 +1,166 @@
+vtest "Stream 5 combined object segment allocation failure is transactional"
+
+server s1 -repeat 58 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new emergency = cachetag.namespace("stream5_emergency", sweep_interval = 0s);
+		new prepared = cachetag.namespace("stream5_prepared", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		unset req.http.hit;
+		if (req.method == "ARM_EMERGENCY") {
+			if (!emergency.test_fail_next_object_segment_alloc()) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "ARM_PREPARED") {
+			if (!prepared.test_fail_next_object_segment_alloc()) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "DRAIN_PREPARED") {
+			if (!prepared.test_resize_worker_drain(5000)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "STATS_EMERGENCY") {
+			set req.http.objects = emergency.objects();
+			set req.http.edges = emergency.edges();
+			return (synth(200));
+		}
+		if (req.method == "STATS_PREPARED") {
+			set req.http.objects = prepared.objects();
+			set req.http.edges = prepared.edges();
+			return (synth(200));
+		}
+		if (req.http.Load) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_hash {
+		if (req.http.Load) {
+			hash_data(req.xid);
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.http.Namespace == "prepared") {
+			prepared.add("prepared");
+		} else {
+			emergency.add("emergency");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		set req.http.hit = "1";
+	}
+
+	sub vcl_deliver {
+		set resp.http.hit = req.http.hit;
+	}
+
+	sub vcl_synth {
+		set resp.http.objects = req.http.objects;
+		set resp.http.edges = req.http.edges;
+		return (deliver);
+	}
+} -start
+
+client c_emergency_fail {
+	txreq -req ARM_EMERGENCY
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/emergency-fail" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -req STATS_EMERGENCY
+	rxresp
+	expect resp.http.objects == 0
+	expect resp.http.edges == 0
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_table_slots == 0
+vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_table_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_count_sidecar_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.object_segment_alloc_failures == 1
+vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_attach_failures == 1
+
+client c_emergency_retry {
+	txreq -url "/emergency-ok" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -req STATS_EMERGENCY
+	rxresp
+	expect resp.http.objects == 1
+	expect resp.http.edges == 1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_table_slots == 64
+vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_table_bytes == 1536
+vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_count_sidecar_bytes == 64
+vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.object_published_bytes == 1536
+vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.object_count_published_bytes == 64
+
+client c_prepared_keep {
+	txreq -url "/prepared-keep" -hdr "Namespace: prepared"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_prepared_below_runway -repeat 54 {
+	txreq -url "/prepared-load" -hdr "Namespace: prepared" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_objects == 55
+vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_object_table_slots == 64
+
+client c_prepared_fail_and_recover {
+	txreq -req ARM_PREPARED
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/prepared-trigger" -hdr "Namespace: prepared" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -req DRAIN_PREPARED
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/prepared-keep" -hdr "Namespace: prepared"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.hit == 1
+
+	txreq -req STATS_PREPARED
+	rxresp
+	expect resp.http.objects == 56
+	expect resp.http.edges == 56
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.object_segment_alloc_failures >= 1
+vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_attach_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_object_table_slots == 128
+vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_object_table_bytes == 3072
+vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_object_count_sidecar_bytes == 128
+vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.object_published_bytes == 3072
+vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.object_count_published_bytes == 128
+
+server s1 -wait

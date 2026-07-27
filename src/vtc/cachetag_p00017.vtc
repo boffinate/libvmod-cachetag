@@ -1,0 +1,246 @@
+vtest "cachetag purgemap Fellow fails closed on malformed FDO envelope matrix"
+
+server s1 {
+	rxreq
+	expect req.url == "/record-len"
+	txresp -hdr "Connection: close" -body "old-record-len"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/fold-count"
+	txresp -hdr "Connection: close" -body "old-fold-count"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/envelope-flags"
+	txresp -hdr "Connection: close" -body "old-envelope-flags"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/envelope-reserved"
+	txresp -hdr "Connection: close" -body "old-envelope-reserved"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/record-flags"
+	txresp -hdr "Connection: close" -body "old-record-flags"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/duplicate-namespace"
+	txresp -hdr "Connection: close" -body "old-duplicate-namespace"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/record-len"
+	txresp -hdr "Connection: close" -body "new-record-len"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/fold-count"
+	txresp -hdr "Connection: close" -body "new-fold-count"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/envelope-flags"
+	txresp -hdr "Connection: close" -body "new-envelope-flags"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/envelope-reserved"
+	txresp -hdr "Connection: close" -body "new-envelope-reserved"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/record-flags"
+	txresp -hdr "Connection: close" -body "new-record-flags"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/duplicate-namespace"
+	txresp -body "new-duplicate-namespace"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/purgemap-corruption-matrix.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+		sub vcl_init {
+			slash.tune_fellow(storage.fellow);
+			new left = cachetag.namespace("left_pm",
+			    persist_path = "${tmpdir}/left-persist",
+			    sweep_interval = 0s);
+			new right = cachetag.namespace("right_pm",
+			    persist_path = "${tmpdir}/right-persist",
+			    sweep_interval = 0s);
+		}
+
+		sub vcl_recv {
+			if (req.method == "PURGE") {
+				set req.http.purged = left.purge(req.url);
+				return (synth(200));
+			}
+		}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/record-len") {
+			left.test_next_fellow_attr_corruption(record_len);
+		} else if (bereq.url == "/fold-count") {
+			left.test_next_fellow_attr_corruption(fold_count);
+		} else if (bereq.url == "/envelope-flags") {
+			left.test_next_fellow_attr_corruption(envelope_flags);
+		} else if (bereq.url == "/envelope-reserved") {
+			left.test_next_fellow_attr_corruption(envelope_reserved);
+		} else if (bereq.url == "/record-flags") {
+			left.test_next_fellow_attr_corruption(record_flags);
+		} else if (bereq.url == "/duplicate-namespace") {
+			left.test_next_fellow_attr_corruption(duplicate_namespace);
+		}
+		left.add(bereq.url);
+		right.add(bereq.url);
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (left.stale() || right.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/record-len"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "old-record-len"
+
+	txreq -url "/fold-count"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "old-fold-count"
+
+	txreq -url "/envelope-flags"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "old-envelope-flags"
+
+	txreq -url "/envelope-reserved"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "old-envelope-reserved"
+
+	txreq -url "/record-flags"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "old-record-flags"
+
+	txreq -url "/duplicate-namespace"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "old-duplicate-namespace"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_attr_objects_written == 6
+vinyl v1 -expect CACHETAG.vcl1_right_right_pm.purgemap_fellow_attr_objects_written == 6
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_edges == 0
+
+vinyl v1 -stop
+vinyl v1 -start
+vinyl v1 -expect n_vampireobject == 6
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_edges == 0
+
+client c2 {
+	txreq -req PURGE -url "/record-len"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+	txreq -url "/record-len"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "new-record-len"
+
+	txreq -req PURGE -url "/fold-count"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+	txreq -url "/fold-count"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "new-fold-count"
+
+	txreq -req PURGE -url "/envelope-flags"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+	txreq -url "/envelope-flags"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "new-envelope-flags"
+
+	txreq -req PURGE -url "/envelope-reserved"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+	txreq -url "/envelope-reserved"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "new-envelope-reserved"
+
+	txreq -req PURGE -url "/record-flags"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+	txreq -url "/record-flags"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "new-record-flags"
+
+	txreq -req PURGE -url "/duplicate-namespace"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+	txreq -url "/duplicate-namespace"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "new-duplicate-namespace"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_direct_probes >= 6
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_attr_invalid >= 6
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_attr_read_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_probe_hard_hits >= 6
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_store_invariant_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_side_table_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_side_table_bytes == 0
+
+server s1 -wait

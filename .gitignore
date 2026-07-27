@@ -1,0 +1,55 @@
+.deps/
+.dirstamp
+.libs/
+autom4te.cache/
+build-aux/
+_build/
+build/
+m4/
+
+*.la
+*.lo
+*.o
+*.tar.gz
+*~
+
+Makefile
+Makefile.in
+aclocal.m4
+config.h
+config.h.in
+config.log
+config.status
+configure
+libtool
+libvmod-cachetag-*/
+stamp-h1
+
+# test suite
+
+*.log
+*.trs
+
+# vmodtool
+
+vcc_*_if.[ch]
+vmod_*.rst
+
+# vsctool
+
+VSC_*.[ch]
+VSC_*.rst
+
+# man
+
+*.1
+*_options.rst
+*_synopsis.rst
+vmod_*.3
+vmod_vcs_version.txt
+
+benchmarks/results/
+benchmarks/remote-results/
+
+# macOS
+.DS_Store

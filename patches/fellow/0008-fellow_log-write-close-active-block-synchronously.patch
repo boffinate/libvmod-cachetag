@@ -1,0 +1,35 @@
+From 38ef8e7ba1692bf8def789204bb803c6d90a5184 Mon Sep 17 00:00:00 2001
+From: Peter Bowyer <peter@mapledesign.co.uk>
+Date: Sat, 27 Jun 2026 15:51:49 +0100
+Subject: [PATCH 8/8] fellow_log: write close active block synchronously
+
+The close path does not benefit from submitting the final active log block
+asynchronously: close immediately waits for the write before it can finish
+the logbuffer and join the watcher thread.
+
+Large restart benchmarks exposed a shutdown hang where this final close write
+remained outstanding until the VTC stop timeout killed the child. Keep normal
+open-time flushing asynchronous, but force the close-time active block write
+through the synchronous submit path.
+---
+ src/fellow_log.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/fellow_log.c b/src/fellow_log.c
+index 6e93c8c..20af99e 100644
+--- a/src/fellow_log.c
++++ b/src/fellow_log.c
+@@ -2755,8 +2755,10 @@ flush_active(const struct fellow_fd *ffd, struct fellow_logbuffer *lbuf,
+ 			type = FAIOT_DLB_FINISH;
+ 		}
+ 	}
+-	else if (opts & FAIO_CLOSE)
++	else if (opts & FAIO_CLOSE) {
++		opts |= FAIO_SYNC;
+ 		type = FAIOT_DLB_FINISH;
++	}
+ 	else if (opts & FAIO_SYNC)
+ 		type = FAIOT_NONE;
+ 	else
+-- 
+2.39.5

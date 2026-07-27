@@ -1,0 +1,154 @@
+vtest "fingerprint collisions and tombstones preserve exact object identity"
+
+server s1 -repeat 9 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("side_fingerprint_collisions",
+		    sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		unset req.http.hit;
+		if (req.method == "INIT") {
+			if (!tags.test_side_initial_buckets(16) ||
+			    !tags.test_side_fingerprint_bits(0)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+		if (req.http.Load) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add(bereq.url);
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		set req.http.hit = "1";
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_deliver {
+		set resp.http.hit = req.http.hit;
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_init {
+	txreq -req INIT
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_load_initial {
+	txreq -url "/drop-1" -hdr "Load: 1"
+	rxresp
+	txreq -url "/drop-2" -hdr "Load: 1"
+	rxresp
+	txreq -url "/drop-3" -hdr "Load: 1"
+	rxresp
+	txreq -url "/keep-1" -hdr "Load: 1"
+	rxresp
+	txreq -url "/keep-2" -hdr "Load: 1"
+	rxresp
+	txreq -url "/keep-3" -hdr "Load: 1"
+	rxresp
+} -run
+
+client c_make_tombstones {
+	txreq -req PURGE -hdr "Tag: /drop-1"
+	rxresp
+	expect resp.http.result == -1
+	txreq -req PURGE -hdr "Tag: /drop-2"
+	rxresp
+	expect resp.http.result == -1
+	txreq -req PURGE -hdr "Tag: /drop-3"
+	rxresp
+	expect resp.http.result == -1
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 3
+} -run
+
+client c_survivors_hit {
+	txreq -url "/keep-1"
+	rxresp
+	expect resp.http.hit == 1
+	txreq -url "/keep-2"
+	rxresp
+	expect resp.http.hit == 1
+	txreq -url "/keep-3"
+	rxresp
+	expect resp.http.hit == 1
+} -run
+
+client c_reuse_probe_chains {
+	txreq -url "/replacement-1" -hdr "Load: 1"
+	rxresp
+	txreq -url "/replacement-2" -hdr "Load: 1"
+	rxresp
+	txreq -url "/replacement-3" -hdr "Load: 1"
+	rxresp
+
+	txreq -req PURGE -hdr "Tag: /replacement-2"
+	rxresp
+	expect resp.http.result == -1
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 1
+
+	txreq -req PURGE -hdr "Tag: /absent"
+	rxresp
+	expect resp.http.result == -1
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 0
+} -run
+
+client c_exact_identity_survives {
+	txreq -url "/keep-1"
+	rxresp
+	expect resp.http.hit == 1
+	txreq -url "/keep-2"
+	rxresp
+	expect resp.http.hit == 1
+	txreq -url "/keep-3"
+	rxresp
+	expect resp.http.hit == 1
+	txreq -url "/replacement-1"
+	rxresp
+	expect resp.http.hit == 1
+	txreq -url "/replacement-3"
+	rxresp
+	expect resp.http.hit == 1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_side_fingerprint_collisions.volatile_objects == 5
+vinyl v1 -expect CACHETAG.vcl1_tags_side_fingerprint_collisions.volatile_edges == 5
+vinyl v1 -expect CACHETAG.vcl1_tags_side_fingerprint_collisions.volatile_side_table_bytes == 128
+vinyl v1 -expect CACHETAG.vcl1_tags_side_fingerprint_collisions.volatile_attach_failures == 0
+
+server s1 -wait

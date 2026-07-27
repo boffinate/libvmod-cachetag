@@ -1,0 +1,33 @@
+From 5706bb8d9ce5f77d0fe33b70637d104810e2c59d Mon Sep 17 00:00:00 2001
+From: Peter Bowyer <peter@mapledesign.co.uk>
+Date: Wed, 24 Jun 2026 14:38:52 +0100
+Subject: [PATCH 6/7] fellow_logwatcher: stop without pre-close rewrite
+
+
+diff --git a/src/fellow_log.c b/src/fellow_log.c
+index 78cbc69..f9adfd5 100644
+--- a/src/fellow_log.c
++++ b/src/fellow_log.c
+@@ -6385,8 +6385,6 @@ fellow_logwatcher_rewrite_work(void *priv)
+ 
+ 	AZ(pthread_mutex_lock(&ffd->logmtx));
+ 	ffd->rewrite_state = FLW_S_NOREWRITE;
+-	if (ffd->watcher_running == 2)
+-		ffd->watcher_running = 1;
+ 	AZ(pthread_cond_broadcast(&ffd->watcher_cond));
+ 	AZ(pthread_mutex_unlock(&ffd->logmtx));
+ 	return (NULL);
+@@ -6537,11 +6535,6 @@ fellow_logwatcher_fini(struct fellow_fd *ffd)
+ 	CHECK_OBJ_NOTNULL(ffd, FELLOW_FD_MAGIC);
+ 
+ 	AZ(pthread_mutex_lock(&ffd->logmtx));
+-	ffd->watcher_running = 2;
+-	AZ(pthread_cond_signal(&ffd->watcher_cond));
+-	while (ffd->watcher_running == 2)
+-		AZ(pthread_cond_wait(&ffd->watcher_cond, &ffd->logmtx));
+-	assert(ffd->watcher_running == 1);
+ 	ffd->watcher_running = 0;
+ 	AZ(pthread_cond_signal(&ffd->watcher_cond));
+ 	AZ(pthread_mutex_unlock(&ffd->logmtx));
+-- 
+2.50.1 (Apple Git-155)

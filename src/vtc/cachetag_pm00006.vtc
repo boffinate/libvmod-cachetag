@@ -1,0 +1,115 @@
+vtest "purgemap capped pruning raises floors and rebuilds in one pass"
+
+server s1 {
+	rxreq
+	txresp -body "old"
+
+	rxreq
+	txresp -body "new"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default", sweep_interval = 0s, purge_history_max_entries = 4);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge(req.http.Tag);
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("kept");
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "old"
+
+	txreq -req PURGE -hdr "Tag: t01"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t02"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t03"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t04"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t05"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t06"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t07"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t08"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t09"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t10"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t11"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t12"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t13"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t14"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t15"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t16"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t17"
+	rxresp
+	expect resp.http.purged == -1
+	txreq -req PURGE -hdr "Tag: t18"
+	rxresp
+	expect resp.http.purged == -1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_prunes >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_pruned_entries >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_hard_floor >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_rebuilds_shrink >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_entries <= 4
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_empty_slots >= 2
+
+client c2 {
+	txreq
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "new"
+} -run

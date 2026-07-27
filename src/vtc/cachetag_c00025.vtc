@@ -1,0 +1,66 @@
+vtest "cachetag VMOD reports retained per-tag purge generations"
+
+server s1 {
+	rxreq
+	txresp
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("generation",
+		    sweep_interval = 0s,
+		    purge_history_max_entries = 0);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge(req.http.tag);
+		}
+		if (req.method == "SOFT") {
+			set req.http.result = tags.purge(req.http.tag, mode = soft);
+		}
+		set req.http.generation = tags.generation(req.http.tag);
+		return (synth(200));
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		set resp.http.generation = req.http.generation;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -hdr "Tag: alpha"
+	rxresp
+	expect resp.http.generation == 0
+
+	txreq -req PURGE -hdr "Tag: alpha"
+	rxresp
+	expect resp.http.result == -1
+	expect resp.http.generation == 1
+
+	txreq -hdr "Tag: alpha"
+	rxresp
+	expect resp.http.generation == 1
+
+	txreq -hdr "Tag: beta"
+	rxresp
+	expect resp.http.generation == 0
+
+	txreq -req SOFT -hdr "Tag: beta"
+	rxresp
+	expect resp.http.result == -1
+	expect resp.http.generation == 2
+
+	txreq -req SOFT -hdr "Tag: alpha"
+	rxresp
+	expect resp.http.result == -1
+	expect resp.http.generation == 3
+
+	txreq
+	rxresp
+	expect resp.http.generation == -3
+} -run

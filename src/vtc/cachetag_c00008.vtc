@@ -1,0 +1,48 @@
+vtest "cachetag VMOD backend_error attach path cleans pending state"
+
+vinyl v1 -vcl {
+	import cachetag;
+
+	backend default { .host = "${bad_backend}"; }
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge("error");
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_error {
+		tags.add("error");
+		set beresp.status = 299;
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_deliver {
+		set resp.http.Tag-Pending = tags.pending();
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.status == 299
+	expect resp.http.Tag-Pending == 0
+
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+		expect resp.http.purged == -1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_default.publication_readers_phase0 == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.publication_readers_phase1 == 0

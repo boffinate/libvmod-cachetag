@@ -1,0 +1,46 @@
+vtest "cachetag failed persistent warmup releases object-event subscription"
+
+server s1 {
+	rxreq
+	expect req.url == "/after-failed-warm"
+	txresp -body "healthy"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new live = cachetag.namespace("volatile");
+	}
+
+	sub vcl_backend_response {
+		live.add("healthy-tag");
+		set beresp.ttl = 1h;
+	}
+} -start
+
+vinyl v1 -errvcl {VCL "vcl2" Failed initialization} {
+	import cachetag;
+
+	backend default {
+		.host = "${s1_addr}";
+		.port = "${s1_port}";
+	}
+
+	sub vcl_init {
+		new doomed = cachetag.namespace("doomed_pm",
+		    persist_path = "${tmpdir}/doomed-persist",
+		    sweep_interval = 0s);
+	}
+}
+
+client c1 {
+	txreq -url "/after-failed-warm"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "healthy"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_live_volatile.volatile_objects == 1
+
+server s1 -wait

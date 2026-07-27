@@ -1,0 +1,43 @@
+vtest "cachetag VMOD stale false path"
+
+server s1 {
+	rxreq
+	expect req.url == "/probe"
+	txresp -body "probe1"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_backend_response {
+		tags.add("probe39");
+	}
+
+	sub vcl_hit {
+		set req.http.stale = tags.stale();
+	}
+
+	sub vcl_deliver {
+		set resp.http.Stale = req.http.stale;
+	}
+} -start
+
+client c1 {
+	txreq -url "/probe"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "probe1"
+
+	txreq -url "/probe"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "probe1"
+	expect resp.http.Stale == false
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_calls == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_detected == 0

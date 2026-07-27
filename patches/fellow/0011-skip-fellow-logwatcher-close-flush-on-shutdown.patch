@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Peter Bowyer <peter@mapledesign.co.uk>
+Date: Mon, 6 Jul 2026 12:00:00 +0100
+Subject: [PATCH 11/11] fellow_logwatcher: skip close flush after shutdown
+
+Storage warn-close already asks the logwatcher to stop scheduling new rewrite
+work and performs a normal log flush before shutdown continues. That flush could
+return early when the logbuffer only had an active block, so the watcher thread
+still performed the only durable active-block/header publication via final
+`LBUF_FLUSH_CLOSE` while `fellow_logwatcher_fini()` was waiting in
+`pthread_join()`. Large stop-after-purge runs could spend the manager's entire
+child-stop grace period in that close-time logbuffer drain and be killed by
+vinyltest.
+
+Include active log blocks in `fellow_log_flush()`, so warn-close publishes them
+before it marks the watcher as shutting down. Once that shutdown mark is set, do
+not start an additional close flush from the watcher exit path. Abandon the
+remaining in-memory open logbuffer state and finalize the logbuffer instead.
+This still waits for already submitted flush-finish work and outstanding IO
+needed for safe ownership teardown, but avoids adding new close-time
+active-block/header drain work after the child is already stopping.
+---
+ src/fellow_log.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/fellow_log.c b/src/fellow_log.c
+index e1d013f..9eb9c9b 100644
+--- a/src/fellow_log.c
++++ b/src/fellow_log.c
+@@ -6593,7 +6593,10 @@ fellow_log_flush(struct fellow_fd *ffd)
+ 
+ 	// racy
+ 	lbuf = ffd->logbuf;
+-	if (lbuf->n == 0 && lbuf->regions_to_free == NULL)
++	if (lbuf->n == 0 &&
++	    (lbuf->active.block == NULL ||
++	    lbuf->active.block->nentries == 0) &&
++	    lbuf->regions_to_free == NULL)
+ 		return;
+ 
+ 	lbuf = NULL;
+@@ -6649,7 +6649,11 @@ fellow_logwatcher_thread(void *priv)
+ 	 */
+ 	assert(ffd->logbuf->state == LBUF_OPEN ||
+ 	    ffd->logbuf->state == LBUF_PEND);
+-	logbuffer_flush(ffd, ffd->logbuf, LBUF_FLUSH_CLOSE, LBUF_ALL);
++	if (ffd->watcher_shutdown)
++		logbuffer_abandon(ffd->logbuf);
++	else
++		logbuffer_flush(ffd, ffd->logbuf, LBUF_FLUSH_CLOSE,
++		    LBUF_ALL);
+ 	ffd->logbuf->state = LBUF_FINI;
+ 	logbuffer_fini(ffd->logbuf);
+ 
+-- 
+2.50.1 (Apple Git-155)

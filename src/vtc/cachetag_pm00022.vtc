@@ -1,0 +1,222 @@
+vtest "side migration handles rebuild, shrink, and allocation failure"
+
+server s1 -repeat 8 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("side_migrate_rebuild", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		unset req.http.hit;
+		unset req.http.miss;
+		if (req.method == "INIT") {
+			if (!tags.test_side_initial_buckets(16)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "FAILNEXT") {
+			if (!tags.test_fail_next_side_migration_alloc()) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "START16") {
+			if (!tags.test_side_start_migration(16)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "START8") {
+			if (!tags.test_side_start_migration(8)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "MIGRATEALL") {
+			set req.http.result = tags.test_side_migrate_buckets(64);
+			return (synth(200));
+		}
+		if (req.method == "ACTIVE") {
+			set req.http.result = tags.test_side_migration_active();
+			return (synth(200));
+		}
+		if (req.method == "COUNT") {
+			set req.http.result = tags.test_side_table_buckets();
+			return (synth(200));
+		}
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+		if (req.http.Load) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_miss {
+		set req.http.miss = "1";
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url ~ "^/drop") {
+			tags.add("drop");
+		} else {
+			tags.add("keep");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		set req.http.hit = "1";
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_deliver {
+		set resp.http.hit = req.http.hit;
+		set resp.http.miss = req.http.miss;
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_init {
+	txreq -req INIT
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_load {
+	txreq -url "/drop-1" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/drop-2" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/drop-3" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/drop-4" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/keep-1" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/keep-2" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_make_tombstones {
+	txreq -req PURGE -hdr "Tag: drop"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 4
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.volatile_objects == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.volatile_side_table_buckets == 16
+
+client c_failed_alloc {
+	txreq -req FAILNEXT
+	rxresp
+	expect resp.status == 200
+
+	txreq -req START16
+	rxresp
+	expect resp.status == 500
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.side_destination_alloc_failures >= 1
+
+client c_rebuild {
+	txreq -req START16
+	rxresp
+	expect resp.status == 200
+
+	txreq -req ACTIVE
+	rxresp
+	expect resp.http.result == 1
+
+	txreq -req COUNT
+	rxresp
+	expect resp.http.result == 32
+} -run
+
+client c_finish_rebuild {
+	txreq -req MIGRATEALL
+	rxresp
+	expect resp.http.result == 1
+
+	txreq -req ACTIVE
+	rxresp
+	expect resp.http.result == 0
+
+	txreq -req COUNT
+	rxresp
+	expect resp.http.result == 16
+} -run
+
+client c_load_after_rebuild {
+	txreq -url "/keep-3" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.volatile_objects == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.volatile_attach_failures == 0
+
+client c_shrink {
+	txreq -req START8
+	rxresp
+	expect resp.status == 200
+
+	txreq -req MIGRATEALL
+	rxresp
+	expect resp.http.result == 1
+
+	txreq -req ACTIVE
+	rxresp
+	expect resp.http.result == 0
+
+	txreq -req COUNT
+	rxresp
+	expect resp.http.result == 8
+} -run
+
+client c_absent_and_live_lookup {
+	txreq -url "/absent"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.miss == 1
+
+	txreq -url "/keep-1"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.hit == 1
+} -run
+
+server s1 -wait

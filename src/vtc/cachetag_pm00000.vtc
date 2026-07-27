@@ -1,0 +1,60 @@
+vtest "purgemap unknown hard purge before registration stays fresh"
+
+server s1 {
+	rxreq
+	txresp -body "one"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge("site");
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("site");
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_deliver {
+		set resp.http.Tag-Objects = tags.objects();
+		set resp.http.Tag-Edges = tags.edges();
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+
+	txreq
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "one"
+	expect resp.http.Tag-Objects == 1
+	expect resp.http.Tag-Edges == 1
+
+	txreq
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "one"
+} -run

@@ -1,0 +1,71 @@
+From d582e322cafb66aa04ce433035aae10fdb7e88bb Mon Sep 17 00:00:00 2001
+From: Peter Bowyer <peter@mapledesign.co.uk>
+Date: Wed, 24 Jun 2026 14:37:52 +0100
+Subject: [PATCH 4/6] fellow_logcache: bound entries by scratch capacity
+
+
+diff --git a/src/fellow_log.c b/src/fellow_log.c
+index e1d013f..d8bcdda 100644
+--- a/src/fellow_log.c
++++ b/src/fellow_log.c
+@@ -1238,7 +1238,7 @@ fellow_logcache_init(struct fellow_logcache *flc, struct fellow_fd *ffd,
+ {
+ 	struct fellow_logcache_entry *fle;
+ 	size_t sz;
+-	unsigned n, u;
++	unsigned n, pool_space, u;
+ 
+ 	AN(ffd);
+ 	AN(flc);
+@@ -1249,7 +1249,11 @@ fellow_logcache_init(struct fellow_logcache *flc, struct fellow_fd *ffd,
+ 	n = (typeof(n))sz;
+ 	if (n > BUDDY_REQS_MAX)
+ 		n = BUDDY_REQS_MAX;
+-	else if (n < 2)
++	pool_space = logblk_mempool_space(mempool);
++	AN(pool_space);
++	if (n > pool_space)
++		n = pool_space;
++	if (n < 2)
+ 		n = 2;	// fellow_logcache_(take|steal) assume 2 entries min
+ 
+ 	INIT_OBJ(flc, FELLOW_LOGCACHE_MAGIC);
+@@ -1277,6 +1281,8 @@ fellow_logcache_init(struct fellow_logcache *flc, struct fellow_fd *ffd,
+ 
+ 	assert(sz < UINT_MAX);
+ 	flc->n = (unsigned)sz;
++	if (flc->n > n)
++		flc->n = n;
+ 
+ 	for (fle = flc->alloc_entry.ptr, u = 0;
+ 	     u < flc->n;
+@@ -1340,6 +1346,8 @@ fellow_logcache_steal(struct fellow_logcache *flc, int direction)
+ 	else
+ 		fle = VTAILQ_LAST(&flc->used, flehead);
+ 
++	if (fle == NULL)
++		return (NULL);
+ 	CHECK_OBJ_NOTNULL(fle, FELLOW_LOGCACHE_ENTRY_MAGIC);
+ 
+ 	if (fle == flc->current)
+@@ -1372,8 +1380,15 @@ fellow_logcache_take(struct fellow_logcache *flc, int direction, int need)
+ 	if (fle == NULL)
+ 		return (fellow_logcache_steal(flc, direction));
+ 
+-	if (need == 0 && ! logblk_mempool_avail(flc->mempool))
+-		return (NULL);
++	if (! logblk_mempool_avail(flc->mempool)) {
++		struct fellow_logcache_entry *stolen;
++
++		if (need == 0)
++			return (NULL);
++		stolen = fellow_logcache_steal(flc, direction);
++		if (stolen != NULL)
++			return (stolen);
++	}
+ 
+ 	VTAILQ_REMOVE(&flc->free, fle, list);
+ 	AZ(fle->alloc.ptr);
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,312 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Peter Bowyer <peter@mapledesign.co.uk>
+Date: Sat, 27 Jun 2026 18:13:00 +0100
+Subject: [PATCH 9/9] fellow: fix high-fanout shutdown reset
+
+Large cachetag purge benchmarks can leave Fellow close racing with Vinyl
+worker-pool shutdown and with Fellow memory LRU threads that are still waiting
+on buddy pressure. Stop the Fellow cache explicitly during storage warn-close,
+join its LRU threads before final storage destruction, and tolerate worker
+queue refusal by returning the async request slot to the IO thread pool so
+callers can fall back to synchronous work.
+
+The disk drain also needs more idle polls for large purge/validation workloads
+before the final LRU free. Keep the final Fellow cache destruction before
+LRU_Free(), so any remaining cache-owned LRU entries are removed before Vinyl
+asserts that the storage LRU is empty.
+---
+ src/fellow_cache.c      | 58 +++++++++++++++++++++++++++++++++++++++----------
+ src/fellow_cache.h      |  1 +
+ src/fellow_io_threads.c | 34 ++++++++++++++++++++++++-----
+ src/fellow_log.c        | 15 +++++++++++----
+ src/fellow_storage.c    | 16 ++++++++------
+ 5 files changed, 98 insertions(+), 27 deletions(-)
+
+diff --git a/src/fellow_cache.c b/src/fellow_cache.c
+index fc84c0e..11e78ae 100644
+--- a/src/fellow_cache.c
++++ b/src/fellow_cache.c
+@@ -115,19 +115,28 @@ fellow_cache_lru_new(struct fellow_cache *fc)
+ }
+ 
+ static void
+-fellow_cache_lru_fini(struct fellow_cache_lru **lrup)
++fellow_cache_lru_shutdown(struct fellow_cache_lru *lru)
+ {
+-	struct fellow_cache_lru *lru;
+ 	void *r;
+ 
+-	TAKE_OBJ_NOTNULL(lru, lrup, FELLOW_CACHE_LRU_MAGIC);
++	CHECK_OBJ_NOTNULL(lru, FELLOW_CACHE_LRU_MAGIC);
+ 	if (lru->lru_thread != 0) {
+ 		AZ(pthread_mutex_lock(&lru->lru_mtx));
+ 		AZ(pthread_cond_signal(&lru->lru_cond));
+ 		AZ(pthread_mutex_unlock(&lru->lru_mtx));
+ 		AZ(pthread_join(lru->lru_thread, &r));
+ 		AZ(r);
++		lru->lru_thread = 0;
+ 	}
++}
++
++static void
++fellow_cache_lru_fini(struct fellow_cache_lru **lrup)
++{
++	struct fellow_cache_lru *lru;
++
++	TAKE_OBJ_NOTNULL(lru, lrup, FELLOW_CACHE_LRU_MAGIC);
++	fellow_cache_lru_shutdown(lru);
+ 	assert(VTAILQ_EMPTY(&lru->lru_head));
+ 	AZ(lru->n);
+ 	AZ(pthread_cond_destroy(&lru->lru_cond));
+@@ -1556,6 +1565,19 @@ fellow_cache_lrus_init(struct fellow_cache_lrus *lrus)
+ 	AZ(pthread_mutex_init(&lrus->mtx, &fc_mtxattr_errorcheck));
+ }
+ 
++static void
++fellow_cache_lrus_shutdown(struct fellow_cache_lrus *lrus)
++{
++	unsigned u;
++
++	CHECK_OBJ_NOTNULL(lrus, FELLOW_CACHE_LRUS_MAGIC);
++	for (u = 0; u < 1 << MAX_NLRU_EXPONENT; u++) {
++		if (lrus->lru[u] == NULL)
++			continue;
++		fellow_cache_lru_shutdown(lrus->lru[u]);
++	}
++}
++
+ static void
+ fellow_cache_lrus_fini(struct fellow_cache_lrus *lrus)
+ {
+@@ -5795,11 +5817,15 @@ fellow_cache_lru_thread(struct worker *wrk, void *priv)
+ 		VSL_Flush(wrk->vsl, 0);
+ #endif
+ 		stvfe_sumstat(wrk);
++		if (! fc->running)
++			break;
+ 		buddy_wait_needspace(buddy);
++		if (! fc->running)
++			break;
+ 		fc->stats->c_mem_lru_wakeups++;
+ 
+ 		// drain reserve
+-		while (filled > 0 && buddy->waiting > 0) {
++		while (fc->running && filled > 0 && buddy->waiting > 0) {
+ 			i = --filled;
+ 
+ 			AN(r);
+@@ -5816,7 +5842,7 @@ fellow_cache_lru_thread(struct worker *wrk, void *priv)
+ #endif
+ 
+ 		evicted = 0;
+-		while (buddy->waiting)
++		while (fc->running && buddy->waiting)
+ 			evicted += fellow_cache_lru_work(wrk, lru, 1);
+ 		fc->stats->c_mem_lru_evict_reserve_drained += evicted;
+ 	}
+@@ -8766,19 +8792,29 @@ fellow_cache_init(struct fellow_fd *ffd, buddy_t *membuddy,
+ /*
+  * the LRU thread is started by the storage layer after loading
+  */
++void
++fellow_cache_shutdown(struct fellow_cache *fc)
++{
++	CHECK_OBJ_NOTNULL(fc, FELLOW_CACHE_MAGIC);
++
++	fc->running = 0;
++	buddy_kick(fc->membuddy);
++
++	AZ(pthread_mutex_lock(&fc->async_mtx));
++	AZ(pthread_cond_signal(&fc->async_cond));
++	AZ(pthread_mutex_unlock(&fc->async_mtx));
++
++	fellow_cache_lrus_shutdown(fc->lrus);
++}
++
+ void
+ fellow_cache_fini(struct fellow_cache **fcp)
+ {
+ 	struct fellow_cache *fc;
+-	int i;
+ 
+ 	TAKE_OBJ_NOTNULL(fc, fcp, FELLOW_CACHE_MAGIC);
+ 
+-	fc->running = 0;
+-	for (i = 0; i < 5; i++) {
+-		buddy_kick(fc->membuddy);
+-		(void) usleep(10*1000);
+-	}
++	fellow_cache_shutdown(fc);
+ 	fellow_cache_async_fini(fc);
+ 	AZ(pthread_key_delete(fc->iter_reqs_key));
+ 	fellow_cache_lrus_fini(fc->lrus);
+diff --git a/src/fellow_cache.h b/src/fellow_cache.h
+index 9bdefea..fe9e164 100644
+--- a/src/fellow_cache.h
++++ b/src/fellow_cache.h
+@@ -62,6 +62,7 @@ struct fellow_cache *
+ fellow_cache_init(struct fellow_fd *, buddy_t *, struct stvfe_tune *,
+     fellow_task_run_t, struct VSC_fellow *stats);
+ void fellow_cache_fini(struct fellow_cache **);
++void fellow_cache_shutdown(struct fellow_cache *);
+ 
+ void fellow_cache_obj_wait_written(struct fellow_cache_obj *fco);
+ void fellow_cache_obj_delete(struct fellow_cache *fc,
+diff --git a/src/fellow_io_threads.c b/src/fellow_io_threads.c
+index a7ba764..4f648e1 100644
+--- a/src/fellow_io_threads.c
++++ b/src/fellow_io_threads.c
+@@ -26,7 +26,7 @@
+ #include <pthread.h>
+ #include <limits.h>
+ #include <fcntl.h>
+-//#include <string.h>
++#include <string.h>
+ 
+ // vinyl
+ #include "miniobj.h"
+@@ -224,6 +224,26 @@ fellow_io_thread_get_req(struct fellow_io_thread *ctx)
+ 	return (req);
+ }
+ 
++static void
++fellow_io_thread_return_req(struct fellow_io_thread *ctx,
++    struct fellow_io_thread_r *req)
++{
++	size_t slot;
++
++	CHECK_OBJ_NOTNULL(ctx, FELLOW_IO_THREAD_MAGIC);
++	CHECK_OBJ_NOTNULL(req, FELLOW_IO_THREAD_R_MAGIC);
++
++	assert(req >= ctx->req);
++	slot = (size_t)(req - ctx->req);
++	assert(slot < ctx->free->nbits);
++	memset(req, 0, sizeof *req);
++
++	AZ(pthread_mutex_lock(&ctx->mtx));
++	AZ(bitf_get(ctx->free, slot));
++	AN(bitf_set(ctx->free, slot));
++	AZ(pthread_mutex_unlock(&ctx->mtx));
++}
++
+ static void
+ fellow_io_thread_task(struct worker *wrk, void *priv)
+ {
+@@ -288,8 +308,10 @@ fellow_io_async_enq(fellow_ioctx_t *ctxp, enum fellow_io_thread_cmd cmd,
+ 	req->off = off;
+ 	req->status.info = info;
+ 
+-	AZ(ctx->taskrun(fellow_io_thread_task, req,
+-		&req->taskstate));
++	if (ctx->taskrun(fellow_io_thread_task, req, &req->taskstate)) {
++		fellow_io_thread_return_req(ctx, req);
++		return (0);
++	}
+ 	return (1);
+ }
+ 
+@@ -329,8 +351,10 @@ fellow_io_fallocate_enq(fellow_ioctx_t *ctxp, uint64_t info,
+ 	req->off = (off_t)offset;
+ 	req->status.info = info;
+ 
+-	AZ(ctx->taskrun(fellow_io_thread_task, req,
+-		&req->taskstate));
++	if (ctx->taskrun(fellow_io_thread_task, req, &req->taskstate)) {
++		fellow_io_thread_return_req(ctx, req);
++		return (0);
++	}
+ 	return (1);
+ }
+ 
+diff --git a/src/fellow_log.c b/src/fellow_log.c
+index 20af99e..9aa03e3 100644
+--- a/src/fellow_log.c
++++ b/src/fellow_log.c
+@@ -3127,13 +3127,20 @@ logbuffer_flush(struct fellow_fd *ffd,
+ 			continue;
+ 
+-		// need to resubmit - XXX more elegant?
+-		lbuf->flush_seq = arr[u]->block->entry[0].seq;
+-		u--;
++		// no completions: wait for one, then either resubmit and
++		// advance, or retry this block now that space was freed
++		struct fellow_alloc_log_block *resubmit = arr[u];
++		lbuf->flush_seq = resubmit->block->entry[0].seq;
+ 
+ 		r = fellow_io_log_wait_completions(
+ 		    lbuf->membuddy,
+ 		    lbuf->fdil.ioctx, 1);
+-		AN(r);
++		if (r == 0) {
++			r = fellow_io_log_submit(ffd, NULL,
++			    FAIOT_DLB_FINISH, resubmit);
++			AN(r);
++			continue;
++		}
+ 		v += r;
++		u--;
+ 		FDBG(D_LOG_FLUSH, "submit full complete %u", v);
+ 	}
+diff --git a/src/fellow_storage.c b/src/fellow_storage.c
+index e5c98c8..27e291a 100644
+--- a/src/fellow_storage.c
++++ b/src/fellow_storage.c
+@@ -1417,8 +1417,7 @@ sfe_taskrun(fellow_task_func_t func, void *priv, fellow_task_privstate *state)
+ 	task = TRUST_ME(state);
+ 	task->func = func;
+ 	task->priv = priv;
+-	AZ(Pool_Task_Any(task, TASK_QUEUE_BO));
+-	return (0);
++	return (Pool_Task_Any(task, TASK_QUEUE_BO));
+ }
+ 
+ static const char *
+@@ -2165,6 +2164,8 @@ sfedsk_lru_thread(struct worker *wrk, void *arg)
+ 	return (NULL);
+ }
+ 
++#define SFEDSK_DRAIN_IDLE_POLLS 100
++
+ /*
+  * remove all vinyl objects, but keep disk objects
+  */
+@@ -2185,7 +2186,7 @@ sfedsk_drain(struct worker *wrk, const struct stevedore *stv)
+ 		VSLb(wrk->vsl, SLT_Debug, "check %d drain %lu", r, n);
+ 		if (n == 0)
+ 			(void) usleep(100 * 1000);
+-	} while (r++ < 10);
++	} while (r++ < SFEDSK_DRAIN_IDLE_POLLS);
+ 	VSLb(wrk->vsl, SLT_Debug, "drain done");
+ }
+ 
+@@ -2915,6 +2916,7 @@ sfe_close_warn(struct stvfe *stvfe)
+ 		ObjUnsubscribeEvents(&stvfe->oev);
+ 	fellow_log_flush(stvfe->ffd);
+ 	stvfe->shutdown = 1;
++	fellow_cache_shutdown(stvfe->fc);
+ 	buddy_kick(fellow_dskbuddy(stvfe->ffd));
+ 	AZ(pthread_join(stvfe->dsk_lru_thread, &r));
+ 	AZ(r);
+@@ -2946,16 +2948,16 @@ sfe_close_real(struct stvfe *stvfe)
+ {
+ 	CHECK_OBJ_NOTNULL(stvfe, STVFE_MAGIC);
+ 
+-	stvfe->memstv->lru = NULL;
+-	LRU_Free(&stvfe->dskstv->lru);
+-	AZ(stvfe->dskstv->lru);
+-
+ 	sfe_ban_space_return(stvfe);
+ 	buddy_alloc_async_done(&stvfe->ban_reqs->reqs);
+ 
+ 	fellow_cache_fini(&stvfe->fc);
+ 	AZ(stvfe->fc);
+ 
++	stvfe->memstv->lru = NULL;
++	LRU_Free(&stvfe->dskstv->lru);
++	AZ(stvfe->dskstv->lru);
++
+ 	fellow_log_close(&stvfe->ffd);
+ 	AZ(stvfe->ffd);
+ 
+-- 
+2.39.5

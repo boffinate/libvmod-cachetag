@@ -1,0 +1,201 @@
+vtest "resize VSC state and byte reconciliation"
+
+server s1 -repeat 74 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new low = cachetag.namespace("resize_vsc_low", sweep_interval = 0s);
+		new side = cachetag.namespace("resize_vsc_side", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE_LOW") {
+			set req.http.result = low.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT_LOW") {
+			set req.http.result = low.compact();
+			return (synth(200));
+		}
+		if (req.method == "DRAIN_LOW") {
+			if (!low.test_resize_worker_drain(5000)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "INIT_SIDE") {
+			if (!side.test_side_initial_buckets(64)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "START_SIDE") {
+			if (!side.test_side_start_migration(16)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "MIGRATE_SIDE") {
+			set req.http.result = side.test_side_migrate_buckets(4096);
+			return (synth(200));
+		}
+		if (req.http.Load) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_hash {
+		if (req.http.Load) {
+			hash_data(req.xid);
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.http.Namespace == "side") {
+			side.add("side");
+		} else if (bereq.url ~ "^/low-drop") {
+			low.add("drop");
+		} else {
+			low.add("keep");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (req.http.Namespace == "side") {
+			if (side.stale()) {
+				return (restart);
+			}
+		} else if (low.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_low_drop -repeat 65 {
+	txreq -url "/low-drop" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_low_keep {
+	txreq -url "/low-keep" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_low_growth_drain {
+	txreq -req DRAIN_LOW
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_low_compact {
+	txreq -req PURGE_LOW -hdr "Tag: drop"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT_LOW
+	rxresp
+	expect resp.http.result == 65
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_segments == 2
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_published_slots == 128
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_published_bytes == 3072
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_count_published_bytes == 128
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.volatile_object_table_bytes == 3072
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.volatile_object_count_sidecar_bytes == 128
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.volatile_object_count_overflow_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_active == 1
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_starts == 1
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_observed_live == 1
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_target_objects == 64
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.side_resize_state == 2
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.side_resize_reason == 3
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_detached_bytes == 0
+
+client c_low_drain {
+	txreq -req DRAIN_LOW
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_active == 0
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.side_resize_state == 0
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_published_slots == 64
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_segment_detach_batches >= 1
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_segment_free_usec >= 0
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_retiring_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_detached_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_published_bytes == 1536
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_count_published_bytes == 64
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_active_bytes == 2112
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_reconciled_bytes == 2112
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_emergency_segment_allocations >= 1
+vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_emergency_segment_old_capacity_max == 0
+
+client c_side_init {
+	txreq -req INIT_SIDE
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_side_load -repeat 8 {
+	txreq -url "/side" -hdr "Load: 1" -hdr "Namespace: side"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_side_start {
+	txreq -req START_SIDE
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_state == 1
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_reason == 3
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_primary_buckets == 16
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_retiring_buckets == 64
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_retiring_bytes == 512
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_buckets_remaining == 64
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_live_remaining == 8
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.object_published_bytes == 1536
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.object_count_published_bytes == 64
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_active_bytes == 1728
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_retiring_bytes == 512
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_reconciled_bytes == 2240
+
+client c_side_finish {
+	txreq -req MIGRATE_SIDE
+	rxresp
+	expect resp.http.result == 1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_state == 0
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_primary_buckets == 16
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_retiring_buckets == 0
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_batches >= 1
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_inspected_buckets == 64
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_moved_entries == 8
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_completions >= 1
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_retired_free_usec >= 0
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_retiring_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_detached_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_active_bytes == 1728
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_reconciled_bytes == 1728
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.volatile_attach_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_attach_grow_publishes == 0
+vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_attach_grow_old_buckets_max == 0
+
+server s1 -wait

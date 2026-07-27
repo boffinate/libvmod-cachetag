@@ -1,0 +1,120 @@
+vtest "batched certified sweep preserves suffix attachment across batches"
+
+server s1 {
+	rxreq
+	expect req.url == "/drop-a"
+	txresp -body "drop-a-1"
+
+	rxreq
+	expect req.url == "/drop-b"
+	txresp -body "drop-b-1"
+
+	rxreq
+	expect req.url == "/keep"
+	txresp -body "keep-1"
+
+	rxreq
+	expect req.url == "/new"
+	txresp -body "new-1"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("batched", sweep_interval = 0s,
+		    sweep_batch_objects = 1, sweep_batch_hold = 10s,
+		    sweep_batch_yield = 1s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+		if (req.http.Miss) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/drop-a" || bereq.url == "/drop-b") {
+			tags.add("drop");
+		} else {
+			tags.add(bereq.url);
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_load {
+	txreq -url "/drop-a" -hdr "Miss: 1"
+	rxresp
+	expect resp.body == "drop-a-1"
+
+	txreq -url "/drop-b" -hdr "Miss: 1"
+	rxresp
+	expect resp.body == "drop-b-1"
+
+	txreq -url "/keep" -hdr "Miss: 1"
+	rxresp
+	expect resp.body == "keep-1"
+
+	txreq -req PURGE -hdr "Tag: drop"
+	rxresp
+	expect resp.http.result == -1
+} -run
+
+client c_compact {
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 2
+} -start
+
+delay 0.2
+
+client c_new {
+	txreq -url "/new" -hdr "Miss: 1"
+	rxresp
+	expect resp.body == "new-1"
+} -run
+
+client c_compact -wait
+
+vinyl v1 -expect CACHETAG.vcl1_tags_batched.sweep_last_scanned == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_batched.sweep_last_killed == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_batched.sweep_last_batches == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_batched.sweep_batch_scanned_max == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_batched.sweep_remaining == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_batched.volatile_objects == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_batched.purgemap_entries == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_batched.purgemap_auto_reclaim_passes >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_batched.publication_readers_phase0 == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_batched.publication_readers_phase1 == 0
+
+client c_hit {
+	txreq -url "/new"
+	rxresp
+	expect resp.body == "new-1"
+
+	txreq -url "/keep"
+	rxresp
+	expect resp.body == "keep-1"
+} -run
+
+server s1 -wait

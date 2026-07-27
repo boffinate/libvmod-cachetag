@@ -1,0 +1,25 @@
+From 8309dddb73916ab263936de082c9d6d79a8ae95c Mon Sep 17 00:00:00 2001
+From: Peter Bowyer <peter@mapledesign.co.uk>
+Date: Wed, 24 Jun 2026 14:38:28 +0100
+Subject: [PATCH 5/6] fellow_log: drain close-time free regions incrementally
+
+
+diff --git a/src/fellow_log.c b/src/fellow_log.c
+index d8bcdda..78cbc69 100644
+--- a/src/fellow_log.c
++++ b/src/fellow_log.c
+@@ -5446,6 +5446,12 @@ fellow_logs_iter(const struct flics *flics, struct flivs *flivs,
+ 		}
+ 
+ 		fellow_logs_iter_block(flics, flivs, logblk);
++		if (flics->ffd->phase == FP_FINI && flivs->tofree != NULL) {
++			regionlist_stk_flush(tofree);
++			if (regionlist_used(flivs->tofree))
++				regionlist_drain(flivs->tofree,
++				    flics->ffd->dskbuddy);
++		}
+ 
+ 		off = logblk->prev_off;
+ 	}
+-- 
+2.50.1 (Apple Git-155)

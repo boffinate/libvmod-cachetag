@@ -1,0 +1,16 @@
+{
+    "date": "2026-07-10",
+    "desc": "Purge-map based cache-tag invalidation with optional Fellow persistence",
+    "github": {
+        "branches": {
+            "9.0": "main"
+        },
+        "doc_path": "docs/vmod_cachetag.rst",
+        "project": "libvmod-cachetag",
+        "user": "boffinate",
+        "vcc_path": "src/vmod_cachetag.vcc"
+    },
+    "license": "MPL-2.0",
+    "name": "cachetag",
+    "status": "prototype"
+}

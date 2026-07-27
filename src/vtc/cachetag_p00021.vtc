@@ -1,0 +1,92 @@
+vtest "persistent cap floors survive a streamed checkpoint and restart"
+
+server s1 {
+	rxreq
+	txresp
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/purgemap-checkpoint.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+		new tags = cachetag.namespace("checkpoint_pm",
+		    persist_path = "${tmpdir}/tag-persist",
+		    purge_history_max_entries = 4,
+		    wal_segment_bytes = 128,
+		    sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.url == "/one") {
+			set req.http.result = tags.purge("one");
+		} else if (req.url == "/two") {
+			set req.http.result = tags.purge("two", mode = soft);
+		} else if (req.url == "/three") {
+			set req.http.result = tags.purge("three");
+		} else if (req.url == "/four") {
+			set req.http.result = tags.purge("four");
+		} else if (req.url == "/five") {
+			set req.http.result = tags.purge("five");
+		} else if (req.url == "/six") {
+			set req.http.result = tags.purge("six");
+		} else if (req.url == "/compact") {
+			set req.http.result = tags.compact();
+		}
+		return (synth(200));
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/one"
+	rxresp
+	expect resp.http.result == -1
+	txreq -url "/two"
+	rxresp
+	expect resp.http.result == -1
+	txreq -url "/three"
+	rxresp
+	expect resp.http.result == -1
+	txreq -url "/four"
+	rxresp
+	expect resp.http.result == -1
+	txreq -url "/five"
+	rxresp
+	expect resp.http.result == -1
+	txreq -url "/six"
+	rxresp
+	expect resp.http.result == -1
+	txreq -url "/compact"
+	rxresp
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_entries == 4
+vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_hard_floor == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_soft_floor == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.persist_checkpoint_entries == 4
+vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.persist_checkpoint_wal_sequence == 6
+
+shell {
+	test "$(find ${tmpdir}/tag-persist -maxdepth 1 -name 'checkpoint-*.vtc' | wc -l)" -eq 1
+	test "$(find ${tmpdir}/tag-persist/wal -maxdepth 1 -name '*.vtw' | wc -l)" -eq 1
+}
+
+vinyl v1 -stop
+vinyl v1 -start
+
+vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_entries == 4
+vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_hard_floor == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_soft_floor == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_seq == 6
+vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.persist_checkpoint_entries == 4
+vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.persist_replay_records == 0

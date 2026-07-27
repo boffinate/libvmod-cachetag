@@ -1,0 +1,116 @@
+vtest "certified reclamation does not invalidate a fetch started after phase flip"
+
+barrier b_block_tagged sock 2
+barrier b_block_continue sock 2
+
+server s1 {
+	rxreq
+	expect req.url == "/old"
+	txresp -body "old"
+	accept
+
+	rxreq
+	expect req.url == "/block"
+	txresp -body "block"
+	accept
+
+	rxreq
+	expect req.url == "/new"
+	txresp -body "new"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("new_phase", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge("cut", hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		set beresp.ttl = 1h;
+		if (bereq.url == "/old" || bereq.url == "/new") {
+			tags.add("cut");
+		}
+		if (bereq.url == "/block") {
+			tags.add("blocker");
+			vtc.barrier_sync("${b_block_tagged_sock}");
+			vtc.barrier_sync("${b_block_continue_sock}");
+		}
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/old"
+	rxresp
+	expect resp.body == "old"
+} -run
+
+client c_block {
+	txreq -url "/block"
+	rxresp
+	expect resp.body == "block"
+} -start
+
+barrier b_block_tagged sync
+
+client c2 {
+	txreq -req PURGE
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_new_phase.reclaim_pending == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_new_phase.purgemap_entries == 1
+
+client c_new {
+	txreq -url "/new"
+	rxresp
+	expect resp.body == "new"
+} -run
+
+barrier b_block_continue sync
+client c_block -wait
+
+client c3 {
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 0
+
+	txreq -url "/new"
+	rxresp
+	expect resp.body == "new"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_new_phase.purgemap_entries == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_new_phase.reclaim_pending == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_new_phase.publication_readers_phase0 == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_new_phase.publication_readers_phase1 == 0
+
+server s1 -wait

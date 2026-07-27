@@ -1,0 +1,35 @@
+vtest "cachetag memory-only namespace leaves untagged objects fresh"
+
+server s1 {
+	rxreq
+	expect req.url == "/untagged"
+	txresp -body "cached"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("memory_only");
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+} -start
+
+client c1 {
+	txreq -url "/untagged"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "cached"
+
+	txreq -url "/untagged"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "cached"
+} -run
+
+server s1 -wait

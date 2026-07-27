@@ -1,0 +1,131 @@
+vtest "certified reclamation preserves newer soft half while old hard half is covered"
+
+barrier b_old_tagged sock 2
+barrier b_old_continue sock 2
+barrier b_block_tagged sock 2
+barrier b_block_continue sock 2
+
+server s1 {
+	rxreq
+	expect req.url == "/old"
+	txresp -body "old"
+
+	rxreq
+	expect req.url == "/block"
+	txresp -body "block"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("mixed_reclaim", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "HARDPURGE") {
+			set req.http.result = tags.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "SOFTPURGE") {
+			set req.http.result = tags.purge(req.http.Tag, soft);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		set beresp.ttl = 1h;
+		if (bereq.url == "/old") {
+			tags.add("mixed");
+			vtc.barrier_sync("${b_old_tagged_sock}");
+			vtc.barrier_sync("${b_old_continue_sock}");
+		}
+		if (bereq.url == "/block") {
+			tags.add("blocker");
+			vtc.barrier_sync("${b_block_tagged_sock}");
+			vtc.barrier_sync("${b_block_continue_sock}");
+		}
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_old {
+	txreq -url "/old"
+	rxresp
+	expect resp.body == "old"
+} -start
+
+barrier b_old_tagged sync
+
+client c1 {
+	txreq -req HARDPURGE -hdr "Tag: mixed"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 0
+
+	txreq -req SOFTPURGE -hdr "Tag: mixed"
+	rxresp
+	expect resp.http.result == -1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_entries == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaim_deferred_pending >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.reclaim_pending == 1
+
+barrier b_old_continue sync
+client c_old -wait
+
+client c_block {
+	txreq -url "/block"
+	rxresp
+	expect resp.body == "block"
+} -start
+
+barrier b_block_tagged sync
+
+client c2 {
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 0
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_entries == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaim_passes >= 1
+
+barrier b_block_continue sync
+client c_block -wait
+
+client c3 {
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 0
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_entries == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_table_slots == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaimed_entries == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaim_defer_last_usec >= 0
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaim_filter_last_usec >= 0
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.reclaim_pending == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.publication_readers_phase0 == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.publication_readers_phase1 == 0
+
+server s1 -wait

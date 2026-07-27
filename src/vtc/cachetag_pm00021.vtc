@@ -1,0 +1,190 @@
+vtest "side migration preserves lookup, attach, removal, and moved slots"
+
+server s1 -repeat 9 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("side_migrate_grow", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		unset req.http.hit;
+		unset req.http.miss;
+		if (req.method == "INIT") {
+			if (!tags.test_side_initial_buckets(32)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+		if (req.method == "STARTMIGRATE") {
+			if (!tags.test_side_start_migration(64)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "MIGRATEALL") {
+			set req.http.result = tags.test_side_migrate_buckets(4096);
+			return (synth(200));
+		}
+		if (req.method == "ACTIVE") {
+			set req.http.result = tags.test_side_migration_active();
+			return (synth(200));
+		}
+		if (req.method == "COUNT") {
+			set req.http.result = tags.test_side_table_buckets();
+			return (synth(200));
+		}
+		if (req.http.Load) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_miss {
+		set req.http.miss = "1";
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url ~ "^/old-drop") {
+			tags.add("drop");
+		} else if (bereq.url ~ "^/old-keep") {
+			tags.add("keep");
+		} else {
+			tags.add("new");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		set req.http.hit = "1";
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_deliver {
+		set resp.http.hit = req.http.hit;
+		set resp.http.miss = req.http.miss;
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_init {
+	txreq -req INIT
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_load_old {
+	txreq -url "/old-drop-1" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/old-drop-2" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/old-keep-1" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/old-keep-2" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_start {
+	txreq -req STARTMIGRATE
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_grow.volatile_objects == 4
+
+client c_attach_during_migration -repeat 3 {
+	txreq -url "/new" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_grow.volatile_objects == 7
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_grow.volatile_attach_failures == 0
+
+client c_remove_during_migration {
+	txreq -req PURGE -hdr "Tag: drop"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 2
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_grow.volatile_objects == 5
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_grow.volatile_edges == 5
+
+client c_new_still_hits {
+	txreq -url "/new"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.hit == 1
+} -run
+
+client c_live_lookup_during_migration {
+	txreq -url "/old-keep-1"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.hit == 1
+} -run
+
+client c_finish_migration {
+	txreq -req MIGRATEALL
+	rxresp
+	expect resp.http.result == 1
+
+	txreq -req ACTIVE
+	rxresp
+	expect resp.http.result == 0
+
+	txreq -req COUNT
+	rxresp
+	expect resp.http.result == 64
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_grow.volatile_attach_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_grow.side_resize_attach_grow_publishes == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_grow.side_resize_attach_grow_old_buckets_max == 0
+
+client c_primary_lookup_stales {
+	txreq -req PURGE -hdr "Tag: keep"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -url "/old-keep-1"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.miss == 1
+
+	txreq -url "/old-keep-2"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.miss == 1
+} -run
+
+server s1 -wait

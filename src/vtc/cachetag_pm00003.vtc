@@ -1,0 +1,67 @@
+vtest "purgemap keeps multiple digest-distinct tags on one object"
+
+server s1 {
+	rxreq
+	txresp -hdr "Cache-Tag: site, site, other" -body "one"
+
+	rxreq
+	txresp -hdr "Cache-Tag: site, other" -body "two"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge("other");
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("site");
+		tags.add("site");
+		tags.add_header(beresp.http.Cache-Tag);
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_deliver {
+		set resp.http.Tag-Objects = tags.objects();
+		set resp.http.Tag-Edges = tags.edges();
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "one"
+	expect resp.http.Tag-Objects == 1
+	expect resp.http.Tag-Edges == 2
+
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+
+	txreq
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "two"
+	expect resp.http.Tag-Objects == 1
+	expect resp.http.Tag-Edges == 2
+} -run

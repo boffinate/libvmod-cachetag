@@ -1,0 +1,76 @@
+vtest "cachetag purgemap WAL failure leaves live map unchanged"
+
+server s1 {
+	rxreq
+	expect req.url == "/wal-fail"
+	txresp -hdr "X-Source: backend-old" -body "old-body"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/purgemap-wal-fail.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+		new tags = cachetag.namespace("persistent_pm",
+		    persist_path = "${tmpdir}/tag-persist",
+		    sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.fail-wal =
+			    tags.test_fail_next_key_purge_wal();
+			set req.http.purged = tags.purge("wal-fail-tag");
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("wal-fail-tag");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.fail-wal = req.http.fail-wal;
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/wal-fail"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+} -run
+
+client c2 {
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.fail-wal == true
+	expect resp.http.purged == -4
+
+	txreq -url "/wal-fail"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_entries == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_seq == 0
+
+server s1 -wait

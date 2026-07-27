@@ -1,0 +1,81 @@
+vtest "tag soft purge during fetch"
+
+barrier b_tagged sock 2
+barrier b_body cond 2
+
+server s1 {
+	rxreq
+	txresp -nolen -hdr "Transfer-Encoding: chunked" -hdr "X-Tag-Barrier: 1"
+	barrier b_body sync
+	chunked "old"
+	chunkedlen 0
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge("race", mode = soft);
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		set beresp.ttl = 1h;
+		set beresp.grace = 1h;
+		tags.add("race");
+		if (beresp.http.X-Tag-Barrier) {
+			unset beresp.http.X-Tag-Barrier;
+			vtc.barrier_sync("${b_tagged_sock}");
+		}
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_deliver {
+		set resp.http.Obj-TTL = obj.ttl;
+		set resp.http.Obj-Grace = obj.grace;
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "old"
+} -start
+
+barrier b_tagged sync
+
+client c2 {
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+} -run
+
+barrier b_body sync
+client c1 -wait
+
+client c3 {
+	txreq
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "old"
+	expect resp.http.Obj-TTL <= 0.5
+	expect resp.http.Obj-Grace >= 3599
+} -run

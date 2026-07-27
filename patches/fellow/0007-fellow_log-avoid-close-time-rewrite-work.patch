@@ -1,0 +1,479 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Peter Bowyer <peter@mapledesign.co.uk>
+Date: Thu, 25 Jun 2026 15:05:00 +0100
+Subject: [PATCH 7/7] fellow_log: avoid close-time rewrite work
+
+---
+ src/buddy.c             |  33 ++++++++--
+ src/buddy.h             |   3 +
+ src/fellow_log.c        | 129 +++++++++++++++++++++++++++++++++++++---
+ src/fellow_regionlist.h |  81 ++++++++++++++++++++++---
+ 4 files changed, 225 insertions(+), 21 deletions(-)
+
+diff --git a/src/buddy.c b/src/buddy.c
+index c32f901..033c185 100644
+--- a/src/buddy.c
++++ b/src/buddy.c
+@@ -1428,10 +1428,11 @@ BUDDYF(init_)(unsigned witness, buddy_t *buddy, unsigned min, size_t size,
+ 	buddy->rsv_avail = size;
+ }
+ 
+-void
+-BUDDYF(fini)(buddy_t **buddyp,
++static void
++buddy_fini_common(buddy_t **buddyp,
+     umapper *area_umapper, void **area_mapper_priv,
+-    umapper *freemap_umapper, void **freemap_mapper_priv)
++    umapper *freemap_umapper, void **freemap_mapper_priv,
++    unsigned empty)
+ {
+ 	struct slashmap *map;
+ 	buddy_t *buddy;
+@@ -1444,8 +1445,10 @@ BUDDYF(fini)(buddy_t **buddyp,
+ 	for (u = 0; u <= BUDDY_WAIT_MAXPRI; u++)
+ 		AZ(VTAILQ_FIRST(&buddy->reqs_head[u]));
+ 	AZ(pthread_cond_destroy(&buddy->kick_cond));
+-	assert(freemap_space(map) == map->size);
+-	assert(VRBT_EMPTY(&buddy->minfo_head));
++	if (empty) {
++		assert(freemap_space(map) == map->size);
++		assert(VRBT_EMPTY(&buddy->minfo_head));
++	}
+ 	AZ(pthread_mutex_destroy(&buddy->minfo_mtx));
+ 
+ 	if (area_umapper != NULL) {
+@@ -1464,6 +1467,26 @@ BUDDYF(fini)(buddy_t **buddyp,
+ 	memset(buddy, 0, sizeof *buddy);
+ }
+ 
++void
++BUDDYF(fini)(buddy_t **buddyp,
++    umapper *area_umapper, void **area_mapper_priv,
++    umapper *freemap_umapper, void **freemap_mapper_priv)
++{
++
++	buddy_fini_common(buddyp, area_umapper, area_mapper_priv,
++	    freemap_umapper, freemap_mapper_priv, 1);
++}
++
++void
++BUDDYF(abandon)(buddy_t **buddyp,
++    umapper *area_umapper, void **area_mapper_priv,
++    umapper *freemap_umapper, void **freemap_mapper_priv)
++{
++
++	buddy_fini_common(buddyp, area_umapper, area_mapper_priv,
++	    freemap_umapper, freemap_mapper_priv, 0);
++}
++
+ /************************************************************
+  * meta
+  */
+diff --git a/src/buddy.h b/src/buddy.h
+index 736867e..80c2ac4 100644
+--- a/src/buddy.h
++++ b/src/buddy.h
+@@ -150,6 +150,9 @@ BUDDYF(init)(buddy_t *b, unsigned m, size_t s,
+ void BUDDYF(fini)(buddy_t **,
+     umapper *, void **,
+     umapper *, void **);
++void BUDDYF(abandon)(buddy_t **,
++    umapper *, void **,
++    umapper *, void **);
+ // meta / util
+ size_t BUDDYF(size)(const buddy_t *);
+ size_t BUDDYF(space)(buddy_t *, int);
+diff --git a/src/fellow_log.c b/src/fellow_log.c
+index 4022035..fed9634 100644
+--- a/src/fellow_log.c
++++ b/src/fellow_log.c
+@@ -999,6 +999,8 @@ struct flivs {
+ 	struct logblk_mempool * const	mempool;
+ 
+ 	// non const
++	unsigned			abort_on_shutdown;
++	unsigned			aborted;
+ 	struct regionlist		*tofree;
+ 	struct iter_out			ban_dles[1];
+ 	struct fellow_dlechg_top	fdct[1];
+@@ -2243,6 +2245,44 @@ logbuffer_fini(struct fellow_logbuffer *lbuf)
+ 	memset(lbuf, 0, sizeof *lbuf);
+ }
+ 
++static void
++logbuffer_abandon_block(struct fellow_logbuffer *lbuf,
++    struct fellow_alloc_log_block *blk)
++{
++	struct buddy_ptr_page palloc;
++
++	CHECK_OBJ_NOTNULL(lbuf, FELLOW_LOGBUFFER_MAGIC);
++	AN(blk);
++
++	if (blk->block != NULL) {
++		palloc = BUDDY_PTR_PAGE(blk->block, MIN_FELLOW_BITS);
++		buddy_return1_ptr_page(lbuf->membuddy, &palloc);
++	}
++	memset(blk, 0, sizeof *blk);
++}
++
++static void
++logbuffer_abandon(struct fellow_logbuffer *lbuf)
++{
++	unsigned u;
++
++	CHECK_OBJ_NOTNULL(lbuf, FELLOW_LOGBUFFER_MAGIC);
++	logbuffer_wait_flush_fini(lbuf);
++
++	logbuffer_abandon_block(lbuf, &lbuf->head);
++	for (u = 0; u < lbuf->n; u++)
++		logbuffer_abandon_block(lbuf, &lbuf->arr[u]);
++	lbuf->n = 0;
++	logbuffer_abandon_block(lbuf, &lbuf->active);
++	lbuf->active_off = 0;
++	lbuf->tail_off = 0;
++	lbuf->head_seq[0] = 0;
++	lbuf->head_seq[1] = 0;
++
++	if (lbuf->regions_to_free != NULL)
++		regionlist_abandon(&lbuf->regions_to_free);
++}
++
+ static void
+ logbuffer_grow(struct fellow_logbuffer *lbuf, struct buddy_ptr_page alloc)
+ {
+@@ -5386,6 +5426,29 @@ fellow_logs_iter_block(const struct flics *flics, struct flivs *flivs,
+ 	iter_out_submit(it, flivs->lbuf);
+ }
+ 
++static int
++fellow_logs_iter_abort(const struct flics *flics, struct flivs *flivs)
++{
++	struct fellow_fd *ffd;
++	int ret;
++
++	CHECK_OBJ_NOTNULL(flics, FLICS_MAGIC);
++	CHECK_OBJ_NOTNULL(flivs, FLIVS_MAGIC);
++
++	if (! flivs->abort_on_shutdown)
++		return (0);
++
++	ffd = flics->ffd;
++	CHECK_OBJ_NOTNULL(ffd, FELLOW_FD_MAGIC);
++	AZ(pthread_mutex_lock(&ffd->logmtx));
++	ret = ! ffd->watcher_running;
++	AZ(pthread_mutex_unlock(&ffd->logmtx));
++
++	if (ret)
++		flivs->aborted = 1;
++	return (ret);
++}
++
+ static int
+ fellow_logs_iter(const struct flics *flics, struct flivs *flivs,
+     const struct buddy_off_extent *active_logregion,
+@@ -5420,6 +5483,11 @@ fellow_logs_iter(const struct flics *flics, struct flivs *flivs,
+ 	r = fellow_logcache_get(flc, off, -1, pre);
+ 
+ 	while (off > 0) {
++		if (fellow_logs_iter_abort(flics, flivs)) {
++			ret = 0;
++			goto out;
++		}
++
+ 		if ((size_t)off + sizeof *logblk > flics->ffd->size) {
+ 			fprintf(stderr,
+ 			    "fellow: logblk %zu out of bounds, "
+@@ -5754,7 +5822,7 @@ fellow_logs_rewrite(struct fellow_fd *ffd,
+ 	struct flw_need_why why[1] = {{"unknown"}};
+ 	const struct stvfe_tune *tune;
+ 	vtim_mono t0;
+-	unsigned u;
++	unsigned aborted = 0, u;
+ 	int ret;
+ 
+ 	CHECK_OBJ_NOTNULL(ffd, FELLOW_FD_MAGIC);
+@@ -5967,7 +6035,8 @@ fellow_logs_rewrite(struct fellow_fd *ffd,
+ 			.tofree = tofree,
+ 			.ban_dles = {{0}},
+ 			.fdct = {{0}},
+-			.ban_export_time = 0
++			.ban_export_time = 0,
++			.abort_on_shutdown = new_log_fdr != NULL
+ 		};
+ 		struct buddy_abstract_pool *bap =
+ 		    BUDDY_ABSTRACT_POOL(logblk_mempool, logblk_mempool, NULL);
+@@ -5991,6 +6060,9 @@ fellow_logs_rewrite(struct fellow_fd *ffd,
+ 			    ffd->logreg[ACTIVE_REGION(log_info->region)].region,
+ 			    ffd->logreg[EMPTY_REGION(log_info->region)].region,
+ 			    logblk_off);
++		aborted = flivs.aborted;
++		if (aborted)
++			ret = 1;
+ 
+ 		bfa_free(bfa);
+ 
+@@ -6006,14 +6078,15 @@ fellow_logs_rewrite(struct fellow_fd *ffd,
+ 		fellow_dlechg_top_fini(flivs.fdct,
+ 		    ret ? FDTF_LEAK : FDTF_INSIST);
+ 
+-		iter_out_submit(flivs.ban_dles, lbuf);
++		if (! aborted)
++			iter_out_submit(flivs.ban_dles, lbuf);
+ 
+ 		//lint -e{731} XXX
+-		XXXAN(ffd->phase == FP_INIT || ret == 0);
++		XXXAN(ffd->phase == FP_INIT || ret == 0 || aborted);
+ 
+ 		// flush outside the lock to minimize work
+ 		// under the lock
+-		if (ffd->phase == FP_OPEN) {
++		if (ffd->phase == FP_OPEN && ! aborted) {
+ 			assert(lbuf != ffd->logbuf);
+ 			logbuffer_flush(ffd, lbuf, LBUF_FLUSH_NOCLOSE, LBUF_ALL);
+ 		}
+@@ -6036,6 +6109,15 @@ fellow_logs_rewrite(struct fellow_fd *ffd,
+ 	case FP_OPEN:
+ 		assert(lbuf == lbuf_save);
+ 		assert(lbuf->mempool == logblk_mempool);
++		if (aborted) {
++			assert(ffd->logbuf->state == LBUF_PEND);
++			logbuffer_abandon(lbuf);
++			lbuf->state = LBUF_FINI;
++			logbuffer_fini(lbuf);
++			stvfe_unpace_ban_lurker(&sblp);
++			lbuf = NULL;
++			break;
++		}
+ 		logbuffer_append(ffd,
+ 		    &ffd->logmtx,
+ 		    ffd->logreg[ACTIVE_REGION(log_info->region)].region,
+@@ -6081,6 +6163,11 @@ fellow_logs_rewrite(struct fellow_fd *ffd,
+ 	if (tofree != NULL) {
+ 		struct fellow_fd_ioctx_lease fdil = {0};
+ 
++		if (aborted) {
++			regionlist_abandon(&tofree);
++			goto tofree_done;
++		}
++
+ 		switch (ffd->phase) {
+ 		case FP_OPEN:
+ 			// assert the flush above has written a new reference
+@@ -6111,8 +6198,9 @@ fellow_logs_rewrite(struct fellow_fd *ffd,
+ 		}
+ 	}
+ 
++  tofree_done:
+ 	AZ(pthread_mutex_lock(&ffd->logmtx));
+-	if (ffd->phase == FP_OPEN)
++	if (ffd->phase == FP_OPEN && ! aborted)
+ 		fellow_logs_adjust_objsize_hint(ffd);
+ 	ffd->rewriting = 0;
+ 	if (ffd->watcher_running)
+@@ -6144,6 +6232,13 @@ take_region(struct fellow_fd *ffd, struct buddy_off_extent *region)
+ 	buddy_take_off_extent(ffd->dskbuddy, region, 1);
+ }
+ 
++#if defined(DEBUG) || defined(EXTRA_ASSERTIONS) || defined(BUDDY_WITNESS)
++#define FELLOW_CLOSE_ZERO_CHECK 1
++#else
++#define FELLOW_CLOSE_ZERO_CHECK 0
++#endif
++
++#if FELLOW_CLOSE_ZERO_CHECK
+ // free logs region in buddy for consistency check
+ static void
+ fellow_logs_close(struct fellow_fd *ffd)
+@@ -6163,6 +6258,7 @@ fellow_logs_close(struct fellow_fd *ffd)
+ 		buddy_return1_off_extent(ffd->dskbuddy,
+ 		    &log_info->log_region[u]);
+ }
++#endif
+ 
+ /* ------------------------------------------------------------
+  * log watcher thread
+@@ -6472,8 +6568,6 @@ fellow_logwatcher_thread(void *priv)
+ 	while (ffd->watcher_running) {
+ 		if (ffd->rewrite_state == FLW_S_REWRITING)
+ 			need = FLW_MAYFLUSH;
+-		else if (flrc.new_log_fdr.size || ffd->watcher_running == 2)
+-			need = FLW_NEED_REWRITE;
+ 		else
+ 			need = fellow_logwatcher_need(ffd, NULL);
+ 
+@@ -6502,6 +6596,8 @@ fellow_logwatcher_thread(void *priv)
+ 			assert(ffd->rewrite_state == FLW_S_NOREWRITE);
+ 			ffd->watcher_state = FLW_S_FLUSHING;
+ 			fellow_logwatcher_flush(ffd, 0);
++			if (! ffd->watcher_running)
++				continue;
+ 			ffd->rewrite_state = FLW_S_REWRITING;
+ 			AZ(pthread_mutex_unlock(&ffd->logmtx));
+ 			/*
+@@ -6540,7 +6636,8 @@ fellow_logwatcher_thread(void *priv)
+ 	 * close and fini the logbuffer:
+ 	 * this implicitly waits for all IO
+ 	 */
+-	assert(ffd->logbuf->state == LBUF_OPEN);
++	assert(ffd->logbuf->state == LBUF_OPEN ||
++	    ffd->logbuf->state == LBUF_PEND);
+ 	logbuffer_flush(ffd, ffd->logbuf, LBUF_FLUSH_CLOSE, LBUF_ALL);
+ 	ffd->logbuf->state = LBUF_FINI;
+ 	logbuffer_fini(ffd->logbuf);
+@@ -7135,7 +7232,9 @@ fellow_mutex_destroy(pthread_mutex_t *mtx)
+ void
+ fellow_log_close(struct fellow_fd **ffdp)
+ {
++#if FELLOW_CLOSE_ZERO_CHECK
+ 	struct buddy_off_extent e;
++#endif
+ 	struct fellow_fd	*ffd;
+ 	buddy_t *bp;
+ 
+@@ -7146,7 +7245,9 @@ fellow_log_close(struct fellow_fd **ffdp)
+ 
+ 	ffd->phase = FP_FINI;
+ 	fellow_fd_update_stats(ffd);
++#if FELLOW_CLOSE_ZERO_CHECK
+ 	fellow_logs_close(ffd);
++#endif
+ 
+ 	logblk_mempool_fini(ffd->logblk_pool);
+ 	logbuf_mempool_fini(ffd->logbuf_pool);
+@@ -7166,10 +7267,20 @@ fellow_log_close(struct fellow_fd **ffdp)
+ 	fellow_space_thread_fini(ffd);
+ 
+ 	bp = ffd->dskbuddy;
++#if FELLOW_CLOSE_ZERO_CHECK
+ 	e = BUDDY_OFF_EXTENT(0, N_HDR * MIN_FELLOW_BLOCK);
+ 	buddy_return1_off_extent(bp, &e);
+ 	BWIT_ISEMPTY(bp->witness);
+ 	buddy_fini(&bp, NULL, NULL, NULL, NULL);
++#else
++	/*
++	 * Normal shutdown has already closed and flushed the active logbuffer.
++	 * The old FP_FINI rewrite only walked the persistent log to prove the
++	 * temporary disk allocator was empty before destroying it, which is too
++	 * expensive for large stores on the CLI stop path.
++	 */
++	buddy_abandon(&bp, NULL, NULL, NULL, NULL);
++#endif
+ 	AZ(bp);
+ 	AZ(flock(ffd->fd, LOCK_UN));
+ 	close(ffd->fd);
+diff --git a/src/fellow_regionlist.h b/src/fellow_regionlist.h
+index 42260bc..ea77ef8 100644
+--- a/src/fellow_regionlist.h
++++ b/src/fellow_regionlist.h
+@@ -307,6 +307,22 @@ regionlist_add(struct regionlist *rl,
+ 	}
+ }
+ 
++/* return one regl's disk extents to dskret, returning their summed size */
++static size_t
++regl_return_extents(struct regl *regl, struct buddy_returns *dskret)
++{
++	size_t size = 0;
++	unsigned n;
++
++	CHECK_OBJ_NOTNULL(regl, REGL_MAGIC);
++
++	for (n = 0; n < regl->n; n++) {
++		size += regl->arr[n].size;
++		AN(buddy_return_off_extent(dskret, &regl->arr[n]));
++	}
++	return (size);
++}
++
+ static void
+ regionlist_free(struct regionlist **rlp, buddy_t *dskbuddy)
+ {
+@@ -315,7 +331,6 @@ regionlist_free(struct regionlist **rlp, buddy_t *dskbuddy)
+ 	struct regionlist *rl;
+ 	struct regl *regl, *save;
+ 	size_t size, tot;
+-	unsigned n;
+ 
+ 	TAKE_OBJ_NOTNULL(rl, rlp, REGIONLIST_MAGIC);
+ 
+@@ -327,19 +342,71 @@ regionlist_free(struct regionlist **rlp, buddy_t *dskbuddy)
+ 	tot = rl->size;
+ 
+ 	VSTAILQ_FOREACH_SAFE(regl, &rl->head, list, save) {
+-		CHECK_OBJ_NOTNULL(regl, REGL_MAGIC);
++		size = regl_return_extents(regl, dskret);
++		assert(tot >= size);
++		tot -= size;
+ 
+-		size = 0;
+-		for (n = 0; n < regl->n; n++) {
+-			size += regl->arr[n].size;
+-			AN(buddy_return_off_extent(dskret, &regl->arr[n]));
+-		}
++		AN(buddy_return_ptr_page(memret, &regl->alloc));
++	}
++	AZ(tot);
++
++	buddy_return(dskret);
++	buddy_return(memret);
++}
++
++static void
++regionlist_abandon(struct regionlist **rlp)
++{
++	struct buddy_returns *memret;
++	struct buddy *membuddy;
++	struct regionlist *rl;
++	struct regl *regl, *save;
++
++	TAKE_OBJ_NOTNULL(rl, rlp, REGIONLIST_MAGIC);
++
++	membuddy = rl->pool->reqs[0].reqs.buddy;
++	BUDDY_POOL_FINI(rl->pool);
++
++	memret = BUDDY_RETURNS_STK(membuddy, BUDDY_RETURNS_MAX);
++	VSTAILQ_FOREACH_SAFE(regl, &rl->head, list, save)
++		AN(buddy_return_ptr_page(memret, &regl->alloc));
++	buddy_return(memret);
++}
++
++static void
++regionlist_drain(struct regionlist *rl, buddy_t *dskbuddy)
++{
++	struct buddy_returns *dskret, *memret;
++	struct buddy *membuddy;
++	struct regl *regl, *save, *keep = NULL;
++	size_t size, tot;
++
++	CHECK_OBJ_NOTNULL(rl, REGIONLIST_MAGIC);
++
++	membuddy = rl->pool->reqs[0].reqs.buddy;
++	dskret = BUDDY_RETURNS_STK(dskbuddy, BUDDY_RETURNS_MAX);
++	memret = BUDDY_RETURNS_STK(membuddy, BUDDY_RETURNS_MAX);
++	tot = rl->size;
++
++	VSTAILQ_FOREACH_SAFE(regl, &rl->head, list, save) {
++		size = regl_return_extents(regl, dskret);
+ 		assert(tot >= size);
+ 		tot -= size;
+ 
++		if (keep == NULL) {
++			keep = regl;
++			continue;
++		}
+ 		AN(buddy_return_ptr_page(memret, &regl->alloc));
+ 	}
+ 	AZ(tot);
++	AN(keep);
++
++	memset(keep->arr, 0, keep->space * sizeof keep->arr[0]);
++	keep->n = 0;
++	rl->size = 0;
++	VSTAILQ_INIT(&rl->head);
++	VSTAILQ_INSERT_HEAD(&rl->head, keep, list);
+ 
+ 	buddy_return(dskret);
+ 	buddy_return(memret);
+-- 
+2.50.1 (Apple Git-155)
+

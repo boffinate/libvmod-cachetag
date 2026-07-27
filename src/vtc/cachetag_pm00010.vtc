@@ -1,0 +1,78 @@
+vtest "certified compact reclaims soft history after reducing stale object"
+
+server s1 {
+	rxreq
+	expect req.url == "/soft"
+	txresp -body "soft-1"
+
+	rxreq
+	expect req.url == "/soft"
+	txresp -body "soft-2"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("soft_reclaim", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "SOFTPURGE") {
+			set req.http.result = tags.purge(req.http.Tag, soft);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add(bereq.url);
+		set beresp.ttl = 1h;
+		set beresp.grace = 0s;
+		set beresp.keep = 0s;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/soft"
+	rxresp
+	expect resp.body == "soft-1"
+
+	txreq -req SOFTPURGE -hdr "Tag: /soft"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 1
+
+	txreq -url "/soft"
+	rxresp
+	expect resp.body == "soft-2"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_reclaim.purgemap_entries == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_reclaim.purgemap_table_slots == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_reclaim.purgemap_auto_reclaim_passes >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_reclaim.purgemap_auto_reclaimed_entries == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_reclaim.purgemap_auto_reclaim_filter_last_usec >= 0
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_reclaim.sweep_reduced >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_reclaim.sweep_last_reduced >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_reclaim.sweep_last_objects_before == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_reclaim.sweep_last_objects_after == 1
+
+server s1 -wait

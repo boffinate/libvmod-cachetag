@@ -1,0 +1,95 @@
+vtest "cachetag VMOD purge_header is all-or-nothing and reports bad input"
+
+server s1 {
+	rxreq
+	expect req.url == "/a"
+	txresp -body "one"
+
+	rxreq
+	expect req.url == "/a"
+	txresp -body "two"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+		new limited = cachetag.namespace("limited", max_tag_header_bytes = 4);
+		new short = cachetag.namespace("short", max_key_length = 3);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE_BAD") {
+			set req.http.purged = tags.purge_header("site,bad token");
+			return (synth(200));
+		}
+		if (req.method == "PURGE_BIG") {
+			set req.http.purged = limited.purge_header("site,other");
+			return (synth(200));
+		}
+		if (req.method == "PURGE_LONG") {
+			set req.http.purged = short.purge_header("one,toolong");
+			return (synth(200));
+		}
+		if (req.method == "PURGE_GOOD") {
+			set req.http.purged = tags.purge_header("site");
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("site");
+		limited.add("site");
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/a"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "one"
+
+	txreq -req PURGE_BAD
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -3
+
+	txreq -req PURGE_BIG
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -2
+
+	txreq -req PURGE_LONG
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -2
+
+	txreq -url "/a"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "one"
+
+	txreq -req PURGE_GOOD
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+
+	txreq -url "/a"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "two"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_short_short.purgemap_entries == 0

@@ -1,0 +1,211 @@
+vtest "low-water resize cancellation and published shrink rollback"
+
+server s1 -repeat 92 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new cancel = cachetag.namespace("low_water_cancel", sweep_interval = 0s);
+		new rollback = cachetag.namespace("low_water_rollback", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "INIT_ROLLBACK") {
+			if (!rollback.test_side_initial_buckets(64)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "START_SHRINK") {
+			if (!rollback.test_side_start_migration(16)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "DRAIN_ROLLBACK") {
+			if (!rollback.test_resize_worker_drain(5000)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "ACTIVE_ROLLBACK") {
+			set req.http.result = rollback.test_side_migration_active();
+			return (synth(200));
+		}
+		if (req.method == "COUNT_ROLLBACK") {
+			set req.http.result = rollback.test_side_table_buckets();
+			return (synth(200));
+		}
+		if (req.method == "PURGE_CANCEL") {
+			set req.http.result = cancel.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT_CANCEL") {
+			set req.http.result = cancel.compact();
+			return (synth(200));
+		}
+		if (req.method == "READY_CANCEL") {
+			if (cancel.test_resize_low_water_ready()) {
+				return (synth(200));
+			}
+			return (synth(204));
+		}
+		if (req.method == "DRAIN_CANCEL") {
+			if (!cancel.test_resize_worker_drain(5000)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "STATS_CANCEL") {
+			set req.http.result = cancel.objects();
+			return (synth(200));
+		}
+		if (req.http.Load) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_hash {
+		if (req.http.Load) {
+			hash_data(req.xid);
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.http.Namespace == "rollback") {
+			rollback.add("rollback");
+		} else if (bereq.url == "/cancel-drop") {
+			cancel.add("drop");
+		} else {
+			cancel.add("keep");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (req.http.Namespace == "rollback") {
+			if (rollback.stale()) {
+				return (restart);
+			}
+		} else {
+			if (cancel.stale()) {
+				return (restart);
+			}
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_cancel_drop -repeat 65 {
+	txreq -url "/cancel-drop" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_cancel_keep -repeat 1 {
+	txreq -url "/cancel-keep" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_cancel_compact {
+	txreq -req PURGE_CANCEL -hdr "Tag: drop"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT_CANCEL
+	rxresp
+	expect resp.http.result == 65
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_objects == 1
+vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_object_table_slots >= 128
+vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.object_shrink_calls == 0
+
+client c_cancel_refill -repeat 2 {
+	txreq -url "/cancel-keep" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_cancel_no_ready {
+	txreq -req READY_CANCEL
+	rxresp
+	expect resp.status == 204
+
+	txreq -req DRAIN_CANCEL
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_objects == 3
+vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_object_table_slots >= 128
+vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.object_shrink_calls == 0
+
+delay 7
+
+client c_cancel_stats {
+	txreq -req STATS_CANCEL
+	rxresp
+	expect resp.status == 200
+	expect resp.http.result == 3
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.resize_low_water_rearms >= 1
+vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.object_shrink_calls >= 1
+vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_object_table_slots < 128
+
+client c_rollback_init {
+	txreq -req INIT_ROLLBACK
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_rollback_seed -repeat 12 {
+	txreq -url "/rollback" -hdr "Load: 1" -hdr "Namespace: rollback"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_rollback_start {
+	txreq -req START_SHRINK
+	rxresp
+	expect resp.status == 200
+
+	txreq -req ACTIVE_ROLLBACK
+	rxresp
+	expect resp.http.result == 1
+} -run
+
+client c_rollback_refill -repeat 12 {
+	txreq -url "/rollback" -hdr "Load: 1" -hdr "Namespace: rollback"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_rollback_drain {
+	txreq -req DRAIN_ROLLBACK
+	rxresp
+	expect resp.status == 200
+
+	txreq -req ACTIVE_ROLLBACK
+	rxresp
+	expect resp.http.result == 0
+
+	txreq -req COUNT_ROLLBACK
+	rxresp
+	expect resp.http.result == 128
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_rollback_low_water_rollback.volatile_objects == 24
+vinyl v1 -expect CACHETAG.vcl1_rollback_low_water_rollback.volatile_side_table_buckets == 128
+
+server s1 -wait

@@ -1,0 +1,58 @@
+vtest "cachetag private add remains a no-op when persistence prepare fails"
+
+server s1 {
+	rxreq
+	expect req.url == "/private"
+	txresp -body "private-ok"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/private-degraded.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+		new tags = cachetag.namespace("persistent_pm",
+		    persist_path = "${tmpdir}/private-degraded-persist",
+		    sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "ARM_PREPARE_FAIL") {
+			set req.http.armed = tags.test_fail_next_persist_prepare();
+			return (synth(200));
+		}
+		if (req.url == "/private") {
+			return (pass);
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/private") {
+			tags.add("private");
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.armed = req.http.armed;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -req ARM_PREPARE_FAIL
+	rxresp
+	expect resp.status == 200
+	expect resp.http.armed == true
+
+	txreq -url "/private"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "private-ok"
+} -run
+
+server s1 -wait

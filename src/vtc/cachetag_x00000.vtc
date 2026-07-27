@@ -1,0 +1,66 @@
+vtest "cachetag VMOD Fellow SIGKILL restart primitive"
+
+server s1 {
+	rxreq
+	expect req.url == "/fellow-crash"
+	txresp -hdr "X-Source: backend" -body "fellow-crash-body"
+
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/after-crash"
+	txresp -hdr "X-Source: backend" -body "after-crash-body"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-pauto_restart=off" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/fellow-crash.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_backend_response {
+		tags.add("phase2-crash");
+		set beresp.ttl = 1h;
+	}
+} -start
+
+client c1 {
+	txreq -url "/fellow-crash"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend"
+	expect resp.body == "fellow-crash-body"
+} -run
+
+shell {
+	set -eu
+	pid_json="$(vinyladm -n ${v1_name} pid -j)"
+	worker_pid="$(printf "%s\n" "$pid_json" |
+		sed -n "s/.*\"worker\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p")"
+	test -n "$worker_pid"
+	kill -9 "$worker_pid"
+}
+
+vinyl v1 -wait-stopped
+vinyl v1 -start
+
+client c1 {
+	txreq -url "/after-crash"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend"
+	expect resp.body == "after-crash-body"
+} -run
+
+server s1 -wait
+
+vinyl v1 -expectexit 0x40

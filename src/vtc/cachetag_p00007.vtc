@@ -1,0 +1,110 @@
+vtest "cachetag purgemap Fellow FDO direct probe applies soft purge after restart"
+
+server s1 {
+	rxreq
+	expect req.url == "/purgemap-soft"
+	txresp -hdr "Connection: close" -hdr "X-Source: backend-old" -body "old-body"
+
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/purgemap-soft"
+	txresp -hdr "X-Source: backend-new" -body "new-body"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/purgemap-soft.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+		new tags = cachetag.namespace("persistent_pm",
+		    persist_path = "${tmpdir}/tag-persist",
+		    sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge("phase2-soft", mode = soft);
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("phase2-soft");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/purgemap-soft"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_objects_written == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
+
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.persist_wal_records >= 1
+vinyl v1 -stop
+vinyl v1 -start
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_direct_probes == 0
+
+client c2 {
+	txreq -url "/purgemap-soft"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+
+	txreq -url "/purgemap-soft"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+
+	delay 0.2
+
+	txreq -url "/purgemap-soft"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_direct_probes >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_namespace_records_probed >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_probe_soft_hits >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
+
+server s1 -wait

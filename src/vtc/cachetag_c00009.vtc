@@ -1,0 +1,100 @@
+vtest "cachetag VMOD pass and hit-for-miss fetches do not leak pending attaches"
+
+server s1 {
+	rxreq
+	expect req.url == "/pass"
+	txresp -body "pass"
+
+	rxreq
+	expect req.url == "/hit-for-miss"
+	txresp -body "hfm1"
+
+	rxreq
+	expect req.url == "/hit-for-miss"
+	txresp -body "hfm2"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_recv {
+		if (req.url == "/probe") {
+			set req.http.pending = tags.pending();
+			set req.http.objects = tags.objects();
+			set req.http.edges = tags.edges();
+			return (synth(200));
+		}
+		if (req.url == "/pass") {
+			return (pass);
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("site");
+		if (bereq.url == "/hit-for-miss") {
+			set beresp.uncacheable = true;
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.Tag-Pending = req.http.pending;
+		set resp.http.Tag-Objects = req.http.objects;
+		set resp.http.Tag-Edges = req.http.edges;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/pass"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "pass"
+} -run
+
+client c2 {
+	txreq -url "/probe"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.Tag-Pending == 0
+	expect resp.http.Tag-Objects == 0
+	expect resp.http.Tag-Edges == 0
+} -run
+
+client c3 {
+	txreq -url "/hit-for-miss"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "hfm1"
+} -run
+
+client c4 {
+	txreq -url "/probe"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.Tag-Pending == 0
+	expect resp.http.Tag-Objects == 0
+	expect resp.http.Tag-Edges == 0
+} -run
+
+client c5 {
+	txreq -url "/hit-for-miss"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "hfm2"
+} -run
+
+client c6 {
+	txreq -url "/probe"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.Tag-Pending == 0
+	expect resp.http.Tag-Objects == 0
+	expect resp.http.Tag-Edges == 0
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_default.publication_readers_phase0 == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.publication_readers_phase1 == 0

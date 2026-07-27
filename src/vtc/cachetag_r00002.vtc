@@ -1,0 +1,63 @@
+vtest "tag purge before assignment does not kill later fresh object"
+
+barrier b_before_add sock 2
+barrier b_continue sock 2
+
+server s1 {
+	rxreq
+	expect req.url == "/race"
+	txresp -body "fresh"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge("race");
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		vtc.barrier_sync("${b_before_add_sock}");
+		vtc.barrier_sync("${b_continue_sock}");
+		tags.add("race");
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/race"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "fresh"
+} -start
+
+barrier b_before_add sync
+
+client c2 {
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+} -run
+
+barrier b_continue sync
+client c1 -wait
+
+client c3 {
+	txreq -url "/race"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "fresh"
+} -run

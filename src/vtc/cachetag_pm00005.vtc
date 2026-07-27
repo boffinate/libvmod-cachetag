@@ -1,0 +1,69 @@
+vtest "purgemap hard sweeper kills untouched purged objects"
+
+server s1 {
+	rxreq
+	txresp -body "one"
+
+	rxreq
+	txresp -body "two"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default", sweep_interval = 0.1s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge("site");
+			return (synth(200));
+		}
+		if (req.method == "PING") {
+			set req.http.pending = tags.pending();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("site");
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		set resp.http.pending = req.http.pending;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "one"
+
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+} -run
+
+delay 1
+
+client c2 {
+	txreq -req PING
+	rxresp
+	expect resp.status == 200
+	expect resp.http.pending == 0
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_default.sweep_killed >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_default.sweep_passes >= 1
+
+client c3 {
+	txreq
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "two"
+} -run

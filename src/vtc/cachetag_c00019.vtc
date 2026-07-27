@@ -1,0 +1,81 @@
+vtest "cachetag VMOD namespaces isolate identical keys"
+
+server s1 {
+	rxreq
+	expect req.url == "/alpha"
+	txresp -body "alpha1"
+
+	rxreq
+	expect req.url == "/beta"
+	txresp -body "beta1"
+
+	rxreq
+	expect req.url == "/alpha"
+	txresp -body "alpha2"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new alpha = cachetag.namespace("alpha");
+		new beta = cachetag.namespace("beta");
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE_ALPHA") {
+			set req.http.purged =
+			    alpha.purge("shared");
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/alpha") {
+			alpha.add("shared");
+		} else if (bereq.url == "/beta") {
+			beta.add("shared");
+		}
+	}
+
+	sub vcl_hit {
+		if (req.url == "/alpha" && alpha.stale()) {
+			return (restart);
+		}
+		if (req.url == "/beta" && beta.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/alpha"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "alpha1"
+
+	txreq -url "/beta"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "beta1"
+
+	txreq -req PURGE_ALPHA
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+
+	txreq -url "/beta"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "beta1"
+
+	txreq -url "/alpha"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "alpha2"
+} -run

@@ -1,0 +1,53 @@
+diff --git a/src/fellow_object_attr.h b/src/fellow_object_attr.h
+index c7c6d2d..ab2e5f1 100644
+--- a/src/fellow_object_attr.h
++++ b/src/fellow_object_attr.h
+@@ -39,4 +39,6 @@ void fellow_object_attr_unregister(uintptr_t *handle);
+ int fellow_object_attr_visit(struct worker *wrk, struct objcore *oc,
+     fellow_object_attr_visit_f *visit, void *priv);
+ 
++void fellow_object_attr_test_fail_next_visit(void);
++
+ #endif
+diff --git a/src/fellow_storage.c b/src/fellow_storage.c
+index 9cf7d9a..3c6f5df 100644
+--- a/src/fellow_storage.c
++++ b/src/fellow_storage.c
+@@ -312,6 +312,7 @@ static pthread_mutex_t fellow_object_attr_mtx = PTHREAD_MUTEX_INITIALIZER;
+ static pthread_cond_t fellow_object_attr_cond = PTHREAD_COND_INITIALIZER;
+ static struct fellow_object_attr_provider *fellow_object_attr_provider;
+ static unsigned fellow_object_attr_active;
++static unsigned fellow_object_attr_fail_next_visit;
+ 
+ static struct fellow_object_attr_provider *
+ fellow_object_attr_acquire(const struct stevedore *stv)
+@@ -3944,6 +3945,15 @@ fellow_object_attr_unregister(uintptr_t *handle)
+ 	FREE_OBJ(provider);
+ }
+ 
++void
++fellow_object_attr_test_fail_next_visit(void)
++{
++
++	AZ(pthread_mutex_lock(&fellow_object_attr_mtx));
++	fellow_object_attr_fail_next_visit = 1;
++	AZ(pthread_mutex_unlock(&fellow_object_attr_mtx));
++}
++
+ int
+ fellow_object_attr_visit(struct worker *wrk, struct objcore *oc,
+     fellow_object_attr_visit_f *visit, void *priv)
+@@ -3965,6 +3976,13 @@ fellow_object_attr_visit(struct worker *wrk, struct objcore *oc,
+ 	stvfe = stv_stvfe(stv);
+ 	if (stv != stvfe->memstv && stv != stvfe->dskstv)
+ 		return (FELLOW_OBJECT_ATTR_VISIT_NOT_FELLOW);
++	AZ(pthread_mutex_lock(&fellow_object_attr_mtx));
++	if (fellow_object_attr_fail_next_visit) {
++		fellow_object_attr_fail_next_visit = 0;
++		AZ(pthread_mutex_unlock(&fellow_object_attr_mtx));
++		return (FELLOW_OBJECT_ATTR_VISIT_ERROR);
++	}
++	AZ(pthread_mutex_unlock(&fellow_object_attr_mtx));
+ 	fcoc = stvfe_dskoc_fco(wrk, stv, stvfe, oc, FEP_GET);
+ 	if (fcoc.fco == NULL)
+ 		return (FELLOW_OBJECT_ATTR_VISIT_ERROR);

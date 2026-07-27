@@ -1,0 +1,226 @@
+$ABI strict
+$Module cachetag 3 "Tag-based cache invalidation"
+$Synopsis auto
+
+DESCRIPTION
+===========
+
+``cachetag`` records cache-tag membership when an object is stored and
+publishes purge history for those tags.  Purge history is the only invalidation
+model: a purge never walks object postings and therefore an accepted purge
+returns ``-1``.
+
+$Event event_function
+
+$Object namespace(STRING name = "default",
+		  INT max_keys_per_object = 512,
+		  INT max_key_length = 1024,
+		  INT max_tag_header_bytes = 16384,
+		  STRING persist_path = "",
+		  ENUM { strict, grouped } wal_fsync = strict,
+		  INT wal_segment_bytes = 67108864,
+		  DURATION sweep_interval = 60,
+		  INT purge_history_max_entries = 1000000,
+		  INT sweep_batch_objects = 8192,
+		  DURATION sweep_batch_hold = 0.00025,
+		  DURATION sweep_batch_yield = 0.0001)
+
+Create a cache-tag namespace.
+
+``max_keys_per_object`` bounds the unique tags registered on one object.
+Exceeding it during a fetch fails that fetch: tags are never silently
+dropped, because delivering an object with a truncated tag set would let a
+later purge miss it. Production traces have shown real 333-tag objects, so
+the 512 default is sized to pass them; raise it explicitly for workloads
+with larger tag sets. ``max_tag_header_bytes`` bounds a single header value:
+an oversized ``add_header()`` value fails the fetch the same way, while an
+oversized ``purge_header()`` value rejects the whole call with ``-2`` before
+any tag is published.
+
+``sweep_interval`` controls the volatile-membership sweep cadence; ``0s``
+disables interval sweeps. ``purge_history_max_entries`` bounds retained purge
+history when non-zero. Raising a history floor can invalidate old objects, so
+production caps should be generous.
+
+``sweep_batch_objects`` and ``sweep_batch_hold`` bound each volatile-membership
+sweep batch by object count and elapsed ``obj_mtx`` hold time. ``sweep_batch_yield``
+optionally adds a cooperative sleep after releasing ``obj_mtx`` between batches.
+
+``persist_path`` enables durable purge history. The WAL is replayed before the
+namespace becomes ready. Fellow objects keep their folded tags and registration
+sequence in a checksummed FDO attribute and are probed directly on hit or
+deliver; they do not create VMOD object membership. A Fellow allocation that
+falls back to transient storage uses volatile membership instead. Missing or
+invalid attributes fail closed; a valid envelope without this namespace means
+the object has no membership in this namespace.
+
+``wal_fsync=grouped`` is currently a compatibility spelling for ``strict`` and
+performs an ``fsync()`` before a purge succeeds. A bounded-window group-commit
+implementation may give it distinct behavior in a future format version.
+
+The default one-million-entry history cap bounds resident history for persistent
+namespaces. Pruned history is represented by durable hard and soft floors in a
+streamed checkpoint, so restart cannot resurrect it. Set a different positive
+cap to tune the bound; ``0`` deliberately restores unbounded retention.
+
+$Method VOID .add(STRING key)
+
+Register ``key`` for the object being fetched.
+
+$Restrict vcl_backend_response vcl_backend_error
+
+$Method VOID .add_header(STRING header, STRING sep = ",")
+
+Parse and register tag keys from ``header``. Tokens are trimmed around
+``sep`` and must not contain embedded whitespace. There is no independent
+per-header token ceiling: the header value is bounded by
+``max_tag_header_bytes`` and the unique keys it registers by
+``max_keys_per_object``. Exceeding either limit fails the fetch
+(fail closed); tags are never silently dropped.
+
+$Restrict vcl_backend_response vcl_backend_error
+
+$Method INT .purge(STRING key, ENUM { hard, soft } mode = hard)
+
+Publish a hard or soft purge for ``key``. An accepted purge returns ``-1``;
+``-2`` means a resource or configured limit rejected it, ``-3`` means invalid
+input, and ``-4`` means durable persistence is unavailable or failed. A purge
+after registration invalidates that registration, while a purge before
+registration does not.
+
+$Restrict vcl_recv vcl_hit vcl_miss vcl_pass vcl_deliver vcl_synth vcl_backend_fetch vcl_backend_response vcl_backend_error
+
+$Method INT .purge_header(STRING header, STRING sep = ",",
+			  ENUM { hard, soft } mode = hard)
+
+Parse and purge every tag in ``header``. All tokens are validated before any
+publication. The token count has no independent ceiling; the header value is
+bounded by ``max_tag_header_bytes`` and each token by ``max_key_length``.
+Accepted purges return ``-1`` only after every tag is published.
+Publication is sequential, so if a later durable publication fails, earlier
+tags remain purged and the error is returned. The same negative error codes as
+``purge()`` apply.
+
+$Restrict vcl_recv vcl_hit vcl_miss vcl_pass vcl_deliver vcl_synth vcl_backend_fetch vcl_backend_response vcl_backend_error
+
+$Method INT .generation(STRING key)
+
+Return the latest retained hard or soft purge sequence for ``key``. ``0`` means
+that no exact purge history is retained for the key, ``-2`` means the sequence
+cannot be represented as a VCL integer, and ``-3`` means invalid input.
+
+Automatic sweeps can reclaim entries that no live object needs. When
+``purge_history_max_entries`` is non-zero, compaction can also replace exact
+per-key history with namespace floors. In either case this diagnostic method
+returns ``0`` for a reclaimed key even though a floor can still invalidate old
+objects. Disable interval sweeps and use unbounded purge history when exact
+per-key diagnostics are required.
+
+$Restrict vcl_recv vcl_hit vcl_miss vcl_pass vcl_deliver vcl_synth vcl_backend_fetch vcl_backend_response vcl_backend_error
+
+$Method BOOL .stale()
+
+Return true if the current hit/delivery object has a later hard purge, or is
+already leaving the hash. A true result marks the object for removal. A soft
+purge reduces matching objects once and returns false.
+
+$Restrict vcl_hit vcl_deliver
+
+$Method INT .pending()
+
+Return unconsumed pending registrations.
+
+$Method INT .objects()
+
+Return live volatile-membership objects. Fellow-direct objects deliberately do
+not appear here.
+
+$Method INT .edges()
+
+Return live volatile-membership tag folds. Fellow-direct objects deliberately
+do not appear here.
+
+$Method INT .compact()
+
+Prune over-cap purge history, rebuild tombstone-heavy purge maps, perform one
+volatile-membership sweep, and request deferred low-water container resize
+maintenance. The return value reports logical sweep work; object and side-table
+containers converge asynchronously.
+
+$Restrict vcl_recv vcl_hit vcl_miss vcl_pass vcl_deliver vcl_synth vcl_backend_fetch vcl_backend_response vcl_backend_error
+
+$Method BOOL .test_fail_next_key_purge_wal()
+
+Make the next durable purge WAL append fail for regression tests.
+
+$Method BOOL .test_fail_next_persist_prepare()
+
+Make the next persistence preparation fail for regression tests.
+
+$Method BOOL .test_side_initial_buckets(INT buckets)
+
+Set the initial lazy volatile side-table bucket count for regression tests.
+
+$Method BOOL .test_abort_next_sweep()
+
+Abort the next purge-map sweep after certificate start for regression tests.
+
+$Method BOOL .test_force_next_attach_slot_overflow()
+
+Make the next volatile attachment take the side-slot overflow path for regression tests.
+
+$Method BOOL .test_fail_next_object_segment_alloc()
+
+Make the next combined volatile object-entry and count-sidecar segment allocation fail.
+
+$Method BOOL .test_structural_limits()
+
+Return true when Docker-built cachetag internal object and side-slot sizes match the supported-layout assertions.
+
+$Method BOOL .test_side_fingerprint_bits(INT bits)
+
+Set the volatile side-table fingerprint width for regression tests. This is accepted only before the namespace has attached an object; production uses 32 bits.
+
+$Method BOOL .test_side_start_migration(INT buckets)
+
+Publish a test-only volatile side-table migration to ``buckets`` buckets.
+
+$Method INT .test_side_migrate_buckets(INT buckets)
+
+Advance a test-only volatile side-table migration by at most ``buckets`` retiring buckets. Returns ``1`` on success and a negative errno on invariant failure.
+
+$Method INT .test_side_migration_active()
+
+Return ``1`` when a test-only volatile side-table migration is active.
+
+$Method INT .test_side_table_buckets()
+
+Return the aggregate primary plus retiring volatile side-table bucket count.
+
+$Method BOOL .test_fail_next_side_migration_alloc()
+
+Make the next test or emergency side-table migration allocation fail.
+
+$Method BOOL .test_resize_low_water_ready()
+
+Make any pending low-water resize request eligible for immediate regression-test maintenance.
+
+$Method BOOL .test_resize_worker_drain(INT timeout_ms)
+
+Wake resize maintenance and wait until no immediate resize work remains, or until ``timeout_ms`` expires.
+
+$Method BOOL .test_next_fellow_attr_version(INT version)
+
+Make the next Fellow FDO attribute use the supplied envelope version.
+
+$Method BOOL .test_next_fellow_attr_bad_length()
+
+Make the next Fellow FDO attribute encode an invalid total length.
+
+$Method BOOL .test_next_fellow_attr_corruption(ENUM { record_len, fold_count, envelope_flags, envelope_reserved, record_flags, duplicate_namespace })
+
+Make the next Fellow FDO attribute encode the selected test-only corruption.
+
+$Method BOOL .test_next_fellow_attr_read_failure()
+
+Make the next Fellow object-attribute visit report a test-only read failure.

@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Peter Bowyer <peter@mapledesign.co.uk>
+Date: Tue, 7 Jul 2026 12:00:00 +0100
+Subject: [PATCH 12/12] fellow_storage: skip drain idle grace on shutdown
+
+The Fellow warn-close path marks storage as shutting down before it starts the
+disk drain helper. At that point new allocations are rejected, but
+`sfedsk_drain()` still performed the normal 100 idle polls at 100ms each after
+the LRU had gone empty. That adds a fixed 10s child-stop floor even when there
+is no more drain work to do.
+
+Large varnishtest shutdown benchmarks can hit the child-stop deadline in this
+idle grace after the measured load and RSS stats have already completed. Keep
+the drain pass itself, but skip the idle grace once the storage is already in
+shutdown.
+---
+ src/fellow_storage.c | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/src/fellow_storage.c b/src/fellow_storage.c
+--- a/src/fellow_storage.c
++++ b/src/fellow_storage.c
+@@ -2176,10 +2176,11 @@ sfedsk_lru_thread(void *priv)
+  */
+ 
+ static void
+-sfedsk_drain(struct worker *wrk, const struct stevedore *stv)
++sfedsk_drain(struct worker *wrk, const struct stevedore *stv,
++    unsigned idle_polls)
+ {
+ 	uintmax_t n;
+-	int r = 0;
++	unsigned r = 0;
+ 
+ 	do {
+ 		n = 0;
+@@ -2188,10 +2189,10 @@ sfedsk_drain(struct worker *wrk, const struct stevedore *stv)
+ 			n++;
+ 			wrk->strangelove = (int)STVELOVE_SIGNAL_DRAIN;
+ 		}
+-		VSLb(wrk->vsl, SLT_Debug, "check %d drain %lu", r, n);
++		VSLb(wrk->vsl, SLT_Debug, "check %u drain %lu", r, n);
+ 		if (n == 0)
+ 			(void) usleep(100 * 1000);
+-	} while (r++ < SFEDSK_DRAIN_IDLE_POLLS);
++	} while (r++ < idle_polls);
+ 	VSLb(wrk->vsl, SLT_Debug, "drain done");
+ }
+ 
+@@ -2915,7 +2916,9 @@ sfe_drain_thread(struct worker *wrk, void *arg)
+ 	wrk->vsl = &vsl;
+ 	VSL_Init(wrk->vsl, vsl_buf, sizeof vsl_buf);
+ 
+-	sfedsk_drain(wrk, stvfe->dskstv);
++	/* Shutdown already rejects new allocations, so do not add idle grace. */
++	sfedsk_drain(wrk, stvfe->dskstv,
++	    stvfe->shutdown ? 0 : SFEDSK_DRAIN_IDLE_POLLS);
+ 
+ 	VSL_Flush(wrk->vsl, 0);
+ 	return (NULL);
+-- 
+2.50.1 (Apple Git-155)

@@ -1,0 +1,81 @@
+vtest "purgemap side-map swap deletion preserves moved object lookup"
+
+server s1 {
+	rxreq
+	expect req.url == "/a"
+	txresp -body "a1"
+
+	rxreq
+	expect req.url == "/b"
+	txresp -body "b1"
+
+	rxreq
+	expect req.url == "/a"
+	txresp -body "a2"
+
+	rxreq
+	expect req.url == "/b"
+	txresp -body "b2"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("swap_delete", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge(req.http.Tag);
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add(bereq.url);
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/a"
+	rxresp
+	expect resp.body == "a1"
+
+	txreq -url "/b"
+	rxresp
+	expect resp.body == "b1"
+
+	txreq -req PURGE -hdr "Tag: /a"
+	rxresp
+	expect resp.http.purged == -1
+
+	txreq -url "/a"
+	rxresp
+	expect resp.body == "a2"
+
+	txreq -req PURGE -hdr "Tag: /b"
+	rxresp
+	expect resp.http.purged == -1
+
+	txreq -url "/b"
+	rxresp
+	expect resp.body == "b2"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_swap_delete.volatile_objects == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_swap_delete.volatile_edges == 2
+
+server s1 -wait

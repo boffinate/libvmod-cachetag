@@ -1,0 +1,74 @@
+vtest "purgemap concurrent volatile membership crosses side-table growth"
+
+server s1 -repeat 16 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("side_growth", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			if (!tags.test_side_initial_buckets(1)) {
+				return (synth(500));
+			}
+			set req.http.purged = tags.purge("growth-tag");
+			return (synth(200));
+		}
+		set req.hash_always_miss = true;
+	}
+
+	sub vcl_backend_response {
+		tags.add("growth-tag");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_deliver {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c0 {
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+} -run
+
+client c1 -repeat 8 {
+	txreq -url "/growth"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "object"
+} -start
+
+client c2 -repeat 8 {
+	txreq -url "/growth"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "object"
+} -start
+
+client c1 -wait
+client c2 -wait
+
+vinyl v1 -expect CACHETAG.vcl1_tags_side_growth.volatile_objects == 16
+vinyl v1 -expect CACHETAG.vcl1_tags_side_growth.volatile_edges == 16
+vinyl v1 -expect CACHETAG.vcl1_tags_side_growth.volatile_side_table_grows >= 4
+vinyl v1 -expect CACHETAG.vcl1_tags_side_growth.volatile_side_table_buckets >= 16
+vinyl v1 -expect CACHETAG.vcl1_tags_side_growth.volatile_attach_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_side_growth.stale_calls >= 16
+
+server s1 -wait

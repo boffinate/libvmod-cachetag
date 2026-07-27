@@ -1,0 +1,161 @@
+vtest "resize worker handles side migration and object preallocation"
+
+server s1 -repeat 57 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("resize_worker", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "INIT") {
+			if (!tags.test_side_initial_buckets(64)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "DRAIN") {
+			if (!tags.test_resize_worker_drain(5000)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "ACTIVE") {
+			set req.http.result = tags.test_side_migration_active();
+			return (synth(200));
+		}
+		if (req.method == "COUNT") {
+			set req.http.result = tags.test_side_table_buckets();
+			return (synth(200));
+		}
+		if (req.http.Load) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_hash {
+		if (req.http.Load) {
+			hash_data(req.xid);
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("worker");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_init {
+	txreq -req INIT
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_load_side_below_soft -repeat 11 {
+	txreq -url "/object" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_drain_side_below_soft {
+	txreq -req DRAIN
+	rxresp
+	expect resp.status == 200
+
+	txreq -req ACTIVE
+	rxresp
+	expect resp.http.result == 0
+
+	txreq -req COUNT
+	rxresp
+	expect resp.http.result == 64
+} -run
+
+client c_load_side_at_soft {
+	txreq -url "/object" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_drain_side_at_soft {
+	txreq -req DRAIN
+	rxresp
+	expect resp.status == 200
+
+	txreq -req ACTIVE
+	rxresp
+	expect resp.http.result == 0
+
+	txreq -req COUNT
+	rxresp
+	expect resp.http.result == 128
+} -run
+
+client c_load_object_soft_1 -repeat 10 {
+	txreq -url "/object" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_drain_object_mid {
+	txreq -req DRAIN
+	rxresp
+	expect resp.status == 200
+
+	txreq -req ACTIVE
+	rxresp
+	expect resp.http.result == 0
+} -run
+
+client c_load_object_soft_2 -repeat 20 {
+	txreq -url "/object" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_drain_object_high {
+	txreq -req DRAIN
+	rxresp
+	expect resp.status == 200
+
+	txreq -req ACTIVE
+	rxresp
+	expect resp.http.result == 0
+} -run
+
+client c_load_object_tail -repeat 15 {
+	txreq -url "/object" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_drain_all {
+	txreq -req DRAIN
+	rxresp
+	expect resp.status == 200
+
+	txreq -req ACTIVE
+	rxresp
+	expect resp.http.result == 0
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.volatile_objects == 57
+vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.volatile_object_table_slots == 128
+vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.volatile_side_table_buckets == 256
+vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.volatile_attach_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.side_resize_attach_grow_publishes == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.side_resize_attach_grow_old_buckets_max == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.object_emergency_segment_allocations >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.object_emergency_segment_old_capacity_max == 0
+
+server s1 -wait

@@ -1,0 +1,48 @@
+vtest "cachetag VMOD Fellow clean restart harness"
+
+server s1 {
+	rxreq
+	expect req.url == "/fellow-smoke"
+	txresp -hdr "X-Source: backend" -body "fellow-body"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/fellow-smoke.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_backend_response {
+		tags.add("phase2-smoke");
+		set beresp.ttl = 1h;
+	}
+} -start
+
+client c1 {
+	txreq -url "/fellow-smoke"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend"
+	expect resp.body == "fellow-body"
+} -run
+
+server s1 -wait
+
+vinyl v1 -stop
+vinyl v1 -start
+vinyl v1 -expect n_vampireobject == 1
+
+client c1 {
+	txreq -url "/fellow-smoke"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend"
+	expect resp.body == "fellow-body"
+} -run

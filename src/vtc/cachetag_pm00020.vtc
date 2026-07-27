@@ -1,0 +1,87 @@
+vtest "segmented object vector sweep crosses segment boundaries"
+
+server s1 -repeat 65 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("segmented_sweep", sweep_interval = 0s,
+		    sweep_batch_objects = 8, sweep_batch_hold = 10s,
+		    sweep_batch_yield = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+		if (req.method == "LOWREADY") {
+			if (tags.test_resize_low_water_ready()) {
+				return (synth(200));
+			}
+			return (synth(204));
+		}
+		set req.hash_always_miss = true;
+	}
+
+	sub vcl_backend_response {
+		tags.add("drop");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_load -repeat 65 {
+	txreq -url "/drop"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_objects == 65
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_object_table_slots == 128
+
+client c_compact {
+	txreq -req PURGE -hdr "Tag: drop"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 65
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_last_scanned == 65
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_last_killed == 65
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_last_batches >= 9
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_batch_scanned_max <= 8
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_remaining == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_object_table_slots == 128
+
+client c_drain {
+	txreq -req LOWREADY
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_object_table_slots == 0
+
+server s1 -wait

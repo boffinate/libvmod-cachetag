@@ -1,0 +1,35 @@
+vtest "cachetag VMOD VSC counters visible"
+
+server s1 {
+	rxreq
+	txresp -body "ok"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_backend_response {
+		tags.add("site");
+	}
+} -start
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_entries == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_table_slots == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_seq == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_probe_hard_hits == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_probe_soft_hits == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_insert_probe_hits == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_calls == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_detected == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.parse_errors == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.limit_rejections == 0

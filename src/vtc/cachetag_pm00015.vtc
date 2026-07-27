@@ -1,0 +1,141 @@
+vtest "purgemap fill drain shrinks object and side containers"
+
+server s1 -repeat 96 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("fill_drain", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+		if (req.method == "LOWREADY") {
+			if (tags.test_resize_low_water_ready()) {
+				return (synth(200));
+			}
+			return (synth(500));
+		}
+		if (req.method == "DRAIN") {
+			if (tags.test_resize_worker_drain(5000)) {
+				return (synth(200));
+			}
+			return (synth(500));
+		}
+		set req.hash_always_miss = true;
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/drop") {
+			tags.add("drop");
+		} else {
+			tags.add("keep");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_drop -repeat 72 {
+	txreq -url "/drop"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_keep -repeat 24 {
+	txreq -url "/keep"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 96
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 96
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots >= 128
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets >= 256
+
+client c1 {
+	txreq -req PURGE -hdr "Tag: drop"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 72
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 24
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 24
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots >= 128
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets >= 256
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.sweep_last_killed == 72
+
+client c1_drain {
+	txreq -req LOWREADY
+	rxresp
+	expect resp.status == 200
+
+	txreq -req DRAIN
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 24
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 24
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots <= 64
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets <= 128
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_shrinks >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_shrinks >= 1
+
+client c2 {
+	txreq -req PURGE -hdr "Tag: keep"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 24
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots <= 64
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets <= 128
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.purgemap_table_slots == 0
+
+client c2_drain {
+	txreq -req LOWREADY
+	rxresp
+	expect resp.status == 200
+
+	txreq -req DRAIN
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets == 0
+
+server s1 -wait

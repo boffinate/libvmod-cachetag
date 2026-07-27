@@ -1,0 +1,71 @@
+vtest "purgemap structural limits and side-slot overflow fail closed"
+
+server s1 {
+	rxreq
+	expect req.url == "/overflow"
+	txresp -body "overflow"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("limits", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "CHECK") {
+			set req.http.structural = tags.test_structural_limits();
+			return (synth(200));
+		}
+		if (req.method == "PROBE") {
+			set req.http.pending = tags.pending();
+			set req.http.objects = tags.objects();
+			set req.http.edges = tags.edges();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/overflow") {
+			if (!tags.test_force_next_attach_slot_overflow()) {
+				set beresp.status = 599;
+			}
+			tags.add("overflow");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_synth {
+		set resp.http.structural = req.http.structural;
+		set resp.http.pending = req.http.pending;
+		set resp.http.objects = req.http.objects;
+		set resp.http.edges = req.http.edges;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -req CHECK
+	rxresp
+	expect resp.status == 200
+	expect resp.http.structural == true
+
+	txreq -url "/overflow"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "overflow"
+
+	txreq -req PROBE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.pending == 0
+	expect resp.http.objects == 0
+	expect resp.http.edges == 0
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_limits.volatile_attach_failures == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_limits.publication_readers_phase0 == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_limits.publication_readers_phase1 == 0
+
+server s1 -wait

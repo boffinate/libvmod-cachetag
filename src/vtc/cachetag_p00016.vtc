@@ -1,0 +1,140 @@
+vtest "cachetag purgemap Fellow concurrent cold first touch rejects hard-purged vampire"
+
+barrier b_backend_closed cond 2
+barrier b_clients cond 5
+
+server s1 {
+	rxreq
+	expect req.url == "/cold-first-touch"
+	txresp -hdr "Connection: close" -hdr "X-Source: backend-old" -body "old-body"
+
+	expect_close
+	barrier b_backend_closed sync
+	accept
+
+	rxreq
+	expect req.url == "/cold-first-touch"
+	txresp -hdr "Connection: close" -hdr "X-Source: backend-new" -body "new-body"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/concurrent-cold-touch.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+		sub vcl_init {
+			slash.tune_fellow(storage.fellow);
+			new tags = cachetag.namespace("persistent_pm",
+			    persist_path = "${tmpdir}/tag-persist",
+			    sweep_interval = 0s);
+		}
+
+		sub vcl_recv {
+			if (req.method == "PURGE") {
+				set req.http.purged = tags.purge("cold-touch");
+				return (synth(200));
+			}
+		}
+
+	sub vcl_backend_response {
+		tags.add("cold-touch");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+} -start
+
+client c0 {
+	txreq -url "/cold-first-touch"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_objects_written == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_store_invariant_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+
+client c0 {
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+} -run
+
+barrier b_backend_closed sync
+vinyl v1 -stop
+vinyl v1 -start
+vinyl v1 -expect n_vampireobject == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_direct_probes == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
+
+client c1 {
+	barrier b_clients sync
+	txreq -url "/cold-first-touch"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -start
+
+client c2 {
+	barrier b_clients sync
+	txreq -url "/cold-first-touch"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -start
+
+client c3 {
+	barrier b_clients sync
+	txreq -url "/cold-first-touch"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -start
+
+client c4 {
+	barrier b_clients sync
+	txreq -url "/cold-first-touch"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -start
+
+barrier b_clients sync
+client c1 -wait
+client c2 -wait
+client c3 -wait
+client c4 -wait
+
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_direct_probes >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_namespace_records_probed >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_probe_hard_hits >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_invalid == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_read_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_store_invariant_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
+
+server s1 -wait

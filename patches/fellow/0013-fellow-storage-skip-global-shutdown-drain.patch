@@ -1,0 +1,174 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Peter Bowyer <peter@mapledesign.co.uk>
+Date: Wed, 8 Jul 2026 12:00:00 +0100
+Subject: [PATCH 13/13] fellow_storage: skip global shutdown drain
+
+The warn-close path marks Fellow storage as shutting down and stops the cache
+LRU threads before it starts `sfe-drain`, but the drain helper still performs
+one full `LRU_NukeOne()` pass over the disk LRU. For generated shutdown
+benchmarks with millions of persistent objects, that pass is proportional to
+the number of live Vinyl objcores and can still exceed the manager child-stop
+watchdog.
+
+That drain is required when VCL-defined Fellow storage goes out of scope: the
+child keeps running, so Vinyl's live objcores must be removed and the shared
+LRU/Fellow cache state must be empty before final cleanup. It is not required
+for global Fellow storage during process shutdown. The durable objects already
+survive in Fellow's log, and the live Vinyl objcores disappear with the child.
+
+Skip the drain for global process shutdown. Because that deliberately leaves
+the shared Vinyl LRU, Fellow cache, and cache memory buddy populated, teach
+final close to abandon those process-local structures instead of running the
+normal asserting cleanup paths. The abandon path still stops and joins Fellow
+cache background work before log teardown; it only skips freeing non-empty
+indexes/lists and the backing memory mapping that process exit will reclaim.
+---
+ src/fellow_cache.c   | 16 ++++++++++++++++
+ src/fellow_cache.h   |  1 +
+ src/fellow_storage.c | 69 +++++++++++++++++++++++++++++++++++++++++++++-------
+ 3 files changed, 77 insertions(+), 9 deletions(-)
+
+diff --git a/src/fellow_cache.c b/src/fellow_cache.c
+--- a/src/fellow_cache.c
++++ b/src/fellow_cache.c
+@@ -8929,6 +8929,22 @@ fellow_cache_fini(struct fellow_cache **fcp)
+ 	FREE_OBJ(fc);
+ }
+ 
++void
++fellow_cache_abandon(struct fellow_cache **fcp)
++{
++	struct fellow_cache *fc;
++
++	TAKE_OBJ_NOTNULL(fc, fcp, FELLOW_CACHE_MAGIC);
++
++	/*
++	 * Process shutdown can deliberately leave live objcores attached to
++	 * Fellow cache objects.  Stop background work, but leave the non-empty
++	 * indexes and LRU lists for process exit rather than asserting in fini.
++	 */
++	fellow_cache_shutdown(fc);
++	fellow_cache_async_fini(fc);
++}
++
+ void
+ fellow_cache_kick_lru(const struct fellow_cache *fc)
+ {
+diff --git a/src/fellow_cache.h b/src/fellow_cache.h
+--- a/src/fellow_cache.h
++++ b/src/fellow_cache.h
+@@ -64,6 +64,7 @@ struct fellow_cache *
+ fellow_cache_init(struct fellow_fd *, buddy_t *, struct stvfe_tune *,
+     fellow_task_run_t, struct VSC_fellow *stats);
+ void fellow_cache_fini(struct fellow_cache **);
++void fellow_cache_abandon(struct fellow_cache **);
+ void fellow_cache_shutdown(struct fellow_cache *);
+ 
+ void fellow_cache_obj_wait_written(struct fellow_cache_obj *fco);
+diff --git a/src/fellow_storage.c b/src/fellow_storage.c
+--- a/src/fellow_storage.c
++++ b/src/fellow_storage.c
+@@ -2923,6 +2923,48 @@ sfe_drain_thread(struct worker *wrk, void *arg)
+ 	return (NULL);
+ }
+ 
++static void
++sfe_lru_close(struct stvfe *stvfe)
++{
++	CHECK_OBJ_NOTNULL(stvfe, STVFE_MAGIC);
++
++	if (stvfe->dskstv->lru == NULL) {
++		AZ(stvfe->memstv->lru);
++		return;
++	}
++	assert(stvfe->dskstv->lru == stvfe->memstv->lru);
++	stvfe->memstv->lru = NULL;
++
++	if (stvfe->scope == STVFE_GLOBAL && stvfe->shutdown) {
++		/*
++		 * On process shutdown, durable Fellow objects survive in the
++		 * log, but Vinyl's live objcores are about to disappear with
++		 * the child.  Do not spend the manager's stop window draining
++		 * them only to satisfy LRU_Free()'s empty-list assertion.
++		 */
++		stvfe->dskstv->lru = NULL;
++		return;
++	}
++
++	LRU_Free(&stvfe->dskstv->lru);
++	AZ(stvfe->dskstv->lru);
++}
++
++static void
++sfe_cache_close(struct stvfe *stvfe)
++{
++	CHECK_OBJ_NOTNULL(stvfe, STVFE_MAGIC);
++
++	if (stvfe->scope == STVFE_GLOBAL && stvfe->shutdown) {
++		fellow_cache_abandon(&stvfe->fc);
++		AZ(stvfe->fc);
++		return;
++	}
++
++	fellow_cache_fini(&stvfe->fc);
++	AZ(stvfe->fc);
++}
++
+ static void
+ sfe_close_warn(struct stvfe *stvfe)
+ {
+@@ -2943,6 +2988,9 @@ sfe_close_warn(struct stvfe *stvfe)
+ 	AZ(pthread_join(stvfe->dsk_lru_thread, &r));
+ 	AZ(r);
+ 
++	if (stvfe->scope == STVFE_GLOBAL)
++		return;
++
+ 	WRK_BgThread(&thr, "sfe-drain", sfe_drain_thread, stvfe);
+ 	AZ(pthread_join(thr, &r));
+ 	AZ(r);
+@@ -2957,11 +3005,20 @@ sfe_close_deref(struct stvfe *stvfe)
+ 	AN(stvfe->ref);
+ 	if (--stvfe->ref)
+ 		return;
+ 
+-	if (stvfe->membuddy == &stvfe->my_membuddy)
+-		buddy_fini(&stvfe->membuddy, BUDDYF(unmap), NULL,
+-		    sfe_umapper, NULL);
+-	else
++	if (stvfe->membuddy == &stvfe->my_membuddy) {
++		if (stvfe->scope == STVFE_GLOBAL && stvfe->shutdown) {
++			/*
++			 * Live Fellow cache objects can still own memory here.
++			 * Background users have stopped; process exit will
++			 * reclaim the mapping.
++			 */
++			stvfe->membuddy = NULL;
++		} else {
++			buddy_fini(&stvfe->membuddy, BUDDYF(unmap), NULL,
++			    sfe_umapper, NULL);
++		}
++	} else
+ 		stvfe->membuddy = NULL;
+ 	AZ(stvfe->membuddy);
+ }
+@@ -2968,14 +3011,11 @@ sfe_close_real(struct stvfe *stvfe)
+ 	CHECK_OBJ_NOTNULL(stvfe, STVFE_MAGIC);
+ 
+ 	sfe_ban_space_return(stvfe);
+ 	buddy_alloc_async_done(&stvfe->ban_reqs->reqs);
+ 
+-	fellow_cache_fini(&stvfe->fc);
+-	AZ(stvfe->fc);
+-
+-	stvfe->memstv->lru = NULL;
+-	LRU_Free(&stvfe->dskstv->lru);
+-	AZ(stvfe->dskstv->lru);
++	sfe_cache_close(stvfe);
++
++	sfe_lru_close(stvfe);
+ 
+ 	fellow_log_close(&stvfe->ffd);
+ 	AZ(stvfe->ffd);
+-- 
+2.50.1 (Apple Git-155)

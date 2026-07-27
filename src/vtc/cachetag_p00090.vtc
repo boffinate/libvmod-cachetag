@@ -1,0 +1,63 @@
+vtest "cachetag purgemap Fellow missing FDO attribute fails closed"
+
+server s1 {
+	rxreq
+	expect req.url == "/missing-attr"
+	txresp -hdr "X-Skip-Tag: 1" -hdr "X-Source: backend-old" -body "old-body"
+
+	rxreq
+	expect req.url == "/missing-attr"
+	txresp -hdr "X-Source: backend-new" -body "new-body"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/purgemap-missing-attr.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+		new tags = cachetag.namespace("persistent_pm",
+		    persist_path = "${tmpdir}/tag-persist",
+		    sweep_interval = 0s);
+	}
+
+	sub vcl_backend_response {
+		if (!beresp.http.X-Skip-Tag) {
+			tags.add("site");
+		}
+		unset beresp.http.X-Skip-Tag;
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+} -start
+
+client c1 {
+	txreq -url "/missing-attr"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+
+	txreq -url "/missing-attr"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_absent >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_read_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
+
+server s1 -wait

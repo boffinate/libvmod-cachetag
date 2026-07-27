@@ -1,0 +1,45 @@
+vtest "cachetag VMOD abandoned fetch cleans pending attach state"
+
+server s1 {
+	rxreq
+	txresp -body "abandoned"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default");
+	}
+
+	sub vcl_recv {
+		if (req.url == "/probe") {
+			set req.http.pending = tags.pending();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("site");
+		return (abandon);
+	}
+
+	sub vcl_synth {
+		set resp.http.Tag-Pending = req.http.pending;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.status == 503
+
+	txreq -url "/probe"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.Tag-Pending == 0
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_default.publication_readers_phase0 == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_default.publication_readers_phase1 == 0

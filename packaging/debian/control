@@ -1,0 +1,52 @@
+Source: libvmod-cachetag
+Section: web
+Priority: optional
+Maintainer: @MAINTAINER_NAME@ <@MAINTAINER_EMAIL@>
+Build-Depends:
+ debhelper-compat (= 13),
+ pkgconf,
+ python3,
+ python3-docutils,
+ vinyl-cache-dev (= @VINYL_PACKAGE_VERSION@),
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://github.com/boffinate/libvmod-cachetag
+Vcs-Git: https://github.com/boffinate/libvmod-cachetag.git
+Vcs-Browser: https://github.com/boffinate/libvmod-cachetag
+
+Package: libvmod-cachetag
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ vinyld-abi-@VINYL_STRICT_ABI@,
+ vinyld-vrt (= @VINYL_VRT@),
+ vinyld-cohort-@COHORT_ID@,
+Description: tag-based cache invalidation VMOD for Vinyl Cache
+ cachetag is a Vinyl Cache VMOD that tags cached objects and invalidates them
+ by tag. It maintains a purge map so a single tag purge can invalidate every
+ object that carries the tag, without a full cache ban or a linear ban-list
+ evaluation.
+ .
+ This package installs only the VMOD shared object, its manual page and its
+ VCC interface description. It does not install a daemon, a service unit, a
+ system user or any VCL, and it does not restart Vinyl Cache.
+ .
+ The module declares "$ABI strict" and uses private Vinyl Cache cache APIs,
+ so a given binary works only with the exact Vinyl Cache build it was
+ compiled against. That coupling is encoded as a dependency on two virtual
+ packages
+ .
+   vinyld-abi-@VINYL_STRICT_ABI@
+   vinyld-cohort-@COHORT_ID@
+ .
+ which only the matching Vinyl Cache runtime provides, so an incompatible
+ Vinyl Cache upgrade is unresolvable rather than silently loadable.
+ .
+ The two are not redundant. The ABI token is derived from the upstream Vinyl
+ Cache source revision, so a repackaged, patched or vendor-respun runtime built
+ from the same revision advertises the identical token and would otherwise
+ satisfy this dependency without ever having been built or tested with this
+ VMOD. The cohort id identifies the coordinated set of packages -- one Vinyl
+ Cache runtime and every strict-ABI VMOD -- that were built and tested
+ together, so a same-ABI runtime from a different cohort is refused.

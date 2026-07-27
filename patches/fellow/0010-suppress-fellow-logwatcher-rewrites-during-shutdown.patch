@@ -1,0 +1,96 @@
+From e90075fae11a7939badfa33d0d636e73681f6432 Mon Sep 17 00:00:00 2001
+From: Peter Bowyer <peter@mapledesign.co.uk>
+Date: Mon, 29 Jun 2026 14:04:34 +0100
+Subject: [PATCH] Suppress Fellow log rewrites during shutdown
+
+Generated benchmark VTCs can ask Vinyl to stop while the Fellow logwatcher is still active. The watcher was allowed to keep starting FP_OPEN rewrite workers during the storage close warning phase, so shutdown could spend the whole VTC child-stop grace period compacting the persistent log. When that happened, vinyltest killed the child and the panic backtrace ended in fellow_logwatcher_fini(), even though the workload itself had already completed successfully.
+
+Storage warn-close already marks the cache side as shutting down and drains outstanding work, but the logwatcher only learned about shutdown in the final log close path. Add an explicit logwatcher shutdown flag during warn-close. Once set, the watcher still flushes pending logbuffer work, but downgrades new FLW_NEED_REWRITE decisions to flush-only behavior and refuses to launch fresh background rewrite workers.
+
+This keeps the necessary close-time flushing intact while preventing optional rewrite/compaction work from racing the child stop path. The generated no-index Fellow benchmark and the cachetag Fellow local-cost lane both pass with this change; grouped WAL throughput remains in the expected range, while strict WAL remains IO-limited by design.
+---
+ src/fellow_log.c         | 20 ++++++++++++++++++--
+ src/fellow_log_storage.h |  1 +
+ src/fellow_storage.c     |  1 +
+ 3 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/src/fellow_log.c b/src/fellow_log.c
+index 9aa03e3..cc25f65 100644
+--- a/src/fellow_log.c
++++ b/src/fellow_log.c
+@@ -723,6 +723,7 @@ struct fellow_fd {
+ 	pthread_cond_t			watcher_cond;
+ 	pthread_t			watcher_thread;
+ 	unsigned			watcher_running;
++	unsigned			watcher_shutdown;
+ 	enum fellow_watcher_state	watcher_state;
+ 	enum fellow_rewrite		rewrite_state;
+ 
+@@ -6525,8 +6526,11 @@ fellow_logwatcher_thread(void *priv)
+ 	while (ffd->watcher_running) {
+ 		if (ffd->rewrite_state == FLW_S_REWRITING)
+ 			need = FLW_MAYFLUSH;
+-		else
++		else {
+ 			need = fellow_logwatcher_need(ffd, NULL);
++			if (ffd->watcher_shutdown && need == FLW_NEED_REWRITE)
++				need = FLW_MAYFLUSH;
++		}
+ 
+ 		switch (need) {
+ 		case FLW_NEED_NONE:
+@@ -6553,7 +6557,7 @@ fellow_logwatcher_thread(void *priv)
+ 			assert(ffd->rewrite_state == FLW_S_NOREWRITE);
+ 			ffd->watcher_state = FLW_S_FLUSHING;
+ 			fellow_logwatcher_flush(ffd, 0);
+-			if (! ffd->watcher_running)
++			if (! ffd->watcher_running || ffd->watcher_shutdown)
+ 				continue;
+ 			ffd->rewrite_state = FLW_S_REWRITING;
+ 			AZ(pthread_mutex_unlock(&ffd->logmtx));
+@@ -6649,6 +6653,18 @@ fellow_logwatcher_fini(struct fellow_fd *ffd)
+ 	AZ(pthread_cond_destroy(&ffd->watcher_cond));
+ }
+ 
++void
++fellow_logwatcher_shutdown(struct fellow_fd *ffd)
++{
++	CHECK_OBJ_NOTNULL(ffd, FELLOW_FD_MAGIC);
++
++	AZ(pthread_mutex_lock(&ffd->logmtx));
++	ffd->watcher_shutdown = 1;
++	if (ffd->watcher_running)
++		AZ(pthread_cond_signal(&ffd->watcher_cond));
++	AZ(pthread_mutex_unlock(&ffd->logmtx));
++}
++
+ static void *
+ fellow_space_thread(void *priv)
+ {
+diff --git a/src/fellow_log_storage.h b/src/fellow_log_storage.h
+index 2b4f8ce..3a6be6a 100644
+--- a/src/fellow_log_storage.h
++++ b/src/fellow_log_storage.h
+@@ -249,6 +249,7 @@ fellow_log_open(struct fellow_fd *ffd,
+ void fellow_log_flush(struct fellow_fd *ffd);
+ 
+ void fellow_log_close(struct fellow_fd **ffdp);
++void fellow_logwatcher_shutdown(struct fellow_fd *ffd);
+ 
+ int fellow_log_ban(struct fellow_fd *ffd, uint8_t op,
+     const uint8_t *bans, unsigned len, vtim_real time,
+diff --git a/src/fellow_storage.c b/src/fellow_storage.c
+index 27e291a..a1a7d96 100644
+--- a/src/fellow_storage.c
++++ b/src/fellow_storage.c
+@@ -2915,6 +2915,7 @@ sfe_close_warn(struct stvfe *stvfe)
+ 	if (stvfe->oev)
+ 		ObjUnsubscribeEvents(&stvfe->oev);
+ 	fellow_log_flush(stvfe->ffd);
++	fellow_logwatcher_shutdown(stvfe->ffd);
+ 	stvfe->shutdown = 1;
+ 	fellow_cache_shutdown(stvfe->fc);
+ 	buddy_kick(fellow_dskbuddy(stvfe->ffd));
+-- 
+2.50.1 (Apple Git-155)
+

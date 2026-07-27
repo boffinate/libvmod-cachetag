@@ -1,0 +1,124 @@
+vtest "held publication keeps capped purge history fail-closed"
+
+barrier b_held_tagged sock 2
+barrier b_held_continue sock 2
+
+server s1 {
+	rxreq
+	expect req.url == "/held"
+	txresp -body "held"
+	accept
+
+	rxreq
+	expect req.url == "/held"
+	txresp -body "fresh"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("cap_hold", sweep_interval = 0s, purge_history_max_entries = 4);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		set beresp.ttl = 1h;
+		if (bereq.url == "/held") {
+			tags.add("victim");
+			if (bereq.http.Skip-Hold != "1") {
+				vtc.barrier_sync("${b_held_tagged_sock}");
+				vtc.barrier_sync("${b_held_continue_sock}");
+			}
+		}
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_held {
+	txreq -url "/held"
+	rxresp
+	expect resp.body == "held"
+} -start
+
+barrier b_held_tagged sync
+
+client c1 {
+	txreq -req PURGE -hdr "Tag: victim"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 0
+
+	txreq -req PURGE -hdr "Tag: t01"
+	rxresp
+	expect resp.http.result == -1
+	txreq -req PURGE -hdr "Tag: t02"
+	rxresp
+	expect resp.http.result == -1
+	txreq -req PURGE -hdr "Tag: t03"
+	rxresp
+	expect resp.http.result == -1
+	txreq -req PURGE -hdr "Tag: t04"
+	rxresp
+	expect resp.http.result == -1
+	txreq -req PURGE -hdr "Tag: t05"
+	rxresp
+	expect resp.http.result == -1
+	txreq -req PURGE -hdr "Tag: t06"
+	rxresp
+	expect resp.http.result == -1
+	txreq -req PURGE -hdr "Tag: t07"
+	rxresp
+	expect resp.http.result == -1
+	txreq -req PURGE -hdr "Tag: t08"
+	rxresp
+	expect resp.http.result == -1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.reclaim_pending == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.purgemap_prunes >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.purgemap_pruned_entries >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.purgemap_hard_floor >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.purgemap_entries <= 4
+
+barrier b_held_continue sync
+client c_held -wait
+
+client c2 {
+	txreq -req COMPACT
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/held" -hdr "Skip-Hold: 1"
+	rxresp
+	expect resp.body == "fresh"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.publication_readers_phase0 == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.publication_readers_phase1 == 0
+
+server s1 -wait
