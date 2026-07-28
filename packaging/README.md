@@ -2,7 +2,7 @@
 
 ## Status: built, tested, and published once as an experimental pre-release
 
-Both recipes are built in clean rooms by the sibling `vcache-packaging` repository's CI — Debian 13 amd64 under pbuilder, EL9 x86_64 under Mock — installed into fresh containers, and exercised there. The v1.0.0 pre-release of 2026-07-26 was cut from cohort `vinyl-9.0.0-4b7e68292979`. They are Phase 3 of the binary packaging and distribution plan (`devdocs/docs/20260724_1526_plan_binary-packaging-and-distribution.md`).
+Both recipes are built in clean rooms by the sibling `vcache-packaging` repository's CI — Debian 13 amd64 under pbuilder, EL9 x86_64 under Mock — installed into fresh containers, and exercised there. The v1.0.0 pre-release of 2026-07-26 was cut from the trunk cohort `vinyl-9.0.0-4b7e68292979`; the current release-track cohort is `vinyl-9.0.1-ac4f719c16f4` (Vinyl 9.0.1, cachetag 1.0.1, minted 2026-07-28). They are Phase 3 of the binary packaging and distribution plan (`devdocs/docs/20260724_1526_plan_binary-packaging-and-distribution.md`).
 
 The blocker that held this directory at "never been built" until 2026-07-25 was never in this repository: cachetag declares `$ABI strict` and must be compiled against an installed `vinyl-cache-dev` / `vinyl-cache-devel` package, and Vinyl Cache 9 has no distribution packages anywhere. Step 7 of the plan — minimal Vinyl 9 Debian and RPM packages with strict-ABI virtual provides — supplied them, and both lanes now build cachetag against the installed development package of a Vinyl built in the same run. Do not "fix" a build failure by pointing these recipes at an unpackaged Vinyl prefix; that defeats the entire point of the exercise.
 
@@ -62,22 +62,22 @@ python3 tools/release_tool.py metadata --cohort <cohort-id> --target debian-13-a
 
 That tooling cross-checks each manifest's `cachetag.version` against `AC_INIT` in this repository's `configure.ac`, finding this checkout via `--cachetag-src`, `$CACHETAG_SRC`, or the sibling default. This directory defines the token vocabulary and nothing more; it does not depend on that tooling at build time.
 
-Since 2026-07-26 the packaging repository maintains two Vinyl pin tracks: **release** (upstream release tarball, currently 9.0.1 — what published packages build from) and **trunk** (pinned snapshot plus a scheduled trunk-HEAD harness run — the early-warning lane for Vinyl core changes and `$ABI strict` churn). The snapshot-style examples in the table below come from the trunk track; a release-track build substitutes plain release versions such as `9.0.1-1`. See `../../vcache-packaging/docs/20260726_1235_note_two-track-release-and-trunk.md`.
+Since 2026-07-26 the packaging repository maintains two Vinyl pin tracks: **release** (upstream release tarball, currently 9.0.1 — what published packages build from) and **trunk** (pinned snapshot plus a scheduled trunk-HEAD harness run — the early-warning lane for Vinyl core changes and `$ABI strict` churn). The examples in the table below come from the release track; a trunk-track build substitutes snapshot-style versions such as `9.0.0~git20260520.25761f8505-1.el9`. See `../../vcache-packaging/docs/20260726_1235_note_two-track-release-and-trunk.md`.
 
 ### Token vocabulary
 
 | Token | Source | Example | Used in |
 | --- | --- | --- | --- |
-| `@COHORT_ID@` | cohort manifest `cohort`; must be usable inside a package name, `^[a-z0-9][a-z0-9+.-]+$`, because both lanes bake it into a virtual package/provide name | `vinyl-9.0.0-0123456789ab` | Debian `Depends` (`vinyld-cohort-@COHORT_ID@`), RPM `Requires` (`vinyld(cohort-@COHORT_ID@)%{?_isa}`), changelog, spec description and `%changelog` |
-| `@CACHETAG_VERSION@` | cohort manifest `cachetag.version`, must equal `configure.ac` and the release tag | `1.0.0` | changelog, spec `Version` |
+| `@COHORT_ID@` | cohort manifest `cohort`; must be usable inside a package name, `^[a-z0-9][a-z0-9+.-]+$`, because both lanes bake it into a virtual package/provide name | `vinyl-9.0.1-ac4f719c16f4` | Debian `Depends` (`vinyld-cohort-@COHORT_ID@`), RPM `Requires` (`vinyld(cohort-@COHORT_ID@)%{?_isa}`), changelog, spec description and `%changelog` |
+| `@CACHETAG_VERSION@` | cohort manifest `cachetag.version`, must equal `configure.ac` and the release tag | `1.0.1` | changelog, spec `Version` |
 | `@PACKAGE_REVISION@` | target manifest; packaging-only revision, incremented on any rebuild against different Vinyl inputs | `1` | changelog, spec `Release` |
-| `@VINYL_PACKAGE_VERSION@` | target manifest; exact version-and-revision of the Vinyl packages in this cohort | Debian `9.0.0-1~deb13`; RPM `9.0.0~git20260520.25761f8505-1.el9`, which is the full `version-release` because that is what an RPM `=` dependency compares against | `Build-Depends`, `BuildRequires` |
-| `@VINYL_STRICT_ABI@` | cohort manifest `vinyl.strict_abi`; the trailing hash of `VMOD_ABI_Version` | `25761f8505817ac50df994270bfe75b60073e33e` | `Depends`, `Requires`, both build-time assertions |
+| `@VINYL_PACKAGE_VERSION@` | target manifest; exact version-and-revision of the Vinyl packages in this cohort | Debian `9.0.1-1`; RPM `9.0.1-1.el9`, which is the full `version-release` because that is what an RPM `=` dependency compares against | `Build-Depends`, `BuildRequires` |
+| `@VINYL_STRICT_ABI@` | cohort manifest `vinyl.strict_abi`; the trailing hash of `VMOD_ABI_Version` | `423648c4cb6b225b3268ffc337354ea938f5efee` | `Depends`, `Requires`, both build-time assertions |
 | `@VINYL_VRT@` | cohort manifest `vinyl.vrt` | `23.0` | `Depends`, `Requires` |
 | `@VINYL_VMODDIR@` | target manifest; absolute installed VMOD directory for that distro and architecture | `/usr/lib/x86_64-linux-gnu/vinyl-cache/vmods` | both build-time assertions |
-| `@SOURCE_URL@` | release manifest; URL of the tagged source archive | `https://.../libvmod-cachetag-1.0.0.tar.gz` | spec `Source0` |
+| `@SOURCE_URL@` | release manifest; URL of the tagged source archive | `https://.../libvmod-cachetag-1.0.1.tar.gz` | spec `Source0` |
 | `@MAINTAINER_NAME@`, `@MAINTAINER_EMAIL@` | release owner, decided 2026-07-25 | `Boffinate`, `noreply@boffinate.com` — the address does not accept mail; support goes through the issue tracker reachable via `Homepage`/`Vcs-Browser` | `control`, `changelog`, `copyright`, `%changelog` |
-| `@DEBIAN_VERSION@` | target manifest; full Debian version, upstream plus revision plus release suffix | `1.0.0-1~deb13` | `debian/changelog` |
+| `@DEBIAN_VERSION@` | target manifest; full Debian version, upstream plus revision plus release suffix when the target pins a `dist_tag` (the release-track Debian target pins an empty one) | `1.0.1-1` | `debian/changelog` |
 | `@DEBIAN_DISTRIBUTION@` | target manifest; changelog suite | `trixie` | `debian/changelog` |
 | `@DEBIAN_DATE@` | release timestamp, RFC 2822, derived from `SOURCE_DATE_EPOCH` | `Fri, 24 Jul 2026 20:00:00 +0000` | `debian/changelog` |
 | `@RPM_CHANGELOG_DATE@` | same instant in RPM `%changelog` format | `Fri Jul 24 2026` | spec `%changelog` |
@@ -195,7 +195,7 @@ Everything that needs a Debian or RPM toolchain, or a Vinyl package to build aga
 
 ## Known gaps
 
-- **`LICENSE` is distributed** since it was added to `Makefile.am`'s `EXTRA_DIST` (2026-07-24); the spec's `%license LICENSE` builds. `USAGE.md` and `INSTALL.md` remain absent from the archive; neither is packaged, so nothing blocks.
+- **`LICENSE` is distributed** since it was added to `Makefile.am`'s `EXTRA_DIST` (2026-07-24); the spec's `%license LICENSE` builds. `USAGE.md` and `INSTALL.md` joined `EXTRA_DIST` in the public-release rewrite, so both now ship in the archive; neither is packaged. The same rewrite dropped `docs/vmod_cachetag.rst`, which both recipes do package — that made the v1.0.0 archive unbuildable as a package, and v1.0.1 restores it to `EXTRA_DIST`.
 - **`Multi-Arch: same` is not set** on the Debian binary package. Whether it is correct depends on whether the Vinyl packages install VMODs under a multiarch `libdir` or a plain `/usr/lib/vinyl-cache/vmods`, which is decided by plan step 7. Revisit once that is settled; the `@VINYL_VMODDIR@` assertion in `debian/rules` will fail loudly if the assumption drifts.
 - **The maintainer address does not accept mail.** The identity was decided 2026-07-25 as `Boffinate <noreply@boffinate.com>`; it is deliberately a no-reply address, so every published package must carry a `Homepage`/`Vcs-Browser` (Debian) or `URL` (RPM) field pointing at the GitHub repository, whose issue tracker is the real support and security-report channel.
 - **No `debian/patches`.** There are no downstream patches. If one is ever needed, add `debian/patches/` with a `series` file; the source format already supports it.
