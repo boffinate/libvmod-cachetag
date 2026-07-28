@@ -169,7 +169,7 @@ client c_rollback_init {
 	expect resp.status == 200
 } -run
 
-client c_rollback_seed -repeat 12 {
+client c_rollback_seed -repeat 11 {
 	txreq -url "/rollback" -hdr "Load: 1" -hdr "Namespace: rollback"
 	rxresp
 	expect resp.status == 200
@@ -185,7 +185,7 @@ client c_rollback_start {
 	expect resp.http.result == 1
 } -run
 
-client c_rollback_refill -repeat 12 {
+client c_rollback_refill -repeat 13 {
 	txreq -url "/rollback" -hdr "Load: 1" -hdr "Namespace: rollback"
 	rxresp
 	expect resp.status == 200
