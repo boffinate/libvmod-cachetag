@@ -112,8 +112,8 @@ storage-agnostic VTCs in `VTC_TESTS` (16 `c`, 7 `r`, 29 `pm`) to pass:
 For the default `distcheck`, expect:
 
 ```text
-libvmod-cachetag-1.0.0 archives ready for distribution:
-libvmod-cachetag-1.0.0.tar.gz
+libvmod-cachetag-1.0.1 archives ready for distribution:
+libvmod-cachetag-1.0.1.tar.gz
 ```
 
 ## When Debugging Failures
