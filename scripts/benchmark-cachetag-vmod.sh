@@ -947,7 +947,14 @@ if [ "${RUN_XKEY}" = 1 ]; then
 	rm -rf /results/xkey-build
 	mkdir -p /results/xkey-build/cache
 	cd /results/xkey-build
-	printf "#include <cache/cache_vinyld.h>\n" > cache/cache_varnishd.h
+	# Vinyl renamed cache/cache_vinyld.h to cache/cache_int.h upstream
+	# (6d36364cc1); accept either so the shim works on 9.0.1 and trunk.
+	printf '%s\n' \
+		'#if defined(__has_include) && __has_include(<cache/cache_int.h>)' \
+		'#  include <cache/cache_int.h>' \
+		'#else' \
+		'#  include <cache/cache_vinyld.h>' \
+		'#endif' > cache/cache_varnishd.h
 	python3 /vinyl-src/lib/libvcc/vmodtool.py --strict --boilerplate \
 		-o vcc_xkey_if /xkey-src/src/vmod_xkey.vcc
 	python3 /vinyl-src/lib/libvsc/vsctool.py -c /xkey-src/src/xkey.vsc

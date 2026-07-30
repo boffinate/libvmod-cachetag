@@ -14,7 +14,17 @@
 #include <string.h>
 #include <time.h>
 
-#include "cache/cache_vinyld.h"
+/*
+ * Vinyl renamed its installed internal header (cache/cache_vinyld.h ->
+ * cache/cache_int.h, upstream 6d36364cc1). Accept either so the VMOD builds
+ * against both the 9.0.1 release and current trunk. Drop the fallback branch
+ * when configure.ac's VINYL_PREREQ rises past that rename.
+ */
+#if defined(__has_include) && __has_include("cache/cache_int.h")
+#  include "cache/cache_int.h"
+#else
+#  include "cache/cache_vinyld.h"
+#endif
 #include "miniobj.h"
 #include "vtim.h"
 
