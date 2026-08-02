@@ -1,8 +1,10 @@
-# Cachetag VMOD for Vinyl Cache
+# Cachetag VMOD: tag-based invalidation for Vinyl Cache
 
-The VMOD implements purge-map based tag invalidation with explicit VCL tag registration, hard and soft purge, volatile membership cleanup, persistent Fellow FDO attributes, VSC counters, and a VTC regression suite.
+Cachetag adds tag-based invalidation to Vinyl Cache, supporting its in-memory backends and Fellow persistent storage. In benchmarks, its tag index uses a fraction of xkey’s memory.
 
-**Status:** Heavily tested, but no large real-world deployments.
+## What is cache tagging?
+
+Cache tags group related pages and fragments so you can invalidate them in one operation. A product page, category listing, and API response might all carry `product:123`. When the product changes, one purge invalidates all three without requiring you to track down each URL.
 
 **Help me optimize cachetag for your use-case. [I'm collecting real-world `xkey` workloads](https://github.com/boffinate/xkey-workload-collector)**.
 
@@ -10,19 +12,19 @@ The VMOD implements purge-map based tag invalidation with explicit VCL tag regis
 
 I've been wanting to try improving on `xkey` for 5+ years and the rise of (mostly) competent LLMs has allowed me to find the time to try out some ideas. 
 
-I have been fascinated by caching for over 2 decades. With the kind of applications I work on, caching by URL never works, because there are dependencies between pages. Being able to label cached content with tags, and then clear all matching resources has always seemed a powerful and sensible approach - yet is rarely found built into HTTP caching systems. Your choice is limited:
+With the kind of applications I work on, clearing cache by URL never works, because pages have dependencies. Being able to label cached content with tags, and then clear all matching resources has always seemed a powerful and sensible approach - yet is rarely found built into HTTP caching systems. 
+
+Your choice is limited:
 
 * Varnish Cache? Yes - but `xkey` is archived and the commercial `ykey` is the recommended approach. 
 * Nginx? Nope. You have to build it yourself at the application level. I have and I don't recommend this approach. 
-* Apache Traffic Server? Use Redis and custom Lua. 
+* Apache Traffic Server? Build it yourself with Redis and custom Lua scripts. 
 * Caddy? Use Souin, which has HTTP RFC correctness, but struggles with performance.
 * Or hand-off the responsibility to a 3rd party CDN like Fastly or Cloudflare, and be at their mercy for cache eviction.
 
-After the [Varnish Cache/Vinyl Cache ~~debacle~~ split](https://vinyl-cache.org/organization/on_vinyl_cache_and_varnish_cache.html) I decided that I was going to have a go at building something to rival the commercial `ykey` for performance. 
+I also needed a persistent on-disk cache for a project, which meant cache tagging had to work with Uplex's [Fellow Storage Engine](https://code.uplex.de/uplex-varnish/slash) (an alternative to the commercial Varnish MSE4 storage engine). Nils shared some  [initial comments](https://gitlab.com/uplex/varnish/slash/-/work_items/141) that helped shape the approach.
 
-I was also working on a project that needed on-disk persistant cache (due to the number of pages on the site and long-tail nature of traffic), so I needed a cache tagging system to work with Uplex's [Fellow Storage Engine](https://code.uplex.de/uplex-varnish/slash) (an alternative to the commercial Varnish MSE4 on-disk storage engine). Nils shared some  [initial comments](https://gitlab.com/uplex/varnish/slash/-/work_items/141) that steered my thinking on the approach I wanted to take.
-
-## Cachetag performance vs `xkey`
+## Cachetag benchmark performance vs `xkey`
 
 At 10 million objects with four low-fanout tags each, **`cachetag` uses 82% less tracked index memory than `xkey` while achieving a 14.8% higher load rate**. Its warm-hit rate remains within 2% of `xkey`.
 
@@ -44,13 +46,16 @@ Cachetag supports Vinyl Cache's Default in-memory storage, Buddy in-memory, and 
 | Buddy (32 GiB) | 78.3k RPS | 189.9k RPS | 833 MiB tracked resident index (87 bytes/object) |
 | Fellow (128 GiB, 4 KiB blocks) | 19.8k RPS | 82.5k RPS | 80 persistent attribute bytes/object (763 MiB total); zero resident cachetag objects and edges |
 
-Rates are three-run medians from exact Vinyltest lab runs on one AMD EPYC 4345P host with 16 logical CPUs, using 24 clients and 24 Vinyl worker threads with no swap or LRU eviction. The 24-client setting was the best cache-fill point in a bounded calibration, but the in-memory rows remained classified under-saturated: these are achieved rates, not server capacity. Fellow was IO-limited; its on-disk row and the in-memory rows use different validated storage envelopes and are not a storage-capacity comparison.
-
-Exact values, spreads, validity, provenance, and the approved publication exception are recorded in the maintainer's benchmark archive; see the [full benchmark results](benchmarks/RESULTS.md) for the wider benchmark history.
-
+Results are three-run medians from controlled tests on one host. The in-memory rates show achieved throughput, not maximum server capacity. Fellow was I/O-limited and used a different storage configuration, so the rows do not compare storage capacity. See the [full benchmark results](benchmarks/RESULTS.md) for the methodology, run data, and limitations.
 ## Installation
 
 See [INSTALL.md](INSTALL.md).
+
+**Considering Cachetag at scale?** I’m actively seeking production workloads with high request rates, millions of cached objects, or frequent or high-fanout purges.
+
+If that sounds like your deployment, I’d love to help you deploy and tune it, investigate any issues you uncover, and learn from your workload. Your experience will help shape the open-source project.
+
+When getting in touch, please include your peak request rate, cache size or object count, purge frequency, and storage backend.
 
 ## Usage
 
@@ -87,9 +92,9 @@ Internally, tag identity is a 128-bit XXH3 digest of namespace plus tag text. A 
 
 ### Where it matters
 
-Take a flash sale. You're under heavy load. You drop the price on `product:123`, which appears on the product page, category listings, search, recommendations, cart suggestions, and a handful of cached API fragments. With `xkey`, a busy or mid-fetch copy can survive the purge until something else catches it. With `cachetag`, every later hit registered before the successful purge is restarted.
+During a flash sale, a price may appear on product pages, listings, search results, recommendations, and API responses. With xkey, a busy or mid-fetch copy can survive a purge. Cachetag rejects every copy invalidated by a successful purge before it can be served.
 
-The stakes are higher again on a disk-backed cache that survives restarts, where a missed copy can quietly resurface after a reboot. `cachetag` keeps the purge history on disk too, so a resurrected object is still checked against it and still treated as stale. A hard-purged cold Fellow vampire may remain physically present until its first touch, TTL expiry, or Fellow LRU eviction because there is deliberately no tag-to-object posting index for cold objects. Physical residency is not freshness: the first touch probes the object's FDO attribute and rejects it before delivery. Missing or invalid attributes and Fellow metadata read failures fail closed by treating the object as hard stale; a valid envelope without the queried namespace remains fresh.
+With Fellow, purge history also survives restarts. Invalidated content may remain physically on disk, but Cachetag rejects it when next accessed rather than allowing it to resurface after a reboot.
 
 ## Differences from `xkey` and `ykey`
 
@@ -97,19 +102,19 @@ I've tried to do a fair comparison because they all make different choices and t
 
 | Area | `xkey` | `ykey` | `cachetag` |
 | --- | --- | --- | --- |
-| Status | Public `varnish-modules` VMOD. Its own documentation says it is in maintenance mode with known scalability issues. | Commercial Varnish Enterprise 6.X VMOD, publicly presented as the successor to `xkey` for scalable secondary-key invalidation. | Experimental research VMOD for Vinyl Cache 9.X. |
-| Tag registration | Automatic object-event scan of response headers named `xkey` and legacy `X-HashTwo`. | Explicit VCL calls: `ykey.add_key()` or `ykey.add_header(beresp.http.Some-Header)` in `vcl_backend_response` or `vcl_backend_error`. | Explicit VCL calls: `tags.add("key")` or `tags.add_header(beresp.http.Some-Header)` in `vcl_backend_response` or `vcl_backend_error`. |
-| Parsing | Splits `xkey`/purge strings on commas or blanks. Multiple `xkey` response headers are also scanned. | Configurable separators for `add_header()`, `add_keys()`, `purge_header()`, and `purge_keys()`, defaulting to comma/space-style splitting. It also exposes hashed-key and blob helpers. | Configurable separators for `add_header()` and `purge_header()`, defaulting to comma separation. Tokens are trimmed, embedded whitespace is rejected, and configured size/key-count limits are enforced. |
-| API shape | Module-level functions: `xkey.purge(keys)` and `xkey.softpurge(keys)` over a global index. | Module-level VMOD API with add, purge, stat, tree-key, expression-purge, and namespace helpers. Varnish Enterprise can treat `ykey` as a product feature spanning the VMOD, Varnish core, and MSE storage engines under a shared release boundary. | Object-oriented namespace: `new tags = cachetag.namespace(...)`, then `tags.purge(...)`, `tags.purge_header(...)`, `tags.stale()`, and counters per namespace/VCL object. Unlike `ykey`, `cachetag` has to coordinate behavior across a standalone VMOD, Vinyl Cache, and the Fellow storage engine. |
-| Invalidation guarantee (strictness) | Best-effort. A purge removes the matching copies it can reach at that moment; busy and in-flight copies can keep serving until a TTL, refresh, or later purge catches them. | Core-integrated. Because tags are committed through Varnish core and the storage engine, a purge can act on an object as soon as it is indexed — a stronger model than `xkey`'s best-effort reach. Its exact behavior in narrow fetch/commit race windows is not something I can speak to from public documentation. | Strict read barrier. A successful purge publishes history immediately and every later hit registered before that publication reads as stale, including busy, racing, and replayed-after-restart copies. |
-| Hard purge model | Iterates the current matching object list and re-arms matched non-busy objects to expire. Busy objects are skipped. | Hard purge immediately removes matched objects through core/storage integration. | Hard purge publishes history; insertion and `stale()` probes reject objects invalidated after registration. |
-| Soft purge model | `xkey.softpurge(keys)` expires matched objects while preserving grace and keep. | Soft purge expires matched objects while preserving grace and keep; configured with `soft=true`. | Soft purge expires matched objects while preserving grace and keep; configured with `mode = soft`. |
-| High-fanout purges | Purge work is inline in the caller. | Designed to safely handle purge operations on keys spanning the entire cache. There is no public asynchronous backpressure API; purge functions return affected counts. | Publication cost is independent of tagged-object fanout; accepted calls return `-1` and physical residency never determines freshness. |
-| Concurrency design | Uses a single global mutex around inserts, removals, and purges in the open-source implementation. | Integrated into core Varnish, with its own data structures. Avoids `xkey`'s expiry-lock piggybacking. | Uses a purge map plus synchronized volatile membership records; Fellow-direct objects require no VMOD membership record. |
-| Namespaces | One global VMOD index. | Supports namespaces as per-transaction state, set with `ykey.namespace()` and cleared with `ykey.namespace_reset()`. | Supports namespaces as explicit VCL objects: multiple `cachetag.namespace()` objects can coexist, each with its own limits, counters, and optional persistence path. |
-| Persistence | In-memory VMOD index; no xkey-specific persistent sidecar. | Works with in-memory cache storage; for MSE/MSE4 persisted caches, stores the secondary-key index in storage metadata so restarts do not re-evaluate every object. | Works memory-only by default; optional Fellow-backed `persist_path` stores purge history in the cachetag WAL and immutable object membership in a checksummed FDO attribute. Fellow objects are probed directly without reconstructing a VMOD object index after restart. |
-| Observability | Exposes aggregate key and memory counters such as `g_keys`, `g_bytes`, and component byte gauges. | Includes per-key stat functions for counts, TTL/grace/keep, body length, hits, flags, and headers; MSE docs/release notes mention ykey counters for registered keys, purged objects, memory, and invalidation time. | Exposes volatile membership gauges, purge-map sequence/probe/pruning counters, stale validation, WAL health, and Fellow attribute/direct-probe failure counters. |
-| Migration shape | Existing deployments typically rely on the magic `xkey` response header and `xkey.purge(req.http.xkey)` in a protected `PURGE` path. | Use the same backend header if you want, but call `ykey.add_header(beresp.http.xkey, sep = " ")` and map purge requests to `ykey.purge_header(...)`. | Use the same backend header if you want, but call `tags.add_header(beresp.http.xkey, sep = " ")` and map purge requests to `tags.purge_header(...)`. |
+| Status | Open-source `varnish-modules` VMOD in maintenance mode, with known scalability issues. | Commercial Varnish Enterprise 6.x successor to `xkey`. | Open-source VMOD for Vinyl Cache 9.x; Varnish Cache support planned. |
+| Tag registration | Automatically scans `xkey` and legacy `X-HashTwo` response headers. | Explicit VCL calls with `add_key()` or `add_header()`. | Explicit VCL calls with `tags.add()` or `tags.add_header()`. |
+| Parsing | Splits on commas or whitespace and scans repeated `xkey` headers. | Configurable separators; also supports hashed keys and blobs. | Configurable separators; trims tokens, rejects embedded whitespace, and enforces limits. |
+| API shape | Module-level purge functions over one global index. | Module-level API for adding, purging, querying, expressions, tree keys, and namespaces. | Namespace objects expose registration, purging, stale checks, and per-namespace counters. |
+| Invalidation guarantee (strictness) | Best-effort: busy or in-flight copies may survive until a later purge, refresh, or expiry. | Core-integrated and stronger than `xkey`; narrow fetch/commit races are not publicly documented. | Strict read barrier: copies invalidated by a successful purge cannot be served, including after restart. |
+| Hard purge model | Expires reachable, non-busy matches; skips busy objects. | Hard purge immediately removes matched objects through core/storage integration. | Publishes purge history; insertion and stale checks reject invalidated objects. |
+| Soft purge model | Preserves grace and keep via `softpurge()`. | Preserves grace and keep with `soft=true`. | Preserves grace and keep with `mode=soft`. |
+| High-fanout purges | Purge work is inline in the caller. | Designed for cache-wide keys; returns affected counts. | Purge publication cost does not grow with fanout; accepted calls return `-1`. |
+| Concurrency design | Single global mutex for inserts, removals, and purges. | Core-integrated; does not reuse `xkey`'s expiry lock. | Purge map with synchronized volatile membership; Fellow-direct objects need no VMOD membership. |
+| Namespaces | One global VMOD index. | Per-transaction namespaces via `namespace()` and `namespace_reset()`. | Multiple namespace objects, each with its own limits, counters, and optional persistence. |
+| Persistence | In-memory index only. | Persists the secondary-key index in MSE/MSE4 storage metadata. | Memory-only by default; Fellow persists purge history and object tags. |
+| Observability | Aggregate key and memory counters. | Per-key stats plus aggregate registration, purge, memory, and timing counters. | Membership, purge-map, stale-check, WAL, and Fellow health counters. |
+| Migration shape | Usually driven by an `xkey` response header and protected `PURGE` endpoint. | `add_header()` and `purge_header()` can reuse an existing `xkey` header. | `tags.add_header()` and `tags.purge_header()` can reuse an existing `xkey` header. |
 
 ## Testing In Docker
 
