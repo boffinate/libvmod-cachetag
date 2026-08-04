@@ -1,24 +1,22 @@
 # Cachetag VMOD: tag-based invalidation for Vinyl Cache
 
-Cachetag adds tag-based invalidation to Vinyl Cache, supporting its in-memory backends and Fellow persistent storage. In benchmarks, its tag index uses a fraction of xkey’s memory.
+Cachetag adds tag-based invalidation to Vinyl Cache, supporting its in-memory backends and Fellow persistent storage. At scale it's designed to be significantly more memory efficient than the bundled `xkey`.
 
 ## What is cache tagging?
 
-Cache tags group related pages and fragments so you can invalidate them in one operation. A product page, category listing, and API response might all carry `product:123`. When the product changes, one purge invalidates all three without requiring you to track down each URL.
-
-**Help me optimize cachetag for your use-case. [I'm collecting real-world `xkey` workloads](https://github.com/boffinate/xkey-workload-collector)**.
+Cache tags group related pages and fragments so you can invalidate them in one operation. A product page, category listing, and API response might all carry `product:123`. When the product changes, one purge invalidates all three without tracking down each URL.
 
 ## Why did I build this?
 
-I've been wanting to try improving on `xkey` for 5+ years and the rise of (mostly) competent LLMs has allowed me to find the time to try out some ideas. 
+I've been wanting to try improving on `xkey` for 5+ years and the rise of (mostly) competent LLMs has allowed me to find the time to try out some ideas.
 
-With the kind of applications I work on, clearing cache by URL never works, because pages have dependencies. Being able to label cached content with tags, and then clear all matching resources has always seemed a powerful and sensible approach - yet is rarely found built into HTTP caching systems. 
+With the kind of applications I work on, clearing cache by URL never works, because pages have dependencies. Being able to label cached content with tags, and then clear all matching resources has always seemed a powerful and sensible approach - yet is rarely found built into HTTP caching systems.
 
 Your choice is limited:
 
-* Varnish Cache? Yes - but `xkey` is archived and the commercial `ykey` is the recommended approach. 
-* Nginx? Nope. You have to build it yourself at the application level. I have and I don't recommend this approach. 
-* Apache Traffic Server? Build it yourself with Redis and custom Lua scripts. 
+* Varnish Cache? Yes - but `xkey` is archived and the commercial `ykey` is the recommended approach.
+* Nginx? Nope. You have to build it yourself at the application level. I have and I don't recommend this approach.
+* Apache Traffic Server? Build it yourself with Redis and custom Lua scripts.
 * Caddy? Use Souin, which has HTTP RFC correctness, but struggles with performance.
 * Or hand-off the responsibility to a 3rd party CDN like Fastly or Cloudflare, and be at their mercy for cache eviction.
 
@@ -26,7 +24,7 @@ I also needed a persistent on-disk cache for a project, which meant cache taggin
 
 ## Cachetag benchmark performance vs `xkey`
 
-At 10 million objects with four low-fanout tags each, **`cachetag` uses 82% less tracked index memory than `xkey` while achieving a 14.8% higher load rate**. Its warm-hit rate remains within 2% of `xkey`.
+At 10 million objects with four low-fanout tags each, **`cachetag` used 82% less tracked index memory than `xkey` and loaded 14.8% faster**. Its warm-hit rate stayed within 2% of `xkey`.
 
 | 10M-object result | `cachetag` | `xkey` | Difference |
 | --- | ---: | ---: | ---: |
@@ -47,20 +45,22 @@ Cachetag supports Vinyl Cache's Default in-memory storage, Buddy in-memory, and 
 | Fellow (128 GiB, 4 KiB blocks) | 19.8k RPS | 82.5k RPS | 80 persistent attribute bytes/object (763 MiB total); zero resident cachetag objects and edges |
 
 Results are three-run medians from controlled tests on one host. The in-memory rates show achieved throughput, not maximum server capacity. Fellow was I/O-limited and used a different storage configuration, so the rows do not compare storage capacity. See the [full benchmark results](benchmarks/RESULTS.md) for the methodology, run data, and limitations.
+
+## Running Cachetag at scale?
+
+I’m looking for production workloads with high request rates, millions of cached objects, or frequent or high-fanout purges.
+
+If that sounds like your deployment, I’d love to help you deploy and tune it, investigate any issues you uncover, and learn from your workload. Your experience will help shape the open-source project.
+
+When getting in touch, please include your peak request rate, cache size or object count, purge frequency, and storage backend. [`xkey-workload-collector`](https://github.com/boffinate/xkey-workload-collector) gathers those numbers for you, on Vinyl Cache or Varnish Cache.
+
 ## Installation
 
 See [INSTALL.md](INSTALL.md).
 
-**Considering Cachetag at scale?** I’m actively seeking production workloads with high request rates, millions of cached objects, or frequent or high-fanout purges.
-
-If that sounds like your deployment, I’d love to help you deploy and tune it, investigate any issues you uncover, and learn from your workload. Your experience will help shape the open-source project.
-
-When getting in touch, please include your peak request rate, cache size or object count, purge frequency, and storage backend.
-
 ## Usage
 
 See [USAGE.md](USAGE.md).
-
 
 ## How strict is the invalidation guarantee?
 
@@ -83,10 +83,11 @@ sequenceDiagram
     V->>I: tag purged after registration?
     I-->>V: stale → restart
     V->>B: miss, fetch fresh
-    B-->>C: new price
+    B-->>V: new price
+    V-->>C: new price
 ```
 
-Freshness does not depend on physical deletion. A copy that was busy, mid-fetch, or restored after restart is checked against purge history before delivery.
+A copy that was busy, mid-fetch, or restored after restart is checked against purge history before delivery.
 
 Internally, tag identity is a 128-bit XXH3 digest of namespace plus tag text. A digest collision would make two different tags share purge history, so purging one would over-invalidate the other. That is an intentional fail-closed tradeoff: a collision can cause a needless refetch, but it does not create a path for serving content older than a successful purge.
 
@@ -116,7 +117,7 @@ I've tried to do a fair comparison because they all make different choices and t
 | Observability | Aggregate key and memory counters. | Per-key stats plus aggregate registration, purge, memory, and timing counters. | Membership, purge-map, stale-check, WAL, and Fellow health counters. |
 | Migration shape | Usually driven by an `xkey` response header and protected `PURGE` endpoint. | `add_header()` and `purge_header()` can reuse an existing `xkey` header. | `tags.add_header()` and `tags.purge_header()` can reuse an existing `xkey` header. |
 
-## Testing In Docker
+## Testing in Docker
 
 The development tooling in this section (`scripts/`, `benchmarks/`, `docker/`) ships in the git repository only, not in release tarballs — clone the repository if you want it.
 
@@ -164,7 +165,7 @@ The current implementation depends on Vinyl internal cache APIs and headers:
 - `EXP_Reduce`
 - `struct objcore` timer and flag fields
 
-These are the same kind of private cache surfaces used by VMODs such as ``xkey``. The practical consequence is version coupling: this repository can be distributed separately, but it must be built and tested against a compatible Vinyl Cache development tree or package exposing those internal headers and symbols.
+These are the same kind of private cache surfaces used by VMODs such as `xkey`. The consequence is version coupling: this repository can be distributed separately, but it must be built and tested against a compatible Vinyl Cache development tree or package exposing those internal headers and symbols.
 
 After configuring this project, the Docker check is also available as a make target:
 
