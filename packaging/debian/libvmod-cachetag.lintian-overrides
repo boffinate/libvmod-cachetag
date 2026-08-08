@@ -7,7 +7,7 @@ libvmod-cachetag: initial-upload-closes-no-bugs
 #
 #   libvmod-cachetag: wrong-manual-section 3 != 4
 #
-# src/vmod_cachetag.vcc declares "$Module cachetag 4" while src/Makefile.am
+# src/vmod_cachetag_core.vcc declares "$Module cachetag 4" while src/Makefile.am
 # installs the generated page as vmod_cachetag.3, so the .TH line disagrees
 # with the installed path. Vinyl Cache's own VMODs all declare section 3. The
 # fix is one character in the VCC, upstream, not a packaging override; hiding

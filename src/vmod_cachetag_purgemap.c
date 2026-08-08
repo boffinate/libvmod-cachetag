@@ -966,6 +966,71 @@ out:
 	return (0);
 }
 
+/*
+ * Read-only diagnostic getters. They report live purge-map state: seq and
+ * nentry are the same atomics the purge path maintains, and the table gauges
+ * are read under the reader gate so a concurrent rebuild cannot free the
+ * table mid-read. A namespace that never published a purge has no purge map
+ * and reports zeroes.
+ */
+
+uint64_t
+cachetag_purgemap_seq(struct cachetag_index *idx)
+{
+	struct cachetag_purgemap *pm;
+
+	pm = cachetag_purgemap_data(idx);
+	if (pm == NULL)
+		return (0);
+	return (__atomic_load_n(&pm->seq, __ATOMIC_ACQUIRE));
+}
+
+uint64_t
+cachetag_purgemap_entry_count(struct cachetag_index *idx)
+{
+	struct cachetag_purgemap *pm;
+
+	pm = cachetag_purgemap_data(idx);
+	if (pm == NULL)
+		return (0);
+	return (__atomic_load_n(&pm->nentry, __ATOMIC_ACQUIRE));
+}
+
+uint64_t
+cachetag_purgemap_slot_count(struct cachetag_index *idx)
+{
+	struct cachetag_purgemap *pm;
+	const struct cachetag_purgemap_table *tbl;
+	uint64_t nslot = 0;
+	unsigned reader_slot;
+
+	pm = cachetag_purgemap_data(idx);
+	if (pm == NULL)
+		return (0);
+	tbl = cachetag_purgemap_reader_enter(pm, &reader_slot);
+	if (tbl != NULL)
+		nslot = tbl->nslot;
+	cachetag_purgemap_reader_exit(pm, reader_slot);
+	return (nslot);
+}
+
+uint64_t
+cachetag_purgemap_byte_count(struct cachetag_index *idx)
+{
+	struct cachetag_purgemap *pm;
+	const struct cachetag_purgemap_table *tbl;
+	uint64_t bytes;
+	unsigned reader_slot;
+
+	pm = cachetag_purgemap_data(idx);
+	if (pm == NULL)
+		return (0);
+	tbl = cachetag_purgemap_reader_enter(pm, &reader_slot);
+	bytes = cachetag_purgemap_table_bytes(tbl);
+	cachetag_purgemap_reader_exit(pm, reader_slot);
+	return (bytes);
+}
+
 static enum cachetag_purgemap_probe_result
 cachetag_purgemap_probe_one(const struct cachetag_purgemap_table *tbl,
     uint64_t reg_seq, uint64_t fold)

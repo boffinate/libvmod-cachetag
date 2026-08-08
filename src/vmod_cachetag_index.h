@@ -89,6 +89,10 @@ int cachetag_stale(struct worker *, struct cachetag_index *, struct objcore *,
 
 uint64_t cachetag_object_count(struct cachetag_index *);
 uint64_t cachetag_edge_count(struct cachetag_index *);
+uint64_t cachetag_purgemap_seq(struct cachetag_index *);
+uint64_t cachetag_purgemap_entry_count(struct cachetag_index *);
+uint64_t cachetag_purgemap_slot_count(struct cachetag_index *);
+uint64_t cachetag_purgemap_byte_count(struct cachetag_index *);
 void cachetag_snapshot_counters(struct cachetag_index *, struct cachetag_counters *);
 const struct cachetag_limits *cachetag_get_limits(const struct cachetag_index *);
 const char *cachetag_namespace_name(const struct cachetag_index *);

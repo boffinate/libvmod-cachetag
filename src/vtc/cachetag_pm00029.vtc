@@ -1,0 +1,114 @@
+vtest "cachetag demo diagnostics report purge sequence and purge-map gauges"
+
+server s1 {
+	rxreq
+	expect req.url == "/content"
+	txresp -body "content-1"
+
+	rxreq
+	expect req.url == "/content"
+	txresp -body "content-2"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("demo_diag", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "SOFTPURGE") {
+			set req.http.result = tags.purge(req.http.Tag, soft);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+		if (req.method == "DIAG") {
+			set req.http.generation = tags.generation(req.http.Tag);
+			set req.http.purge-seq = tags.purge_seq();
+			set req.http.pm-entries = tags.purgemap_entries();
+			set req.http.pm-slots = tags.purgemap_slots();
+			set req.http.pm-bytes = tags.purgemap_bytes();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add(bereq.url);
+		set beresp.ttl = 1h;
+		set beresp.grace = 0s;
+		set beresp.keep = 0s;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		set resp.http.generation = req.http.generation;
+		set resp.http.purge-seq = req.http.purge-seq;
+		set resp.http.pm-entries = req.http.pm-entries;
+		set resp.http.pm-slots = req.http.pm-slots;
+		set resp.http.pm-bytes = req.http.pm-bytes;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/content"
+	rxresp
+	expect resp.body == "content-1"
+
+	txreq -req DIAG -hdr "Tag: /content"
+	rxresp
+	expect resp.http.purge-seq == 0
+	expect resp.http.pm-entries == 0
+	expect resp.http.pm-slots == 0
+	expect resp.http.pm-bytes == 0
+	expect resp.http.generation == 0
+
+	txreq -req SOFTPURGE -hdr "Tag: /content"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req SOFTPURGE -hdr "Tag: ghost"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req DIAG -hdr "Tag: /content"
+	rxresp
+	expect resp.http.purge-seq == 2
+	expect resp.http.pm-entries == 2
+	expect resp.http.pm-slots == 16
+	expect resp.http.pm-bytes > 0
+	expect resp.http.generation == 1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 1
+
+	txreq -url "/content"
+	rxresp
+	expect resp.body == "content-2"
+
+	txreq -req DIAG -hdr "Tag: /content"
+	rxresp
+	expect resp.http.purge-seq == 2
+	expect resp.http.pm-entries == 0
+	expect resp.http.pm-slots == 0
+	expect resp.http.pm-bytes == 0
+	expect resp.http.generation == 0
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_demo_diag.purgemap_seq == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_demo_diag.purgemap_entries == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_demo_diag.purgemap_table_slots == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_demo_diag.purgemap_auto_reclaimed_entries == 2
+
+server s1 -wait

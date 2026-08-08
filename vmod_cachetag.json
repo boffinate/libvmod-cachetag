@@ -8,7 +8,7 @@
         "doc_path": "docs/vmod_cachetag.rst",
         "project": "libvmod-cachetag",
         "user": "boffinate",
-        "vcc_path": "src/vmod_cachetag.vcc"
+        "vcc_path": "src/vmod_cachetag_core.vcc"
     },
     "license": "MPL-2.0",
     "name": "cachetag",

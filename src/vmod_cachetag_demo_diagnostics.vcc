@@ -1,0 +1,55 @@
+DEMO DIAGNOSTICS
+================
+
+The following read-only diagnostic methods exist only when the VMOD was
+configured with ``--enable-demo-diagnostics``. A default (production) build
+does not expose them.
+
+$Method INT .generation(STRING key)
+
+Return the latest retained hard or soft purge sequence for ``key``. ``0`` means
+that no exact purge history is retained for the key, ``-2`` means the sequence
+cannot be represented as a VCL integer, and ``-3`` means invalid input.
+
+Automatic sweeps can reclaim entries that no live object needs. When
+``purge_history_max_entries`` is non-zero, compaction can also replace exact
+per-key history with namespace floors. In either case this diagnostic method
+returns ``0`` for a reclaimed key even though a floor can still invalidate old
+objects. Disable interval sweeps and use unbounded purge history when exact
+per-key diagnostics are required.
+
+Requires ``--enable-demo-diagnostics``.
+
+$Restrict vcl_recv vcl_hit vcl_miss vcl_pass vcl_deliver vcl_synth vcl_backend_fetch vcl_backend_response vcl_backend_error
+
+$Method INT .purge_seq()
+
+Return the namespace's global purge sequence counter: the number of purge
+publications accepted since the namespace was created. ``0`` means no purge has
+been published yet; ``-2`` means the sequence cannot be represented as a VCL
+integer. Reclamation and compaction never lower this value.
+
+Requires ``--enable-demo-diagnostics``.
+
+$Method INT .purgemap_entries()
+
+Return the live purge-map entry count. Certified reclamation removes entries
+that no live object needs, so this can drop to ``0`` while namespace floors
+still cover the reclaimed history.
+
+Requires ``--enable-demo-diagnostics``.
+
+$Method INT .purgemap_slots()
+
+Return the current purge-map hash-table slot count. ``0`` means no table is
+allocated, either because no purge has been published or because reclamation
+freed it.
+
+Requires ``--enable-demo-diagnostics``.
+
+$Method INT .purgemap_bytes()
+
+Return the purge-map hash-table size in bytes. ``0`` means no table is
+allocated.
+
+Requires ``--enable-demo-diagnostics``.

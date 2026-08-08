@@ -206,7 +206,9 @@ tar -C /cachetag-host \
 	-cf - . | tar -C "$cachetag_src" -xf -
 
 cd "$cachetag_src"
-./bootstrap --prefix="$prefix"
+# The Fellow VTC matrix uses test-hook and diagnostic VCL methods, so build
+# the full diagnostic surface.
+./bootstrap --prefix="$prefix" --enable-demo-diagnostics --enable-test-hooks
 make -j"$(nproc)"
 
 slash_vmod="$slash_src/src/.libs/libvmod_slash.so"

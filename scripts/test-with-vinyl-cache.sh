@@ -24,6 +24,12 @@ Environment:
                                       no developer-only warning policy, and a
                                       mandatory ELF hardening inspection
   CACHE_TAG_CHECK_TARGET make target to run after bootstrap (default: distcheck)
+  CACHE_TAG_CONFIGURE_ARGS
+                        extra ./bootstrap (configure) arguments for the VMOD
+                        (default: "--enable-demo-diagnostics --enable-test-hooks",
+                        which builds the full diagnostic VCL surface the test
+                        suite expects; set to "" to build and test the
+                        production surface, which runs only the core VTCs)
   CACHE_TAG_TESTS       optional TESTS override for make check, for example:
                         vtc/cachetag_c00000.vtc
   CACHE_TAG_FAILURE_LOG_LINES
@@ -47,6 +53,7 @@ vinyl_src=$(CDPATH= cd -- "$vinyl_src" && pwd)
 image=${VINYL_DOCKER_IMAGE:-vinyl-cache-ubuntu-build}
 check_target=${CACHE_TAG_CHECK_TARGET:-distcheck}
 cachetag_tests=${CACHE_TAG_TESTS:-}
+cachetag_configure_args=${CACHE_TAG_CONFIGURE_ARGS-"--enable-demo-diagnostics --enable-test-hooks"}
 failure_log_lines=${CACHE_TAG_FAILURE_LOG_LINES:-260}
 build_profile=${CACHE_TAG_BUILD_PROFILE:-diagnostic}
 
@@ -66,6 +73,7 @@ docker run --rm \
 	-e "CACHE_TAG_BUILD_PROFILE=$build_profile" \
 	-e "CACHE_TAG_CHECK_TARGET=$check_target" \
 	-e "CACHE_TAG_TESTS=$cachetag_tests" \
+	-e "CACHE_TAG_CONFIGURE_ARGS=$cachetag_configure_args" \
 	-e "CACHE_TAG_FAILURE_LOG_LINES=$failure_log_lines" \
 	"$image" \
 	bash -lc '
@@ -247,14 +255,17 @@ export PATH="$prefix/sbin:$prefix/bin:$PATH"
 export LD_LIBRARY_PATH="$prefix/lib:$prefix/lib/vinyl-cache:${LD_LIBRARY_PATH:-}"
 
 cd "$cachetag_src"
+# Word splitting of CACHE_TAG_CONFIGURE_ARGS is deliberate: it carries zero or
+# more separate configure arguments.
 if [ "$CACHE_TAG_BUILD_PROFILE" = production ]; then
-	printf "cachetag bootstrap command:\n  ./bootstrap --prefix=%s\n" "$prefix"
+	printf "cachetag bootstrap command:\n  ./bootstrap --prefix=%s %s\n" \
+		"$prefix" "$CACHE_TAG_CONFIGURE_ARGS"
 	CPPFLAGS="$profile_cppflags" \
 	CFLAGS="$profile_cflags" \
 	LDFLAGS="$profile_ldflags" \
-	./bootstrap --prefix="$prefix"
+	./bootstrap --prefix="$prefix" $CACHE_TAG_CONFIGURE_ARGS
 else
-	./bootstrap --prefix="$prefix"
+	./bootstrap --prefix="$prefix" $CACHE_TAG_CONFIGURE_ARGS
 fi
 report_effective_flags "cachetag" "$cachetag_src/src/Makefile"
 make -j"$(nproc)"

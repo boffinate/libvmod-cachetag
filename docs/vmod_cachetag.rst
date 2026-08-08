@@ -96,3 +96,22 @@ Counters report volatile membership, purge-map size/floors/sequence/probes,
 sweeps, parse and limit failures, stale detections, WAL health, and Fellow
 direct-probe activity. Removed epoch/posting counters are not compatibility
 aliases.
+
+Diagnostic Build Flags
+======================
+
+A default build exposes only the surface above. Two configure flags add
+diagnostic methods; production builds should enable neither.
+
+``--enable-demo-diagnostics`` adds read-only diagnostics: ``generation()``
+returns the latest retained purge sequence for a key, ``purge_seq()`` the
+namespace's global purge sequence counter, and ``purgemap_entries()``,
+``purgemap_slots()``, and ``purgemap_bytes()`` the live purge-map entry count,
+hash-table slot count, and hash-table bytes.
+
+``--enable-test-hooks`` adds every ``test_*()`` method: fault injectors and
+internal togglers for the regression suite.
+
+The VCC interface is assembled from fragments at build time, so a gated method
+is entirely absent from a build without its flag and VCL referencing it fails
+to compile.

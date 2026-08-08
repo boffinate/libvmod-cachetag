@@ -39,6 +39,15 @@ sudo make install
 
 The configure summary prints the VMOD directory. `make install` puts `libvmod_cachetag.so` there, normally under the Vinyl prefix's VMOD directory. If Vinyl runs from another prefix or has a custom `vmod_path`, make that directory available to the daemon.
 
+### Optional diagnostic build flags
+
+A default build exposes only the production VCL surface. Two configure flags add extra namespace methods; both are off by default and neither belongs in a production build:
+
+- `--enable-demo-diagnostics` builds the read-only diagnostics `.generation()`, `.purge_seq()`, `.purgemap_entries()`, `.purgemap_slots()`, and `.purgemap_bytes()`.
+- `--enable-test-hooks` builds every `.test_*()` fault injector and internal toggler used by the regression suite.
+
+Pass them to `./bootstrap` (or `./configure`) like any other configure argument, for example `./bootstrap --prefix="$VINYL_PREFIX" --enable-demo-diagnostics`. The generated VCC interface, the manual page, and the VTC test list all follow the selected surface, so VCL that calls a gated method fails to compile against a build without its flag.
+
 Restart Vinyl after installing the VMOD, load the VCL for your selected storage backend, and confirm that Vinyl compiles it successfully before sending production traffic.
 
 ## Vinyl Cache's built-in ("Default") storage

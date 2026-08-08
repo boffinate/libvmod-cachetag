@@ -1,0 +1,82 @@
+TEST HOOKS
+==========
+
+The following fault injectors and internal togglers exist only when the VMOD
+was configured with ``--enable-test-hooks``. They exist for the regression test
+suite; never expose them in a production build.
+
+$Method BOOL .test_fail_next_key_purge_wal()
+
+Make the next durable purge WAL append fail for regression tests.
+
+$Method BOOL .test_fail_next_persist_prepare()
+
+Make the next persistence preparation fail for regression tests.
+
+$Method BOOL .test_side_initial_buckets(INT buckets)
+
+Set the initial lazy volatile side-table bucket count for regression tests.
+
+$Method BOOL .test_abort_next_sweep()
+
+Abort the next purge-map sweep after certificate start for regression tests.
+
+$Method BOOL .test_force_next_attach_slot_overflow()
+
+Make the next volatile attachment take the side-slot overflow path for regression tests.
+
+$Method BOOL .test_fail_next_object_segment_alloc()
+
+Make the next combined volatile object-entry and count-sidecar segment allocation fail.
+
+$Method BOOL .test_structural_limits()
+
+Return true when Docker-built cachetag internal object and side-slot sizes match the supported-layout assertions.
+
+$Method BOOL .test_side_fingerprint_bits(INT bits)
+
+Set the volatile side-table fingerprint width for regression tests. This is accepted only before the namespace has attached an object; production uses 32 bits.
+
+$Method BOOL .test_side_start_migration(INT buckets)
+
+Publish a test-only volatile side-table migration to ``buckets`` buckets.
+
+$Method INT .test_side_migrate_buckets(INT buckets)
+
+Advance a test-only volatile side-table migration by at most ``buckets`` retiring buckets. Returns ``1`` on success and a negative errno on invariant failure.
+
+$Method INT .test_side_migration_active()
+
+Return ``1`` when a test-only volatile side-table migration is active.
+
+$Method INT .test_side_table_buckets()
+
+Return the aggregate primary plus retiring volatile side-table bucket count.
+
+$Method BOOL .test_fail_next_side_migration_alloc()
+
+Make the next test or emergency side-table migration allocation fail.
+
+$Method BOOL .test_resize_low_water_ready()
+
+Make any pending low-water resize request eligible for immediate regression-test maintenance.
+
+$Method BOOL .test_resize_worker_drain(INT timeout_ms)
+
+Wake resize maintenance and wait until no immediate resize work remains, or until ``timeout_ms`` expires.
+
+$Method BOOL .test_next_fellow_attr_version(INT version)
+
+Make the next Fellow FDO attribute use the supplied envelope version.
+
+$Method BOOL .test_next_fellow_attr_bad_length()
+
+Make the next Fellow FDO attribute encode an invalid total length.
+
+$Method BOOL .test_next_fellow_attr_corruption(ENUM { record_len, fold_count, envelope_flags, envelope_reserved, record_flags, duplicate_namespace })
+
+Make the next Fellow FDO attribute encode the selected test-only corruption.
+
+$Method BOOL .test_next_fellow_attr_read_failure()
+
+Make the next Fellow object-attribute visit report a test-only read failure.

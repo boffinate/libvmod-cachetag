@@ -10,7 +10,7 @@ AM_SILENT_RULES([yes])
 AC_ARG_VAR([RST2MAN], [the program to build manuals from reStructuredText])
 AC_CHECK_PROGS([RST2MAN], [rst2man rst2man.py])
 
-dnl cachetag is a strict-ABI VMOD: src/vmod_cachetag.vcc declares "$ABI strict"
+dnl cachetag is a strict-ABI VMOD: src/vmod_cachetag_core.vcc declares "$ABI strict"
 dnl and the sources use private Vinyl Cache headers and structures. It supports
 dnl exactly one Vinyl release line, currently Vinyl Cache 9. There is no
 dnl maximum-version bound: VINYL_PREREQ's optional second argument uses the
@@ -42,7 +42,10 @@ esac
 AS_IF([test "x$cachetag_vinyl_version_numeric" = xno],
 	[AC_MSG_WARN([Vinyl Cache reports the non-numeric version '$VINYL_VERSION', so the 9.0.0 prerequisite was not actually enforced. Only the strict VMOD ABI identifies such a build; use --with-release-manifest=FILE for a release build.])])
 
-VINYL_VMODS([cachetag])
+dnl src/vmod_cachetag.vcc is concatenated at build time from the always-on
+dnl core fragment plus the optional fragments selected by the diagnostic
+dnl configure flags below, so the VCC file is a build product.
+VINYL_VMODS_GENERATED([cachetag])
 VINYL_COUNTERS([cachetag])
 
 dnl Optional packaging gate. Absent, configure behaves exactly as before.
@@ -64,6 +67,47 @@ AS_IF([test "x$enable_attach_timing" = "xyes"],
 	[AC_DEFINE([CACHE_TAG_ATTACH_TIMING], [0],
 		[Define to 0 to leave attach-path timing counters disabled.])])
 
+dnl Read-only demo diagnostics VCL surface: .generation(), .purge_seq(),
+dnl .purgemap_entries(), .purgemap_slots(), .purgemap_bytes(). Off by default
+dnl so production builds do not expose it.
+AC_ARG_ENABLE([demo-diagnostics],
+	AS_HELP_STRING([--enable-demo-diagnostics],
+		[expose read-only diagnostic VCL methods (default: disabled)]),
+	[],
+	[enable_demo_diagnostics=no])
+AS_IF([test "x$enable_demo_diagnostics" = "xyes"],
+	[AC_DEFINE([CACHE_TAG_DEMO_DIAGNOSTICS], [1],
+		[Define to 1 to expose read-only diagnostic VCL methods.])],
+	[AC_DEFINE([CACHE_TAG_DEMO_DIAGNOSTICS], [0],
+		[Define to 0 to hide read-only diagnostic VCL methods.])])
+AM_CONDITIONAL([CACHE_TAG_DEMO_DIAGNOSTICS],
+	[test "x$enable_demo_diagnostics" = "xyes"])
+
+dnl Regression-test fault injectors and internal togglers: every .test_*()
+dnl VCL method. Off by default so production builds do not expose them.
+AC_ARG_ENABLE([test-hooks],
+	AS_HELP_STRING([--enable-test-hooks],
+		[expose regression-test fault-injection VCL methods (default: disabled)]),
+	[],
+	[enable_test_hooks=no])
+AS_IF([test "x$enable_test_hooks" = "xyes"],
+	[AC_DEFINE([CACHE_TAG_TEST_HOOKS], [1],
+		[Define to 1 to expose regression-test fault-injection VCL methods.])],
+	[AC_DEFINE([CACHE_TAG_TEST_HOOKS], [0],
+		[Define to 0 to hide regression-test fault-injection VCL methods.])])
+AM_CONDITIONAL([CACHE_TAG_TEST_HOOKS],
+	[test "x$enable_test_hooks" = "xyes"])
+
+dnl Propagate the enabled diagnostic surface into make distcheck, so the
+dnl distcheck inner configure builds the same VCL surface (and therefore runs
+dnl the same VTC list) as the outer build.
+cachetag_diag_configure_flags=""
+AS_IF([test "x$enable_demo_diagnostics" = "xyes"],
+	[cachetag_diag_configure_flags="$cachetag_diag_configure_flags --enable-demo-diagnostics"])
+AS_IF([test "x$enable_test_hooks" = "xyes"],
+	[cachetag_diag_configure_flags="$cachetag_diag_configure_flags --enable-test-hooks"])
+AC_SUBST([CACHETAG_DIAG_CONFIGURE_FLAGS], [$cachetag_diag_configure_flags])
+
 AC_CONFIG_FILES([
 	Makefile
 	src/Makefile
@@ -80,6 +124,8 @@ AS_ECHO("
 	vcldir:       $vcldir
 	pkgvcldir:    $pkgvcldir
 	attach timing: $enable_attach_timing
+	demo diagnostics: $enable_demo_diagnostics
+	test hooks:   $enable_test_hooks
 
 	compiler:     $CC
 	cflags:       $CFLAGS

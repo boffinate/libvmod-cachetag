@@ -1714,6 +1714,8 @@ vmod_namespace_purge_header(VRT_CTX, struct vmod_cachetag_namespace *ns,
 	return (r);
 }
 
+#if CACHE_TAG_DEMO_DIAGNOSTICS
+
 VCL_INT v_matchproto_(td_cachetag_namespace_generation)
 vmod_namespace_generation(VRT_CTX, struct vmod_cachetag_namespace *ns,
     VCL_STRING key)
@@ -1730,6 +1732,53 @@ vmod_namespace_generation(VRT_CTX, struct vmod_cachetag_namespace *ns,
 		return (-2);
 	return ((VCL_INT)generation);
 }
+
+static VCL_INT
+cachetag_diag_int(uint64_t value)
+{
+
+	if (value > INT64_MAX)
+		return (-2);
+	return ((VCL_INT)value);
+}
+
+VCL_INT v_matchproto_(td_cachetag_namespace_purge_seq)
+vmod_namespace_purge_seq(VRT_CTX, struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_diag_int(cachetag_purgemap_seq(ns->index)));
+}
+
+VCL_INT v_matchproto_(td_cachetag_namespace_purgemap_entries)
+vmod_namespace_purgemap_entries(VRT_CTX, struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_diag_int(cachetag_purgemap_entry_count(ns->index)));
+}
+
+VCL_INT v_matchproto_(td_cachetag_namespace_purgemap_slots)
+vmod_namespace_purgemap_slots(VRT_CTX, struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_diag_int(cachetag_purgemap_slot_count(ns->index)));
+}
+
+VCL_INT v_matchproto_(td_cachetag_namespace_purgemap_bytes)
+vmod_namespace_purgemap_bytes(VRT_CTX, struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_diag_int(cachetag_purgemap_byte_count(ns->index)));
+}
+
+#endif /* CACHE_TAG_DEMO_DIAGNOSTICS */
 
 static int
 cachetag_pending_probe(void *priv, struct objcore *oc,
@@ -1826,6 +1875,8 @@ vmod_namespace_compact(VRT_CTX, struct vmod_cachetag_namespace *ns)
 	cachetag_vsc_update(ns);
 	return (r);
 }
+
+#if CACHE_TAG_TEST_HOOKS
 
 VCL_BOOL v_matchproto_(td_cachetag_namespace_test_fail_next_key_purge_wal)
 vmod_namespace_test_fail_next_key_purge_wal(VRT_CTX,
@@ -2074,6 +2125,8 @@ vmod_namespace_test_next_fellow_attr_read_failure(VRT_CTX,
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	return (cachetag_fellow_test_fail_next_visit());
 }
+
+#endif /* CACHE_TAG_TEST_HOOKS */
 
 static void
 cachetag_apply_attach_purge(struct worker *wrk, struct objcore *oc,
