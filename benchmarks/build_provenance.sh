@@ -7,8 +7,8 @@
 # mismatch so a stale or wrong-arm build cache cannot silently poison a row.
 #
 # Usage:
-#   build_provenance.sh record <cachetag-src> <vinyl-src> <slash-src|none> <storage-kind> <out-file>
-#   build_provenance.sh verify <cachetag-src> <vinyl-src> <slash-src|none> <storage-kind> <provenance-file>
+#   build_provenance.sh record <cachetag-src> <vinyl-src> <slash-src|none> <storage-kind> <set-interning> <out-file>
+#   build_provenance.sh verify <cachetag-src> <vinyl-src> <slash-src|none> <storage-kind> <set-interning> <provenance-file>
 #
 # verify honors ALLOW_STALE_BUILD=1 to downgrade failures to warnings for a
 # deliberate, explicitly acknowledged reuse of a stale build.
@@ -60,7 +60,16 @@ cachetag_src=${2:?cachetag source dir required}
 vinyl_src=${3:?vinyl source dir required}
 slash_src=${4:?slash source dir or none required}
 storage_kind=${5:?storage kind required}
-provenance_file=${6:?provenance file path required}
+set_interning=${6:?set interning setting required}
+provenance_file=${7:?provenance file path required}
+
+case "$set_interning" in
+0|1) ;;
+*)
+	echo "set interning setting must be 0 or 1" >&2
+	exit 2
+	;;
+esac
 
 # shellcheck disable=SC2086
 cachetag_hash=$(tree_hash "$cachetag_src" $CACHETAG_HASH_PATHS)
@@ -76,9 +85,10 @@ fi
 case "$mode" in
 record)
 	{
-		echo "build_provenance_version=1"
+		echo "build_provenance_version=2"
 		echo "build_time_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 		echo "build_storage_kind=$storage_kind"
+		echo "build_set_interning=$set_interning"
 		echo "build_slash_built=$([ "$slash_hash" != none ] && echo 1 || echo 0)"
 		echo "cachetag_build_input_sha256=$cachetag_hash"
 		echo "vinyl_build_input_sha256=$vinyl_hash"
@@ -108,6 +118,10 @@ verify)
 		recorded_vinyl=$(sed -n "s/^vinyl_build_input_sha256=//p" "$provenance_file")
 		recorded_slash=$(sed -n "s/^slash_build_input_sha256=//p" "$provenance_file")
 		recorded_slash_built=$(sed -n "s/^build_slash_built=//p" "$provenance_file")
+		recorded_set_interning=$(sed -n "s/^build_set_interning=//p" "$provenance_file")
+		if [ "$recorded_set_interning" != "$set_interning" ]; then
+			fail "set interning setting changed since the cached build (recorded ${recorded_set_interning:-absent}, requested $set_interning)"
+		fi
 		if [ "$recorded_cachetag" != "$cachetag_hash" ]; then
 			fail "cachetag build inputs changed since the cached build (recorded ${recorded_cachetag:-absent}, current $cachetag_hash)"
 		fi

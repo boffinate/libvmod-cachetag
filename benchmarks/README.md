@@ -84,6 +84,7 @@ BENCH_PROFILE=all BENCH_BUCKETS=64 CHURN_CYCLES=3 OBJECTS=10000 RUNS=3 \
 - `OBJECTS`: objects loaded per run.
 - `TAGS_PER_OBJECT`: tags attached per object.
 - `BENCH_PROFILE`: one of the profiles above, `all`, or a comma-separated profile list.
+- `BENCH_SET_INTERNING`: `0` for the direct-vector baseline or `1` for `--enable-set-interning`; default `0`. It applies to the Default/Buddy volatile index representation; Fellow uses its separate on-disk index path. The resolved selection is recorded in build provenance and result metadata, and a `SKIP_BUILD=1` reuse rejects a mismatch.
 - `BENCH_BUCKETS`: bucket cardinality for shared bucket tags.
 - `BENCH_CLIENTS`: concurrent HTTP clients for the Go driver, default `1`.
 - `BENCH_WARM_SECONDS`: timed post-load warm-hit phase duration for long-TTL load profiles, default `5`; set `0` to disable.

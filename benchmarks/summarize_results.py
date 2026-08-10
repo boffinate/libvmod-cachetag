@@ -29,6 +29,14 @@ PURGEMAP_FELLOW_DIRECT_COUNTERS = (
     "purgemap_fellow_store_invariant_failures",
     "purgemap_volatile_fallback_attaches",
 )
+SET_INTERNING_COUNTERS = (
+    "volatile_interned_sets",
+    "volatile_interned_set_refs",
+    "volatile_interned_set_hits",
+    "volatile_interned_set_misses",
+    "volatile_interned_set_bytes",
+    "volatile_interned_table_bytes",
+)
 PURGEMAP_RESTART_PHASES = (
     "post_load",
     "post_restart",
@@ -1325,6 +1333,10 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
             "buddy_g_bytes": buddy_counter(stats, "g_bytes"),
             "buddy_g_space": buddy_counter(stats, "g_space"),
             "cachetag_index_memory_bytes": index_memory,
+            **{
+                f"cachetag_{counter}": cachetag_counter(stats, counter)
+                for counter in SET_INTERNING_COUNTERS
+            },
             "cachetag_keys_total": historical_metrics.get("keys_total"),
             "cachetag_mem_keys": historical_metrics.get("mem_keys"),
             "cachetag_mem_index_base_bytes": mem_index_base_bytes,
@@ -1884,6 +1896,7 @@ def aggregate_workload_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "buddy_g_bytes",
             "buddy_g_space",
             "cachetag_index_memory_bytes",
+            *(f"cachetag_{counter}" for counter in SET_INTERNING_COUNTERS),
             "cachetag_volatile_side_table_bytes",
             "cachetag_volatile_side_table_buckets",
             "cachetag_side_table_grows",
@@ -2325,6 +2338,16 @@ def summarize_result(result_dir: Path) -> tuple[str, str]:
                 f"{fmt_float(row['driver_warm_requests_per_second_median'])} | "
                 f"{fmt_concurrent_read_rps(row)}"
             )
+            if row.get("cachetag_volatile_interned_sets_median") is not None:
+                lines.append(
+                    "    set interning: "
+                    f"sets={fmt_float(row.get('cachetag_volatile_interned_sets_median'))} "
+                    f"refs={fmt_float(row.get('cachetag_volatile_interned_set_refs_median'))} "
+                    f"hits/misses={fmt_float(row.get('cachetag_volatile_interned_set_hits_median'))}/"
+                    f"{fmt_float(row.get('cachetag_volatile_interned_set_misses_median'))} "
+                    f"set_bytes={fmt_bytes(int(row['cachetag_volatile_interned_set_bytes_median']) if row.get('cachetag_volatile_interned_set_bytes_median') is not None else None)} "
+                    f"table_bytes={fmt_bytes(int(row['cachetag_volatile_interned_table_bytes_median']) if row.get('cachetag_volatile_interned_table_bytes_median') is not None else None)}"
+                )
             if row.get("post_restart_tracked_memory_bytes_median") is not None:
                 lines.append(
                     "    restart: "

@@ -26,6 +26,8 @@ Environment:
                         (default: ad-hoc)
   BENCH_RESULT_ID       Unique result id for labels/metadata
                         (default: result directory name)
+  BENCH_SET_INTERNING   1 to build cachetag with --enable-set-interning,
+                        0 to build its direct-vector baseline (default: 0)
   XKEY_SRC              varnish-modules checkout for xkey baseline
                         (default: ../varnish-modules when present)
   RUN_XKEY              1 to build and run xkey baseline, 0 to skip,
@@ -312,6 +314,7 @@ objects=${OBJECTS:-1000}
 tags_per_object=${TAGS_PER_OBJECT:-4}
 bench_profile=${BENCH_PROFILE:-explicit-purge}
 bench_matrix=${BENCH_MATRIX:-ad-hoc}
+bench_set_interning=${BENCH_SET_INTERNING:-0}
 bench_buckets=${BENCH_BUCKETS:-1024}
 bench_clients=${BENCH_CLIENTS:-1}
 bench_warm_seconds=${BENCH_WARM_SECONDS:-5}
@@ -450,6 +453,13 @@ case "$run_noindex" in
 	0|1) ;;
 	*)
 		echo "RUN_NOINDEX must be 0 or 1" >&2
+		exit 2
+		;;
+esac
+case "$bench_set_interning" in
+	0|1) ;;
+	*)
+		echo "BENCH_SET_INTERNING must be 0 or 1" >&2
 		exit 2
 		;;
 esac
@@ -653,6 +663,7 @@ $docker_cmd run $docker_run_args --rm \
 	--label "org.cachetag.benchmark.matrix=$bench_matrix" \
 	--label "org.cachetag.benchmark.result_id=$bench_result_id" \
 	--label "org.cachetag.benchmark.branch=$bench_branch" \
+	--label "org.cachetag.benchmark.set_interning=$bench_set_interning" \
 	-v "$vinyl_src:/vinyl-src:ro" \
 	$slash_mount_args \
 	-v "$repo_dir:/cachetag-host:ro" \
@@ -664,6 +675,7 @@ $docker_cmd run $docker_run_args --rm \
 	-e "BENCH_PROFILE=$bench_profile" \
 	-e "BENCH_MATRIX=$bench_matrix" \
 	-e "BENCH_RESULT_ID=$bench_result_id" \
+	-e "BENCH_SET_INTERNING=$bench_set_interning" \
 	-e "BENCH_BUCKETS=$bench_buckets" \
 	-e "BENCH_CLIENTS=$bench_clients" \
 	-e "BENCH_WARM_SECONDS=$bench_warm_seconds" \
@@ -777,6 +789,15 @@ vinyl_build=/work/vinyl-build
 vinyl_src_copy=/work/vinyl-src-copy
 slash_src=/work/slash-src
 cachetag_src=/work/cachetag-src
+
+case "$BENCH_SET_INTERNING" in
+0) cachetag_configure_args=--disable-set-interning ;;
+1) cachetag_configure_args=--enable-set-interning ;;
+*)
+	echo "BENCH_SET_INTERNING must be 0 or 1" >&2
+	exit 2
+	;;
+esac
 
 if [ "${SKIP_BUILD}" != 1 ]; then
 	rm -rf "$prefix" "$vinyl_build" "$vinyl_src_copy" "$slash_src" "$cachetag_src"
@@ -894,7 +915,7 @@ M4EOF
 		-cf - . | tar -C "$cachetag_src" -xf -
 
 	cd "$cachetag_src"
-	./bootstrap --prefix="$prefix"
+	./bootstrap --prefix="$prefix" "$cachetag_configure_args"
 	make -j"$(nproc)"
 
 	provenance_slash=none
@@ -903,6 +924,7 @@ M4EOF
 	fi
 	sh /cachetag-host/benchmarks/build_provenance.sh record \
 		/cachetag-host /vinyl-src "$provenance_slash" "$BENCH_STORAGE_KIND" \
+		"$BENCH_SET_INTERNING" \
 		/work/build-provenance.env
 else
 	test -x "$prefix/bin/vinyltest"
@@ -918,6 +940,7 @@ else
 	ALLOW_STALE_BUILD="${CACHE_TAG_ALLOW_STALE_BUILD:-0}" \
 		sh /cachetag-host/benchmarks/build_provenance.sh verify \
 		/cachetag-host /vinyl-src "$provenance_slash" "$BENCH_STORAGE_KIND" \
+		"$BENCH_SET_INTERNING" \
 		/work/build-provenance.env
 fi
 if [ -f /work/build-provenance.env ]; then
@@ -949,12 +972,12 @@ if [ "${RUN_XKEY}" = 1 ]; then
 	cd /results/xkey-build
 	# Vinyl renamed cache/cache_vinyld.h to cache/cache_int.h upstream
 	# (6d36364cc1); accept either so the shim works on 9.0.1 and trunk.
-	printf '%s\n' \
-		'#if defined(__has_include) && __has_include(<cache/cache_int.h>)' \
-		'#  include <cache/cache_int.h>' \
-		'#else' \
-		'#  include <cache/cache_vinyld.h>' \
-		'#endif' > cache/cache_varnishd.h
+	printf "%s\n" \
+		"#if defined(__has_include) && __has_include(<cache/cache_int.h>)" \
+		"#  include <cache/cache_int.h>" \
+		"#else" \
+		"#  include <cache/cache_vinyld.h>" \
+		"#endif" > cache/cache_varnishd.h
 	python3 /vinyl-src/lib/libvcc/vmodtool.py --strict --boilerplate \
 		-o vcc_xkey_if /xkey-src/src/vmod_xkey.vcc
 	python3 /vinyl-src/lib/libvsc/vsctool.py -c /xkey-src/src/xkey.vsc
@@ -1050,6 +1073,8 @@ python3 /cachetag-host/benchmarks/generate_cachetag_benchmark_vtc.py \
 	printf "bench_profile=%s\n" "$BENCH_PROFILE"
 	printf "bench_matrix=%s\n" "$BENCH_MATRIX"
 	printf "bench_result_id=%s\n" "$BENCH_RESULT_ID"
+	printf "bench_set_interning=%s\n" "$BENCH_SET_INTERNING"
+	printf "cachetag_configure_args=%s\n" "$cachetag_configure_args"
 	printf "bench_buckets=%s\n" "$BENCH_BUCKETS"
 	printf "bench_clients=%s\n" "$BENCH_CLIENTS"
 	printf "bench_warm_seconds=%s\n" "$BENCH_WARM_SECONDS"
