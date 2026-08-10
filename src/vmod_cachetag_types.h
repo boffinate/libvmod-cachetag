@@ -55,6 +55,12 @@ struct cachetag_counters {
 	uint64_t volatile_object_table_bytes;
 	uint64_t volatile_object_count_sidecar_bytes;
 	uint64_t volatile_object_count_overflow_bytes;
+	uint64_t volatile_interned_sets;
+	uint64_t volatile_interned_set_refs;
+	uint64_t volatile_interned_set_hits;
+	uint64_t volatile_interned_set_misses;
+	uint64_t volatile_interned_set_bytes;
+	uint64_t volatile_interned_table_bytes;
 	uint64_t volatile_object_table_slots;
 	uint64_t volatile_object_table_shrinks;
 	uint64_t volatile_objects;

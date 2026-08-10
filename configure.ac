@@ -67,6 +67,22 @@ AS_IF([test "x$enable_attach_timing" = "xyes"],
 	[AC_DEFINE([CACHE_TAG_ATTACH_TIMING], [0],
 		[Define to 0 to leave attach-path timing counters disabled.])])
 
+dnl Experimental resident membership representation. When enabled, multi-fold
+dnl volatile memberships are canonicalized and hash-consed per namespace.
+dnl Disabled builds retain the direct per-object fold-vector implementation.
+AC_ARG_ENABLE([set-interning],
+	AS_HELP_STRING([--enable-set-interning],
+		[enable hash-consed volatile membership sets (default: disabled)]),
+	[],
+	[enable_set_interning=no])
+AS_IF([test "x$enable_set_interning" = "xyes"],
+	[AC_DEFINE([CACHE_TAG_SET_INTERNING], [1],
+		[Define to 1 to use hash-consed volatile membership sets.])],
+	[AC_DEFINE([CACHE_TAG_SET_INTERNING], [0],
+		[Define to 0 to use direct volatile membership vectors.])])
+AM_CONDITIONAL([CACHE_TAG_SET_INTERNING],
+	[test "x$enable_set_interning" = "xyes"])
+
 dnl Read-only demo diagnostics VCL surface: .generation(), .purge_seq(),
 dnl .purgemap_entries(), .purgemap_slots(), .purgemap_bytes(). Off by default
 dnl so production builds do not expose it.
@@ -98,15 +114,17 @@ AS_IF([test "x$enable_test_hooks" = "xyes"],
 AM_CONDITIONAL([CACHE_TAG_TEST_HOOKS],
 	[test "x$enable_test_hooks" = "xyes"])
 
-dnl Propagate the enabled diagnostic surface into make distcheck, so the
-dnl distcheck inner configure builds the same VCL surface (and therefore runs
-dnl the same VTC list) as the outer build.
-cachetag_diag_configure_flags=""
+dnl Propagate enabled optional features into make distcheck, so the inner
+dnl configure builds the same implementation and VCL surface as the outer
+dnl build and therefore selects the same VTC list.
+cachetag_enabled_configure_flags=""
 AS_IF([test "x$enable_demo_diagnostics" = "xyes"],
-	[cachetag_diag_configure_flags="$cachetag_diag_configure_flags --enable-demo-diagnostics"])
+	[cachetag_enabled_configure_flags="$cachetag_enabled_configure_flags --enable-demo-diagnostics"])
 AS_IF([test "x$enable_test_hooks" = "xyes"],
-	[cachetag_diag_configure_flags="$cachetag_diag_configure_flags --enable-test-hooks"])
-AC_SUBST([CACHETAG_DIAG_CONFIGURE_FLAGS], [$cachetag_diag_configure_flags])
+	[cachetag_enabled_configure_flags="$cachetag_enabled_configure_flags --enable-test-hooks"])
+AS_IF([test "x$enable_set_interning" = "xyes"],
+	[cachetag_enabled_configure_flags="$cachetag_enabled_configure_flags --enable-set-interning"])
+AC_SUBST([CACHETAG_ENABLED_CONFIGURE_FLAGS], [$cachetag_enabled_configure_flags])
 
 AC_CONFIG_FILES([
 	Makefile
@@ -124,6 +142,7 @@ AS_ECHO("
 	vcldir:       $vcldir
 	pkgvcldir:    $pkgvcldir
 	attach timing: $enable_attach_timing
+	set interning: $enable_set_interning
 	demo diagnostics: $enable_demo_diagnostics
 	test hooks:   $enable_test_hooks
 

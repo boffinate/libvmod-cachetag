@@ -26,10 +26,11 @@ Environment:
   CACHE_TAG_CHECK_TARGET make target to run after bootstrap (default: distcheck)
   CACHE_TAG_CONFIGURE_ARGS
                         extra ./bootstrap (configure) arguments for the VMOD
-                        (default: "--enable-demo-diagnostics --enable-test-hooks",
-                        which builds the full diagnostic VCL surface the test
-                        suite expects; set to "" to build and test the
-                        production surface, which runs only the core VTCs)
+                        (default: "--enable-demo-diagnostics --enable-test-hooks
+                        --enable-set-interning", which builds the full
+                        diagnostic and experimental test surface; set to ""
+                        to build and test the production surface, which runs
+                        only the core VTCs)
   CACHE_TAG_TESTS       optional TESTS override for make check, for example:
                         vtc/cachetag_c00000.vtc
   CACHE_TAG_FAILURE_LOG_LINES
@@ -53,7 +54,7 @@ vinyl_src=$(CDPATH= cd -- "$vinyl_src" && pwd)
 image=${VINYL_DOCKER_IMAGE:-vinyl-cache-ubuntu-build}
 check_target=${CACHE_TAG_CHECK_TARGET:-distcheck}
 cachetag_tests=${CACHE_TAG_TESTS:-}
-cachetag_configure_args=${CACHE_TAG_CONFIGURE_ARGS-"--enable-demo-diagnostics --enable-test-hooks"}
+cachetag_configure_args=${CACHE_TAG_CONFIGURE_ARGS-"--enable-demo-diagnostics --enable-test-hooks --enable-set-interning"}
 failure_log_lines=${CACHE_TAG_FAILURE_LOG_LINES:-260}
 build_profile=${CACHE_TAG_BUILD_PROFILE:-diagnostic}
 

@@ -1228,10 +1228,16 @@ cachetag_attach(struct cachetag_index *idx, struct objcore *oc,
 	}
 	r = cachetag_record_attach_purgemap_take(idx, oc, fold_storage, nkeys,
 	    reg_seq, attach_purge);
+#if CACHE_TAG_SET_INTERNING
+	cachetag_fold_storage_free(fold_storage, nkeys);
+	if (r != 0)
+		goto fail_closed;
+#else
 	if (r != 0) {
 		cachetag_fold_storage_free(fold_storage, nkeys);
 		goto fail_closed;
 	}
+#endif
 	return (0);
 
 fail_closed:

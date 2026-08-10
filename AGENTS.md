@@ -83,7 +83,7 @@ make check-with-vinyl-cache VINYL_CACHE_SRC=../vinyl-cache
 3. Installs Vinyl into `/tmp/vinyl-prefix`.
 4. Copies this VMOD source into `/tmp/cachetag-src`, excluding ignored build
    artifacts.
-5. Runs `./bootstrap --prefix=/tmp/vinyl-prefix` with `CACHE_TAG_CONFIGURE_ARGS`, which defaults to `--enable-demo-diagnostics --enable-test-hooks` so the full diagnostic VCL surface the suite expects is built. Set `CACHE_TAG_CONFIGURE_ARGS=""` to build and test the production surface instead; the VTC lists in `src/Makefile.am` shrink to the core tests automatically.
+5. Runs `./bootstrap --prefix=/tmp/vinyl-prefix` with `CACHE_TAG_CONFIGURE_ARGS`, which defaults to `--enable-demo-diagnostics --enable-test-hooks --enable-set-interning` so the full diagnostic and experimental surface is built. Set `CACHE_TAG_CONFIGURE_ARGS=""` to build and test the production surface instead; the VTC lists in `src/Makefile.am` shrink to the core tests automatically.
 6. Runs `make`.
 7. Runs `make distcheck` by default, or `CACHE_TAG_CHECK_TARGET` when set. `distcheck` reconfigures with the same diagnostic flags as the outer build (`DISTCHECK_CONFIGURE_FLAGS` propagation in `Makefile.am`/`configure.ac`).
 
@@ -99,13 +99,13 @@ SIGKILL VTC lists:
 scripts/test-fellow-with-vinyl-cache.sh ../vinyl-cache
 ```
 
-For `CACHE_TAG_CHECK_TARGET=check` with the default diagnostic-surface build,
-expect the standalone WAL test and the 53 storage-agnostic VTCs in `VTC_TESTS`
+For `CACHE_TAG_CHECK_TARGET=check` with the default diagnostic and set-interning build,
+expect the standalone WAL test and the 54 storage-agnostic VTCs in `VTC_TESTS`
 (16 `c`, 7 `r`, 30 `pm`) to pass:
 
 ```text
-# TOTAL: 54
-# PASS:  54
+# TOTAL: 55
+# PASS:  55
 # FAIL:  0
 # ERROR: 0
 ```

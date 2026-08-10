@@ -46,7 +46,50 @@
 .. vinyl_vsc:: volatile_object_count_overflow_bytes
 	:type:	gauge
 	:level:	info
-	:oneliner:	Live overflow object-count header bytes
+	:oneliner:	Live overflow membership metadata bytes
+
+	Bytes used to encode memberships with 255 or more folds. Direct-vector
+	builds count one 8-byte header per live overflow object; set-interning
+	builds count one 32-byte node header per live unique overflow set.
+
+.. vinyl_vsc:: volatile_interned_sets
+	:type:	gauge
+	:level:	info
+	:oneliner:	Live unique interned membership sets
+
+	Distinct multi-fold membership sets currently interned in the process-local
+	hash-consed registry. Zero when set interning is disabled.
+
+.. vinyl_vsc:: volatile_interned_set_refs
+	:type:	gauge
+	:level:	info
+	:oneliner:	Live object references to interned membership sets
+
+	Total live multi-tag objects referencing an interned membership set, summed
+	across all interned sets. Zero when set interning is disabled.
+
+.. vinyl_vsc:: volatile_interned_set_hits
+	:type:	counter
+	:level:	info
+	:oneliner:	Attaches reusing an interned membership set
+
+.. vinyl_vsc:: volatile_interned_set_misses
+	:type:	counter
+	:level:	info
+	:oneliner:	Attaches creating an interned membership set
+
+.. vinyl_vsc:: volatile_interned_set_bytes
+	:type:	gauge
+	:level:	info
+	:oneliner:	Interned membership-set node bytes
+
+	Bytes held by interned-set nodes: a 32-byte header plus 8 bytes per fold,
+	summed across all live interned sets. Zero when set interning is disabled.
+
+.. vinyl_vsc:: volatile_interned_table_bytes
+	:type:	gauge
+	:level:	info
+	:oneliner:	Interning hash-table bucket-array bytes
 
 .. vinyl_vsc:: volatile_object_table_slots
 	:type:	gauge

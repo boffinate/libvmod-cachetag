@@ -1,0 +1,8 @@
+SET INTERNING TEST HOOKS
+========================
+
+The following fault injector exists only when the VMOD was configured with both ``--enable-set-interning`` and ``--enable-test-hooks``. It verifies the fail-closed allocation path of the experimental implementation and must not be exposed in a production build.
+
+$Method BOOL .test_fail_next_intern_alloc()
+
+One-shot: fail the next interned membership-set allocation; the affected attach fails closed.

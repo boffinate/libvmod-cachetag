@@ -41,12 +41,13 @@ The configure summary prints the VMOD directory. `make install` puts `libvmod_ca
 
 ### Optional diagnostic build flags
 
-A default build exposes only the production VCL surface. Two configure flags add extra namespace methods; both are off by default and neither belongs in a production build:
+A default build exposes only the production VCL surface and uses direct per-object volatile membership vectors. The diagnostic flags below add extra namespace methods, while set interning selects an experimental internal representation. All are off by default:
 
 - `--enable-demo-diagnostics` builds the read-only diagnostics `.generation()`, `.purge_seq()`, `.purgemap_entries()`, `.purgemap_slots()`, and `.purgemap_bytes()`.
 - `--enable-test-hooks` builds every `.test_*()` fault injector and internal toggler used by the regression suite.
+- `--enable-set-interning` canonicalizes and hash-conses multi-fold volatile memberships per namespace. It can reduce resident memory where many objects have the same tag set, but adds sorting, hashing, and registry overhead for every multi-fold attach, so use it only after benchmarking the target workload.
 
-Pass them to `./bootstrap` (or `./configure`) like any other configure argument, for example `./bootstrap --prefix="$VINYL_PREFIX" --enable-demo-diagnostics`. The generated VCC interface, the manual page, and the VTC test list all follow the selected surface, so VCL that calls a gated method fails to compile against a build without its flag.
+Pass them to `./bootstrap` (or `./configure`) like any other configure argument, for example `./bootstrap --prefix="$VINYL_PREFIX" --enable-set-interning`. The generated VCC interface, the manual page, and the VTC test list follow the selected VCL surface; the set-interning flag does not alter production VCL methods. Its test-only allocation-failure hook requires both `--enable-set-interning` and `--enable-test-hooks`.
 
 Restart Vinyl after installing the VMOD, load the VCL for your selected storage backend, and confirm that Vinyl compiles it successfully before sending production traffic.
 

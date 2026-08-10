@@ -20,6 +20,9 @@
 struct cachetag_objent;
 struct cachetag_side_bucket;
 struct cachetag_purgemap;
+#if CACHE_TAG_SET_INTERNING
+struct cachetag_interned_set;
+#endif
 
 /*
  * Epoch reader gate: a phase bit plus a per-phase reader count.  Readers pin
@@ -105,6 +108,22 @@ struct cachetag_index {
 	 * handles, so a stale slot generation cannot outlive the mutex-protected
 	 * lookup which resolves an objcore to its current dense slot.
 	 */
+#if CACHE_TAG_SET_INTERNING
+	/*
+	 * Hash-consed multi-fold membership sets. The registry is guarded by
+	 * obj_mtx like the dense object table and side map. Hits and misses survive
+	 * detach_all; the live gauges drain with the objects.
+	 */
+	struct cachetag_interned_set **intern_buckets;
+	size_t intern_nbuckets;
+	size_t intern_sets;
+	size_t intern_refs;
+	size_t intern_bytes;
+	size_t intern_overflow_sets;
+	uint64_t intern_hits;
+	uint64_t intern_misses;
+#endif
+
 	struct cachetag_side_table side_primary;
 	struct cachetag_side_table side_retiring;
 	size_t side_migrate_cursor;
@@ -145,6 +164,9 @@ struct cachetag_index {
 	unsigned test_force_next_attach_slot_overflow;
 	unsigned test_fail_next_object_segment_alloc;
 	unsigned test_fail_next_side_migration_alloc;
+#if CACHE_TAG_SET_INTERNING
+	unsigned test_fail_next_intern_alloc;
+#endif
 	unsigned test_side_fingerprint_bits;
 	unsigned benchmark_obj_mtx_timing;
 };
@@ -180,9 +202,9 @@ void cachetag_counter_add(struct cachetag_index *, uint64_t *, uint64_t);
 void cachetag_note_stale_call(struct cachetag_index *);
 void cachetag_note_stale_detected(struct cachetag_index *);
 /*
- * On success, cachetag_record_attach_purgemap_take() takes ownership of storage
- * when nfolds > 1.  The caller retains ownership on failure and when
- * nfolds == 1.
+ * Without set interning, a successful multi-fold attach takes ownership of
+ * storage; the caller retains it on failure and for one fold. With set
+ * interning, storage is sorted scratch space and the caller always frees it.
  */
 int cachetag_record_attach_purgemap_take(struct cachetag_index *,
     struct objcore *, void *, unsigned, uint64_t,

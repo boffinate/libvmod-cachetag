@@ -124,7 +124,7 @@ The file list was derived from the build system, not guessed:
 | --- | --- |
 | `<vmoddir>/libvmod_cachetag.so` | `src/Makefile.am`: `vmod_LTLIBRARIES = libvmod_cachetag.la`, linked with `VMOD_LDFLAGS` (`-module -export-dynamic -avoid-version -shared`), so the installed object is unversioned |
 | `/usr/share/man/man3/vmod_cachetag.3` | `src/Makefile.am`: `dist_man_MANS = vmod_cachetag.3` |
-| `/usr/share/doc/libvmod-cachetag/vmod_cachetag.vcc` | `src/Makefile.am`: `nodist_doc_DATA = vmod_cachetag.vcc`, into autoconf's default `docdir`. The VCC file is concatenated at build time from the distributed fragments (`vmod_cachetag_core.vcc` plus any fragment enabled by `--enable-demo-diagnostics` / `--enable-test-hooks`), so the installed copy documents exactly the built surface |
+| `/usr/share/doc/libvmod-cachetag/vmod_cachetag.vcc` | `src/Makefile.am`: `nodist_doc_DATA = vmod_cachetag.vcc`, into autoconf's default `docdir`. The VCC file is concatenated at build time from the distributed fragments (`vmod_cachetag_core.vcc` plus the fragments enabled by `--enable-demo-diagnostics`, `--enable-test-hooks`, and their `--enable-set-interning` test-hook combination), so the installed copy documents exactly the built surface |
 
 `<vmoddir>` is not hard-coded. `vinylapi.pc` defines `vmoddir=${libdir}/vinyl-cache/vmods`, and Vinyl's `vinyl.m4` resolves it with `pkg-config --define-variable=libdir=$libdir`. Both recipes therefore take `libdir` from the installed development package rather than from the packaging default, so the VMOD lands in the directory the packaged runtime actually searches, and then assert the result equals `@VINYL_VMODDIR@`.
 

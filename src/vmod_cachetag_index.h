@@ -108,6 +108,9 @@ int cachetag_test_side_initial_buckets(struct cachetag_index *, uint32_t);
 int cachetag_test_abort_next_sweep(struct cachetag_index *);
 int cachetag_test_force_next_attach_slot_overflow(struct cachetag_index *);
 int cachetag_test_fail_next_object_segment_alloc(struct cachetag_index *);
+#if CACHE_TAG_SET_INTERNING
+int cachetag_test_fail_next_intern_alloc(struct cachetag_index *);
+#endif
 int cachetag_test_structural_limits(struct cachetag_index *);
 int cachetag_test_side_fingerprint_bits(struct cachetag_index *, uint32_t);
 int cachetag_test_side_start_migration(struct cachetag_index *, uint32_t);

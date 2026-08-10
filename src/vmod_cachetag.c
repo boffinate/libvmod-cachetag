@@ -381,6 +381,12 @@ cachetag_vsc_update(struct vmod_cachetag_namespace *ns)
 	CACHETAG_VSC_PUBLISH(volatile_object_table_bytes);
 	CACHETAG_VSC_PUBLISH(volatile_object_count_sidecar_bytes);
 	CACHETAG_VSC_PUBLISH(volatile_object_count_overflow_bytes);
+	CACHETAG_VSC_PUBLISH(volatile_interned_sets);
+	CACHETAG_VSC_PUBLISH(volatile_interned_set_refs);
+	CACHETAG_VSC_PUBLISH(volatile_interned_set_hits);
+	CACHETAG_VSC_PUBLISH(volatile_interned_set_misses);
+	CACHETAG_VSC_PUBLISH(volatile_interned_set_bytes);
+	CACHETAG_VSC_PUBLISH(volatile_interned_table_bytes);
 	CACHETAG_VSC_PUBLISH(volatile_object_table_slots);
 	CACHETAG_VSC_PUBLISH(volatile_object_table_shrinks);
 	CACHETAG_VSC_PUBLISH(volatile_objects);
@@ -1940,6 +1946,20 @@ vmod_namespace_test_fail_next_object_segment_alloc(VRT_CTX,
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	return (cachetag_test_fail_next_object_segment_alloc(ns->index));
 }
+
+#if CACHE_TAG_SET_INTERNING
+
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_fail_next_intern_alloc)
+vmod_namespace_test_fail_next_intern_alloc(VRT_CTX,
+    struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_test_fail_next_intern_alloc(ns->index));
+}
+
+#endif /* CACHE_TAG_SET_INTERNING */
 
 VCL_BOOL v_matchproto_(td_cachetag_namespace_test_structural_limits)
 vmod_namespace_test_structural_limits(VRT_CTX,

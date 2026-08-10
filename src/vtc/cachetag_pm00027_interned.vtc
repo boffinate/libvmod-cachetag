@@ -1,0 +1,210 @@
+vtest "Stream 5 count boundaries preserve volatile object lifecycle"
+
+server s1 {
+	rxreq
+	expect req.url == "/one"
+	txresp -body "one-old"
+
+	rxreq
+	expect req.url == "/two"
+	txresp -body "two-old"
+
+	rxreq
+	expect req.url == "/direct"
+	txresp -body "direct-old"
+
+	rxreq
+	expect req.url == "/remove"
+	txresp -body "remove-old"
+
+	rxreq
+	expect req.url == "/ttl"
+	txresp -body "ttl-old"
+
+	rxreq
+	expect req.url == "/overflow"
+	txresp -body "overflow-old"
+
+	rxreq
+	expect req.url == "/direct"
+	txresp -body "direct-new"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("stream5_counts",
+		    max_keys_per_object = 300, sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "HARDPURGE") {
+			set req.http.result = tags.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "SOFTPURGE") {
+			set req.http.result = tags.purge(req.http.Tag, soft);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+		if (req.method == "REMOVE") {
+			return (purge);
+		}
+		if (req.method == "STATS") {
+			set req.http.objects = tags.objects();
+			set req.http.edges = tags.edges();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/one") {
+			tags.add("one");
+		} else if (bereq.url == "/two") {
+			tags.add("two-a");
+			tags.add("two-b");
+		} else if (bereq.url == "/direct") {
+			tags.add_header("d000,d001,d002,d003,d004,d005,d006,d007,d008,d009,d010,d011,d012,d013,d014,d015,d016,d017,d018,d019,d020,d021,d022,d023,d024,d025,d026,d027,d028,d029,d030,d031,d032,d033,d034,d035,d036,d037,d038,d039,d040,d041,d042,d043,d044,d045,d046,d047,d048,d049,d050,d051,d052,d053,d054,d055,d056,d057,d058,d059,d060,d061,d062,d063,d064,d065,d066,d067,d068,d069,d070,d071,d072,d073,d074,d075,d076,d077,d078,d079,d080,d081,d082,d083,d084,d085,d086,d087,d088,d089,d090,d091,d092,d093,d094,d095,d096,d097,d098,d099,d100,d101,d102,d103,d104,d105,d106,d107,d108,d109,d110,d111,d112,d113,d114,d115,d116,d117,d118,d119,d120,d121,d122,d123,d124,d125,d126,d127,d128,d129,d130,d131,d132,d133,d134,d135,d136,d137,d138,d139,d140,d141,d142,d143,d144,d145,d146,d147,d148,d149,d150,d151,d152,d153,d154,d155,d156,d157,d158,d159,d160,d161,d162,d163,d164,d165,d166,d167,d168,d169,d170,d171,d172,d173,d174,d175,d176,d177,d178,d179,d180,d181,d182,d183,d184,d185,d186,d187,d188,d189,d190,d191,d192,d193,d194,d195,d196,d197,d198,d199,d200,d201,d202,d203,d204,d205,d206,d207,d208,d209,d210,d211,d212,d213,d214,d215,d216,d217,d218,d219,d220,d221,d222,d223,d224,d225,d226,d227,d228,d229,d230,d231,d232,d233,d234,d235,d236,d237,d238,d239,d240,d241,d242,d243,d244,d245,d246,d247,d248,d249,d250,d251,d252,d253");
+		} else if (bereq.url == "/overflow") {
+			tags.add_header("o000,o001,o002,o003,o004,o005,o006,o007,o008,o009,o010,o011,o012,o013,o014,o015,o016,o017,o018,o019,o020,o021,o022,o023,o024,o025,o026,o027,o028,o029,o030,o031,o032,o033,o034,o035,o036,o037,o038,o039,o040,o041,o042,o043,o044,o045,o046,o047,o048,o049,o050,o051,o052,o053,o054,o055,o056,o057,o058,o059,o060,o061,o062,o063,o064,o065,o066,o067,o068,o069,o070,o071,o072,o073,o074,o075,o076,o077,o078,o079,o080,o081,o082,o083,o084,o085,o086,o087,o088,o089,o090,o091,o092,o093,o094,o095,o096,o097,o098,o099,o100,o101,o102,o103,o104,o105,o106,o107,o108,o109,o110,o111,o112,o113,o114,o115,o116,o117,o118,o119,o120,o121,o122,o123,o124,o125,o126,o127,o128,o129,o130,o131,o132,o133,o134,o135,o136,o137,o138,o139,o140,o141,o142,o143,o144,o145,o146,o147,o148,o149,o150,o151,o152,o153,o154,o155,o156,o157,o158,o159,o160,o161,o162,o163,o164,o165,o166,o167,o168,o169,o170,o171,o172,o173,o174,o175,o176,o177,o178,o179,o180,o181,o182,o183,o184,o185,o186,o187,o188,o189,o190,o191,o192,o193,o194,o195,o196,o197,o198,o199,o200,o201,o202,o203,o204,o205,o206,o207,o208,o209,o210,o211,o212,o213,o214,o215,o216,o217,o218,o219,o220,o221,o222,o223,o224,o225,o226,o227,o228,o229,o230,o231,o232,o233,o234,o235,o236,o237,o238,o239,o240,o241,o242,o243,o244,o245,o246,o247,o248,o249,o250,o251,o252,o253,o254");
+		} else if (bereq.url == "/remove") {
+			tags.add("remove");
+		} else if (bereq.url == "/ttl") {
+			tags.add("ttl");
+			set beresp.ttl = 0.1s;
+			set beresp.grace = 0s;
+			set beresp.keep = 0s;
+		}
+		if (bereq.url != "/ttl") {
+			set beresp.ttl = 1h;
+		}
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		set resp.http.objects = req.http.objects;
+		set resp.http.edges = req.http.edges;
+		return (deliver);
+	}
+} -start
+
+client c_load {
+	txreq -url "/one"
+	rxresp
+	expect resp.body == "one-old"
+
+	txreq -url "/two"
+	rxresp
+	expect resp.body == "two-old"
+
+	txreq -url "/direct"
+	rxresp
+	expect resp.body == "direct-old"
+
+	txreq -url "/remove"
+	rxresp
+	expect resp.body == "remove-old"
+
+	txreq -url "/ttl"
+	rxresp
+	expect resp.body == "ttl-old"
+
+	txreq -url "/overflow"
+	rxresp
+	expect resp.body == "overflow-old"
+
+	txreq -req STATS
+	rxresp
+	expect resp.http.objects == 6
+	expect resp.http.edges == 514
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_objects == 6
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_edges == 514
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_inline_folds == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_object_count_overflow_bytes == 32
+
+client c_fresh_and_soft {
+	txreq -url "/overflow"
+	rxresp
+	expect resp.body == "overflow-old"
+
+	txreq -req SOFTPURGE -hdr "Tag: two-b"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -url "/two"
+	rxresp
+	expect resp.body == "two-old"
+} -run
+
+client c_hard_direct {
+	txreq -req HARDPURGE -hdr "Tag: d253"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -url "/direct"
+	rxresp
+	expect resp.body == "direct-new"
+
+	txreq -url "/overflow"
+	rxresp
+	expect resp.body == "overflow-old"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_objects == 6
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_edges == 514
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_object_count_overflow_bytes == 32
+
+client c_compact_overflow {
+	txreq -req HARDPURGE -hdr "Tag: o254"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 2
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_objects == 5
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_edges == 259
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_inline_folds == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_object_count_overflow_bytes == 0
+
+client c_remove {
+	txreq -req REMOVE -url "/remove"
+	rxresp
+	expect resp.status == 200
+
+	txreq -req STATS
+	rxresp
+	expect resp.http.objects == 4
+	expect resp.http.edges == 258
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_inline_folds == 2
+
+delay 2
+vinyl v1 -expect MAIN.n_expired >= 1
+
+client c_expired_stats {
+	txreq -req STATS
+	rxresp
+	expect resp.http.objects == 3
+	expect resp.http.edges == 257
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_inline_folds == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_object_count_overflow_bytes == 0
+
+server s1 -wait

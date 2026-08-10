@@ -36,7 +36,11 @@ struct cachetag_objent {
 	struct objcore *oc;
 	uint64_t reg_seq;
 	union {
+#if CACHE_TAG_SET_INTERNING
+		struct cachetag_interned_set *set;
+#else
 		uint64_t *vector;
+#endif
 		uint64_t inline_one;
 	} membership;
 };
@@ -107,6 +111,190 @@ cachetag_fold_storage_free(void *storage, unsigned nfolds)
 	if (nfolds > 1)
 		free(storage);
 }
+
+#if CACHE_TAG_SET_INTERNING
+
+/*
+ * Process-local hash-consed membership sets. Every multi-fold membership
+ * references one refcounted node; folds are sorted so registrations in
+ * different call order share a node. The registry is guarded by obj_mtx,
+ * along with the dense table and side map. It is volatile by construction:
+ * restart creates an empty registry and a node dies with its last object.
+ */
+
+#define TAG_INTERNED_SET_MAGIC UINT32_C(0x63747369)
+#define TAG_INTERN_INITIAL_BUCKETS 64U
+
+struct cachetag_interned_set {
+	uint32_t magic;
+	unsigned nfolds;
+	uint64_t hash;
+	uint64_t refs;
+	struct cachetag_interned_set *next;
+	uint64_t folds[];
+};
+
+_Static_assert(sizeof(struct cachetag_interned_set) == 32,
+	"interned set header must remain 32 bytes");
+
+static size_t
+cachetag_interned_set_bytes(const struct cachetag_interned_set *set)
+{
+
+	return (sizeof *set + (size_t)set->nfolds * sizeof(uint64_t));
+}
+
+static int
+cachetag_fold_cmp(const void *va, const void *vb)
+{
+	uint64_t a, b;
+
+	memcpy(&a, va, sizeof a);
+	memcpy(&b, vb, sizeof b);
+	if (a < b)
+		return (-1);
+	return (a > b);
+}
+
+static uint64_t
+cachetag_intern_hash(const uint64_t *folds, unsigned nfolds)
+{
+
+	return (XXH3_64bits(folds, (size_t)nfolds * sizeof(uint64_t)));
+}
+
+static struct cachetag_interned_set **
+cachetag_intern_bucket(const struct cachetag_index *idx, uint64_t hash)
+{
+
+	AN(idx->intern_buckets);
+	assert(idx->intern_nbuckets > 0);
+	return (&idx->intern_buckets[hash & (idx->intern_nbuckets - 1)]);
+}
+
+static void
+cachetag_intern_maybe_grow_locked(struct cachetag_index *idx)
+{
+	struct cachetag_interned_set **buckets, **head, *set, *next;
+	size_t nbuckets, u;
+
+	if (idx->intern_buckets != NULL &&
+	    idx->intern_sets + 1 <= idx->intern_nbuckets)
+		return;
+	if (idx->intern_nbuckets == 0) {
+		nbuckets = TAG_INTERN_INITIAL_BUCKETS;
+	} else {
+		if (idx->intern_nbuckets > SIZE_MAX / 2)
+			return;
+		nbuckets = idx->intern_nbuckets * 2;
+	}
+	if (nbuckets > SIZE_MAX / sizeof *buckets)
+		return;
+	buckets = calloc(nbuckets, sizeof *buckets);
+	if (buckets == NULL)
+		return; /* Keep the current table; chains can still grow. */
+	for (u = 0; u < idx->intern_nbuckets; u++) {
+		for (set = idx->intern_buckets[u]; set != NULL; set = next) {
+			next = set->next;
+			head = &buckets[set->hash & (nbuckets - 1)];
+			set->next = *head;
+			*head = set;
+		}
+	}
+	free(idx->intern_buckets);
+	idx->intern_buckets = buckets;
+	idx->intern_nbuckets = nbuckets;
+}
+
+static struct cachetag_interned_set *
+cachetag_intern_acquire_locked(struct cachetag_index *idx,
+    const uint64_t *folds, unsigned nfolds, uint64_t hash)
+{
+	struct cachetag_interned_set *set, **head;
+	size_t bytes;
+
+	assert(nfolds > 1);
+	cachetag_intern_maybe_grow_locked(idx);
+	if (idx->intern_buckets == NULL)
+		return (NULL);
+	head = cachetag_intern_bucket(idx, hash);
+	for (set = *head; set != NULL; set = set->next) {
+		if (set->hash != hash || set->nfolds != nfolds)
+			continue;
+		if (memcmp(set->folds, folds,
+		    (size_t)nfolds * sizeof(uint64_t)) != 0)
+			continue;
+		set->refs++;
+		idx->intern_refs++;
+		idx->intern_hits++;
+		return (set);
+	}
+	if (__atomic_exchange_n(&idx->test_fail_next_intern_alloc, 0,
+	    __ATOMIC_ACQ_REL))
+		return (NULL);
+	if ((size_t)nfolds > (SIZE_MAX - sizeof *set) / sizeof(uint64_t))
+		return (NULL);
+	bytes = sizeof *set + (size_t)nfolds * sizeof(uint64_t);
+	set = malloc(bytes);
+	if (set == NULL)
+		return (NULL);
+	set->magic = TAG_INTERNED_SET_MAGIC;
+	set->nfolds = nfolds;
+	set->hash = hash;
+	set->refs = 1;
+	memcpy(set->folds, folds, (size_t)nfolds * sizeof(uint64_t));
+	set->next = *head;
+	*head = set;
+	idx->intern_sets++;
+	idx->intern_refs++;
+	idx->intern_misses++;
+	idx->intern_bytes += bytes;
+	idx->intern_overflow_sets += nfolds >= TAG_OBJCOUNT_OVERFLOW;
+	return (set);
+}
+
+static void
+cachetag_intern_release_locked(struct cachetag_index *idx,
+    struct cachetag_interned_set *set)
+{
+	struct cachetag_interned_set **link;
+
+	AN(set);
+	assert(set->magic == TAG_INTERNED_SET_MAGIC);
+	assert(set->refs > 0);
+	assert(idx->intern_refs > 0);
+	idx->intern_refs--;
+	if (--set->refs > 0)
+		return;
+	link = cachetag_intern_bucket(idx, set->hash);
+	while (*link != set) {
+		AN(*link);
+		link = &(*link)->next;
+	}
+	*link = set->next;
+	assert(idx->intern_sets > 0);
+	idx->intern_sets--;
+	assert(idx->intern_bytes >= cachetag_interned_set_bytes(set));
+	idx->intern_bytes -= cachetag_interned_set_bytes(set);
+	if (set->nfolds >= TAG_OBJCOUNT_OVERFLOW) {
+		assert(idx->intern_overflow_sets > 0);
+		idx->intern_overflow_sets--;
+	}
+	free(set);
+}
+
+static void
+cachetag_intern_table_release_locked(struct cachetag_index *idx)
+{
+
+	assert(idx->intern_sets == 0);
+	assert(idx->intern_refs == 0);
+	free(idx->intern_buckets);
+	idx->intern_buckets = NULL;
+	idx->intern_nbuckets = 0;
+}
+
+#endif /* CACHE_TAG_SET_INTERNING */
 
 #define TAG_OBJECT_SEGMENT0_SLOTS 64U
 
@@ -212,7 +400,11 @@ cachetag_object_count_at(const struct cachetag_index *idx, size_t slot)
 static unsigned
 cachetag_objent_nfolds(const struct cachetag_index *idx, size_t slot)
 {
+#if CACHE_TAG_SET_INTERNING
+	const struct cachetag_interned_set *set;
+#else
 	const struct cachetag_fold_storage_header *header;
+#endif
 	const struct cachetag_objent *ent;
 	unsigned code;
 
@@ -220,6 +412,19 @@ cachetag_objent_nfolds(const struct cachetag_index *idx, size_t slot)
 	code = *cachetag_object_count_at(idx, slot);
 	if (code == TAG_OBJCOUNT_INVALID)
 		return (0);
+#if CACHE_TAG_SET_INTERNING
+	if (code == 1)
+		return (1);
+	set = ent->membership.set;
+	if (set == NULL || set->magic != TAG_INTERNED_SET_MAGIC)
+		return (0);
+	if (code != TAG_OBJCOUNT_OVERFLOW)
+		return (set->nfolds == code ? code : 0);
+	if (set->nfolds < TAG_OBJCOUNT_OVERFLOW ||
+	    set->nfolds > idx->limits.max_keys_per_object)
+		return (0);
+	return (set->nfolds);
+#else
 	if (code != TAG_OBJCOUNT_OVERFLOW)
 		return (code);
 	header = (const void *)ent->membership.vector;
@@ -228,12 +433,15 @@ cachetag_objent_nfolds(const struct cachetag_index *idx, size_t slot)
 	    header->nfolds > idx->limits.max_keys_per_object)
 		return (0);
 	return (header->nfolds);
+#endif
 }
 
 static const uint64_t *
 cachetag_objent_folds(const struct cachetag_index *idx, size_t slot)
 {
+#if !CACHE_TAG_SET_INTERNING
 	const struct cachetag_fold_storage_header *header;
+#endif
 	const struct cachetag_objent *ent;
 	unsigned nfolds;
 
@@ -243,10 +451,14 @@ cachetag_objent_folds(const struct cachetag_index *idx, size_t slot)
 		return (NULL);
 	if (nfolds == 1)
 		return (&ent->membership.inline_one);
+#if CACHE_TAG_SET_INTERNING
+	return (ent->membership.set->folds);
+#else
 	if (nfolds <= TAG_OBJCOUNT_DIRECT_MAX)
 		return (ent->membership.vector);
 	header = (const void *)ent->membership.vector;
 	return (header->folds);
+#endif
 }
 
 static void
@@ -258,7 +470,11 @@ cachetag_objent_dispose(struct cachetag_index *idx, size_t slot)
 	ent = cachetag_object_at(idx, slot);
 	nfolds = cachetag_objent_nfolds(idx, slot);
 	if (nfolds > 1)
+#if CACHE_TAG_SET_INTERNING
+		cachetag_intern_release_locked(idx, ent->membership.set);
+#else
 		cachetag_fold_storage_free(ent->membership.vector, nfolds);
+#endif
 	*cachetag_object_count_at(idx, slot) = TAG_OBJCOUNT_INVALID;
 }
 
@@ -645,6 +861,30 @@ cachetag_account_objects_locked(struct cachetag_index *idx)
 	idx->counters.resize_detached_bytes = idx->resize_detached_bytes;
 	idx->counters.resize_reconciled_bytes = active_bytes +
 	    side_retiring_bytes + idx->resize_detached_bytes;
+#if CACHE_TAG_SET_INTERNING
+	idx->counters.volatile_interned_sets = idx->intern_sets;
+	idx->counters.volatile_interned_set_refs = idx->intern_refs;
+	idx->counters.volatile_interned_set_hits = idx->intern_hits;
+	idx->counters.volatile_interned_set_misses = idx->intern_misses;
+	idx->counters.volatile_interned_set_bytes = idx->intern_bytes;
+	idx->counters.volatile_interned_table_bytes =
+	    idx->intern_nbuckets * sizeof(struct cachetag_interned_set *);
+	idx->counters.volatile_object_count_overflow_bytes =
+	    idx->intern_overflow_sets * sizeof(struct cachetag_interned_set);
+	idx->counters.index_memory_bytes = sizeof *idx + idx->namespace_len + 1 +
+		object_bytes + count_bytes +
+		side_bytes +
+		idx->resize_detached_bytes +
+		idx->counters.volatile_interned_set_bytes +
+		idx->counters.volatile_interned_table_bytes +
+		idx->counters.purgemap_bytes;
+#else
+	idx->counters.volatile_interned_sets = 0;
+	idx->counters.volatile_interned_set_refs = 0;
+	idx->counters.volatile_interned_set_hits = 0;
+	idx->counters.volatile_interned_set_misses = 0;
+	idx->counters.volatile_interned_set_bytes = 0;
+	idx->counters.volatile_interned_table_bytes = 0;
 	idx->counters.index_memory_bytes = sizeof *idx + idx->namespace_len + 1 +
 		object_bytes + count_bytes +
 		side_bytes +
@@ -653,6 +893,7 @@ cachetag_account_objects_locked(struct cachetag_index *idx)
 		idx->counters.volatile_inline_folds) * sizeof(uint64_t) +
 		idx->counters.volatile_object_count_overflow_bytes +
 		idx->counters.purgemap_bytes;
+#endif
 }
 
 enum cachetag_request_lock_category {
@@ -2112,10 +2353,19 @@ cachetag_record_attach_purgemap_take(struct cachetag_index *idx,
 	struct cachetag_side_bucket *allocated_side_map, *detached_side_map;
 	struct cachetag_objent *ent, *segment;
 	struct cachetag_side_location loc;
+#if CACHE_TAG_SET_INTERNING
+	struct cachetag_interned_set *set;
+#endif
 	struct cachetag_purgemap *pm;
 	const uint64_t *folds;
+#if CACHE_TAG_SET_INTERNING
+	uint64_t *scratch;
+#endif
 	size_t cap, old_capacity, old_side_buckets, side_buckets;
 	uint64_t low_water_wake_at, resize_started, resize_usec;
+#if CACHE_TAG_SET_INTERNING
+	uint64_t intern_hash;
+#endif
 	unsigned segment_index, side_reason;
 	int found, r, resize_wake;
 
@@ -2123,8 +2373,23 @@ cachetag_record_attach_purgemap_take(struct cachetag_index *idx,
 		*modep = (enum cachetag_purge_mode)-1;
 	if (nfolds == 0 || nfolds > idx->limits.max_keys_per_object)
 		return (E2BIG);
+#if CACHE_TAG_SET_INTERNING
+	intern_hash = 0;
+	if (nfolds == 1) {
+		folds = fold_storage;
+	} else {
+		/* Canonicalize scratch space before taking obj_mtx. */
+		scratch = cachetag_fold_storage_values(fold_storage, nfolds);
+		if (scratch == NULL)
+			return (EINVAL);
+		qsort(scratch, nfolds, sizeof *scratch, cachetag_fold_cmp);
+		intern_hash = cachetag_intern_hash(scratch, nfolds);
+		folds = scratch;
+	}
+#else
 	folds = nfolds == 1 ? fold_storage :
 	    cachetag_fold_storage_values(fold_storage, nfolds);
+#endif
 	if (folds == NULL)
 		return (EINVAL);
 	segment = NULL;
@@ -2242,16 +2507,32 @@ again:
 	ent = cachetag_object_at(idx, idx->nobjects);
 	ent->oc = oc;
 	ent->reg_seq = reg_seq;
-	if (nfolds == 1)
+	if (nfolds == 1) {
 		ent->membership.inline_one = folds[0];
-	else
+	} else {
+#if CACHE_TAG_SET_INTERNING
+		set = cachetag_intern_acquire_locked(idx, folds, nfolds,
+		    intern_hash);
+		if (set == NULL) {
+			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+			free(detached_side_map);
+			return (ENOMEM);
+		}
+		ent->membership.set = set;
+#else
 		ent->membership.vector = fold_storage;
+#endif
+	}
 	*cachetag_object_count_at(idx, idx->nobjects) =
 	    nfolds <= TAG_OBJCOUNT_DIRECT_MAX ? (uint8_t)nfolds :
 	    TAG_OBJCOUNT_OVERFLOW;
 	r = cachetag_side_table_insert_locked(idx, &idx->side_primary, oc,
 	    idx->nobjects);
 	if (r != 0) {
+#if CACHE_TAG_SET_INTERNING
+		if (nfolds > 1)
+			cachetag_intern_release_locked(idx, ent->membership.set);
+#endif
 		*cachetag_object_count_at(idx, idx->nobjects) =
 		    TAG_OBJCOUNT_INVALID;
 		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
@@ -2276,9 +2557,11 @@ again:
 	PTOK(pthread_mutex_lock(&idx->counter_mtx));
 	idx->counters.volatile_edges += nfolds;
 	idx->counters.volatile_inline_folds += nfolds == 1;
+#if !CACHE_TAG_SET_INTERNING
 	idx->counters.volatile_object_count_overflow_bytes +=
 	    nfolds >= TAG_OBJCOUNT_OVERFLOW ?
 	    sizeof(struct cachetag_fold_storage_header) : 0;
+#endif
 	idx->counters.volatile_attached++;
 	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 	pm = cachetag_purgemap_data(idx);
@@ -2315,7 +2598,11 @@ cachetag_record_invalidate(struct cachetag_index *idx, struct objcore *oc)
 {
 	struct cachetag_side_location loc;
 	int found;
+#if CACHE_TAG_SET_INTERNING
+	struct cachetag_interned_set *set;
+#else
 	void *fold_storage;
+#endif
 	unsigned nfolds;
 	struct cachetag_objent *ent;
 
@@ -2336,19 +2623,31 @@ cachetag_record_invalidate(struct cachetag_index *idx, struct objcore *oc)
 			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
 			return;
 		}
+		/* Capture before swap-remove relocates another entry into this slot. */
+#if CACHE_TAG_SET_INTERNING
+		set = nfolds > 1 ? ent->membership.set : NULL;
+#else
 		fold_storage = nfolds > 1 ? ent->membership.vector : NULL;
+#endif
 		if (cachetag_side_remove_locked(idx, loc.slot) != 0) {
 			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
 			return; /* fail closed on a corrupted side-map invariant */
 		}
+#if CACHE_TAG_SET_INTERNING
+		if (set != NULL)
+			cachetag_intern_release_locked(idx, set);
+#else
 		cachetag_fold_storage_free(fold_storage, nfolds);
+#endif
 		PTOK(pthread_mutex_lock(&idx->counter_mtx));
 		assert(idx->counters.volatile_edges >= nfolds);
 		idx->counters.volatile_edges -= nfolds;
 		idx->counters.volatile_inline_folds -= nfolds == 1;
+#if !CACHE_TAG_SET_INTERNING
 		idx->counters.volatile_object_count_overflow_bytes -=
 		    nfolds >= TAG_OBJCOUNT_OVERFLOW ?
 		    sizeof(struct cachetag_fold_storage_header) : 0;
+#endif
 		PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 	}
 	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
@@ -2494,7 +2793,11 @@ cachetag_record_sweep_purgemap(struct cachetag_index *idx,
 			enum cachetag_purgemap_probe_result r;
 			struct cachetag_objent *ent;
 			const uint64_t *folds;
+#if CACHE_TAG_SET_INTERNING
+			struct cachetag_interned_set *set;
+#else
 			void *fold_storage;
+#endif
 			struct objcore *oc;
 			unsigned nfolds;
 
@@ -2514,21 +2817,33 @@ cachetag_record_sweep_purgemap(struct cachetag_index *idx,
 			batch_scanned++;
 			if (r == TAG_PM_PROBE_HARD) {
 				oc = ent->oc;
+				/* Capture before swap-remove relocates another entry. */
+#if CACHE_TAG_SET_INTERNING
+				set = nfolds > 1 ? ent->membership.set : NULL;
+#else
 				fold_storage = nfolds > 1 ?
 				    ent->membership.vector : NULL;
+#endif
 				if (cachetag_side_remove_locked(idx, u) != 0) {
 					obs->aborted = 1;
 					break; /* fail closed: keep the object indexed */
 				}
 				HSH_Kill(oc);
+#if CACHE_TAG_SET_INTERNING
+				if (set != NULL)
+					cachetag_intern_release_locked(idx, set);
+#else
 				cachetag_fold_storage_free(fold_storage, nfolds);
+#endif
 				PTOK(pthread_mutex_lock(&idx->counter_mtx));
 				assert(idx->counters.volatile_edges >= nfolds);
 				idx->counters.volatile_edges -= nfolds;
 				idx->counters.volatile_inline_folds -= nfolds == 1;
+#if !CACHE_TAG_SET_INTERNING
 				idx->counters.volatile_object_count_overflow_bytes -=
 				    nfolds >= TAG_OBJCOUNT_OVERFLOW ?
 				    sizeof(struct cachetag_fold_storage_header) : 0;
+#endif
 				PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 				obs->killed++;
 			} else {
@@ -2672,6 +2987,9 @@ cachetag_index_delete(struct cachetag_index **idxp)
 	PTOK(pthread_mutex_lock(&idx->obj_mtx));
 	for (u = 0; u < idx->nobjects; u++)
 		cachetag_objent_dispose(idx, u);
+#if CACHE_TAG_SET_INTERNING
+	cachetag_intern_table_release_locked(idx);
+#endif
 	ndetached_segments = cachetag_object_detach_segments_locked(idx, 0,
 	    detached_segments);
 	cachetag_side_detach_all_locked(idx, &detached_primary,
@@ -2748,6 +3066,9 @@ cachetag_index_detach_all(struct cachetag_index *idx)
 	PTOK(pthread_mutex_lock(&idx->obj_mtx));
 	for (u = 0; u < idx->nobjects; u++)
 		cachetag_objent_dispose(idx, u);
+#if CACHE_TAG_SET_INTERNING
+	cachetag_intern_table_release_locked(idx);
+#endif
 	ndetached_segments = cachetag_object_detach_segments_locked(idx, 0,
 	    detached_segments);
 	cachetag_side_detach_all_locked(idx, &detached_primary,
@@ -2944,8 +3265,12 @@ cachetag_test_structural_limits(struct cachetag_index *idx)
 	struct cachetag_side_bucket corrupt_buckets[2];
 	struct cachetag_side_table corrupt_table;
 	struct objcore *probe_oc;
+#if CACHE_TAG_SET_INTERNING
+	struct cachetag_interned_set *direct_set, *overflow_set;
+#else
 	void *direct_storage, *overflow_storage;
 	uint64_t *values;
+#endif
 	uint64_t hash;
 	uint32_t code;
 	unsigned segment;
@@ -3015,6 +3340,59 @@ cachetag_test_structural_limits(struct cachetag_index *idx)
 	    cachetag_objent_folds(&corrupt_idx, 0) == NULL ||
 	    cachetag_objent_folds(&corrupt_idx, 0)[0] != UINT64_C(0x11))
 		return (0);
+#if CACHE_TAG_SET_INTERNING
+	direct_set = malloc(sizeof *direct_set +
+	    (size_t)TAG_OBJCOUNT_DIRECT_MAX * sizeof(uint64_t));
+	if (direct_set == NULL)
+		return (0);
+	direct_set->magic = TAG_INTERNED_SET_MAGIC;
+	direct_set->nfolds = TAG_OBJCOUNT_DIRECT_MAX;
+	direct_set->hash = 0;
+	direct_set->refs = 1;
+	direct_set->next = NULL;
+	direct_set->folds[TAG_OBJCOUNT_DIRECT_MAX - 1] = UINT64_C(0x254);
+	corrupt_segment.entries[0].membership.set = direct_set;
+	corrupt_segment.counts[0] = TAG_OBJCOUNT_DIRECT_MAX;
+	if (cachetag_objent_nfolds(&corrupt_idx, 0) !=
+	    TAG_OBJCOUNT_DIRECT_MAX ||
+	    cachetag_objent_folds(&corrupt_idx, 0)
+	    [TAG_OBJCOUNT_DIRECT_MAX - 1] != UINT64_C(0x254)) {
+		free(direct_set);
+		return (0);
+	}
+	/* A direct count that disagrees with the set must fail closed. */
+	corrupt_segment.counts[0] = TAG_OBJCOUNT_DIRECT_MAX - 1;
+	if (cachetag_objent_nfolds(&corrupt_idx, 0) != 0) {
+		free(direct_set);
+		return (0);
+	}
+	free(direct_set);
+	overflow_set = malloc(sizeof *overflow_set +
+	    (size_t)TAG_OBJCOUNT_OVERFLOW * sizeof(uint64_t));
+	if (overflow_set == NULL)
+		return (0);
+	overflow_set->magic = TAG_INTERNED_SET_MAGIC;
+	overflow_set->nfolds = TAG_OBJCOUNT_OVERFLOW;
+	overflow_set->hash = 0;
+	overflow_set->refs = 1;
+	overflow_set->next = NULL;
+	overflow_set->folds[TAG_OBJCOUNT_OVERFLOW - 1] = UINT64_C(0x255);
+	corrupt_segment.entries[0].membership.set = overflow_set;
+	corrupt_segment.entries[0].reg_seq = UINT64_C(0xfedcba9876543210);
+	corrupt_segment.counts[0] = TAG_OBJCOUNT_OVERFLOW;
+	corrupt_segment.entries[1] = corrupt_segment.entries[0];
+	corrupt_segment.counts[1] = corrupt_segment.counts[0];
+	if (cachetag_objent_nfolds(&corrupt_idx, 1) !=
+	    TAG_OBJCOUNT_OVERFLOW ||
+	    cachetag_objent_folds(&corrupt_idx, 1)
+	    [TAG_OBJCOUNT_OVERFLOW - 1] != UINT64_C(0x255) ||
+	    corrupt_segment.entries[1].reg_seq !=
+	    UINT64_C(0xfedcba9876543210)) {
+		free(overflow_set);
+		return (0);
+	}
+	free(overflow_set);
+#else
 	direct_storage = cachetag_fold_storage_alloc(TAG_OBJCOUNT_DIRECT_MAX);
 	if (direct_storage == NULL)
 		return (0);
@@ -3064,8 +3442,12 @@ cachetag_test_structural_limits(struct cachetag_index *idx)
 		return (0);
 	}
 	cachetag_fold_storage_free(overflow_storage, TAG_OBJCOUNT_OVERFLOW);
+#endif
 	return (sizeof(struct cachetag_objent) == 24 &&
 	    sizeof(struct cachetag_fold_storage_header) == 8 &&
+#if CACHE_TAG_SET_INTERNING
+	    sizeof(struct cachetag_interned_set) == 32 &&
+#endif
 	    sizeof(*corrupt_segment.counts) == 1 &&
 	    sizeof(struct cachetag_side_bucket) == 8 &&
 	    sizeof(((struct cachetag_side_bucket *)0)->fingerprint) ==
@@ -3242,6 +3624,20 @@ cachetag_test_fail_next_side_migration_alloc(struct cachetag_index *idx)
 	    __ATOMIC_RELEASE);
 	return (1);
 }
+
+#if CACHE_TAG_SET_INTERNING
+
+int
+cachetag_test_fail_next_intern_alloc(struct cachetag_index *idx)
+{
+
+	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
+	__atomic_store_n(&idx->test_fail_next_intern_alloc, 1,
+	    __ATOMIC_RELEASE);
+	return (1);
+}
+
+#endif /* CACHE_TAG_SET_INTERNING */
 
 int
 cachetag_test_resize_low_water_ready(struct cachetag_index *idx)
