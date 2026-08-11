@@ -1,0 +1,187 @@
+vtest "interned table migration keeps old and active lookups bounded"
+
+server s1 -repeat 7 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("intern_migration", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "INIT") {
+			if (!tags.test_intern_initial_buckets(4)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "HOLDWORKER") {
+			if (!tags.test_intern_worker_hold(true)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "MIGRATE") {
+			set req.http.result = tags.test_intern_migrate_buckets(1);
+			return (synth(200));
+		}
+		if (req.method == "STATE") {
+			set req.http.active = tags.test_intern_active_buckets();
+			set req.http.old = tags.test_intern_old_buckets();
+			return (synth(200));
+		}
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+		if (req.method == "DRAIN") {
+			if (!tags.test_resize_worker_drain(5000)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "RELEASEWORKER") {
+			if (!tags.test_intern_worker_hold(false)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.http.Load) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url ~ "^/a") {
+			tags.add_header("alpha,beta,gamma");
+		} else if (bereq.url ~ "^/b") {
+			tags.add_header("delta,epsilon,zeta");
+		} else if (bereq.url ~ "^/c") {
+			tags.add_header("eta,theta,iota");
+		} else if (bereq.url ~ "^/d") {
+			tags.add_header("kappa,lambda,mu");
+		} else if (bereq.url ~ "^/e") {
+			tags.add_header("nu,xi,omicron");
+		} else {
+			tags.add_header("rho,sigma,tau");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		set resp.http.active = req.http.active;
+		set resp.http.old = req.http.old;
+		return (deliver);
+	}
+} -start
+
+client c_init {
+	txreq -req INIT
+	rxresp
+	expect resp.status == 200
+
+	txreq -req HOLDWORKER
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_load {
+	txreq -url "/a" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/b" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/c" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/d" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/e" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_state_before_steps {
+	txreq -req STATE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.old > 0
+	expect resp.http.active > 0
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_sets == 5
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_set_refs == 5
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_set_misses == 5
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_table_bytes > 0
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_old_table_bytes > 0
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_migration_active == 1
+
+client c_hit_from_old_or_active {
+	txreq -req MIGRATE
+	rxresp
+	expect resp.http.result == 1
+
+	txreq -url "/a-hit" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/b-hit" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_sets == 5
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_set_refs == 7
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_set_hits == 2
+
+client c_remove_old_set {
+	txreq -req PURGE -hdr "Tag: alpha"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result >= 1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_sets == 4
+
+client c_finish_worker {
+	txreq -req RELEASEWORKER
+	rxresp
+	expect resp.status == 200
+
+	txreq -req DRAIN
+	rxresp
+	expect resp.status == 200
+
+	txreq -req STATE
+	rxresp
+	expect resp.http.old == 0
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_old_table_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_detached_table_bytes == 0
+
+server s1 -wait

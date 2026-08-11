@@ -1,0 +1,59 @@
+vtest "concurrent equal intern candidates publish one canonical set"
+
+barrier b_tagged sock 3
+
+server s1 -repeat 2 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("intern_publish_race", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.http.Load) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add_header("race-alpha,race-beta,race-gamma");
+		vtc.barrier_sync("${b_tagged_sock}");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+} -start
+
+client c_left {
+	txreq -url "/left" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -start
+
+client c_right {
+	txreq -url "/right" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -start
+
+barrier b_tagged sync
+client c_left -wait
+client c_right -wait
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_sets == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_set_refs == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_set_misses == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_set_hits == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_candidate_discards >= 1
+
+server s1 -wait

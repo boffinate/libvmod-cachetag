@@ -1,0 +1,187 @@
+vtest "interned table allocation failures fail closed initially and preserve growth availability"
+
+server s1 -repeat 11 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("intern_alloc_fail", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "INIT") {
+			if (!tags.test_intern_initial_buckets(8)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "FAILTABLE") {
+			if (!tags.test_fail_next_intern_table_alloc()) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "FAILINTERN") {
+			if (!tags.test_fail_next_intern_alloc()) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "STATS") {
+			set req.http.objects = tags.objects();
+			set req.http.edges = tags.edges();
+			return (synth(200));
+		}
+		if (req.method == "DRAIN") {
+			if (!tags.test_resize_worker_drain(5000)) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.http.Load) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url ~ "^/one") {
+			tags.add_header("one-a,one-b,one-c");
+		} else if (bereq.url ~ "^/two") {
+			tags.add_header("two-a,two-b,two-c");
+		} else if (bereq.url ~ "^/three") {
+			tags.add_header("three-a,three-b,three-c");
+		} else if (bereq.url ~ "^/four") {
+			tags.add_header("four-a,four-b,four-c");
+		} else if (bereq.url ~ "^/five") {
+			tags.add_header("five-a,five-b,five-c");
+		} else if (bereq.url ~ "^/six") {
+			tags.add_header("six-a,six-b,six-c");
+		} else if (bereq.url ~ "^/seven") {
+			tags.add_header("seven-a,seven-b,seven-c");
+		} else if (bereq.url ~ "^/eight") {
+			tags.add_header("eight-a,eight-b,eight-c");
+		} else if (bereq.url ~ "^/nine") {
+			tags.add_header("nine-a,nine-b,nine-c");
+		} else {
+			tags.add_header("fallback-a,fallback-b,fallback-c");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.objects = req.http.objects;
+		set resp.http.edges = req.http.edges;
+		return (deliver);
+	}
+} -start
+
+client c_init_and_fail_initial {
+	txreq -req INIT
+	rxresp
+	expect resp.status == 200
+
+	txreq -req FAILTABLE
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/one" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_attach_failures == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_interned_sets == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_interned_set_misses == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_interned_table_alloc_failures >= 1
+
+client c_initial_retry {
+	txreq -url "/one-retry" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_interned_sets == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_interned_set_misses == 1
+
+client c_make_growth_failure {
+	txreq -url "/two" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/three" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/four" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/five" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/six" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/seven" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/eight" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -req FAILTABLE
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/nine" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_attach_failures == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_interned_sets == 9
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_interned_set_misses == 9
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_interned_table_alloc_failures >= 2
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_interned_table_grow_failures >= 1
+
+client c_stats {
+	txreq -req STATS
+	rxresp
+	expect resp.status == 200
+	expect resp.http.objects == 9
+	expect resp.http.edges == 27
+} -run
+
+client c_fail_after_growth_publish {
+	txreq -req FAILINTERN
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/ten" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -req DRAIN
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_attach_failures == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_interned_sets == 9
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_interned_migration_active == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_alloc_fail.volatile_interned_old_table_bytes == 0
+
+server s1 -wait

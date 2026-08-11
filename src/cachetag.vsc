@@ -91,6 +91,114 @@
 	:level:	info
 	:oneliner:	Interning hash-table bucket-array bytes
 
+.. vinyl_vsc:: volatile_interned_acquire_calls
+	:type:	counter
+	:level:	debug
+	:oneliner:	Instrumented interned-set acquisitions while holding obj_mtx
+.. vinyl_vsc:: volatile_interned_acquire_usec
+	:type:	counter
+	:level:	debug
+	:oneliner:	Instrumented interned-set acquisition microseconds while holding obj_mtx
+.. vinyl_vsc:: volatile_interned_acquire_max_usec
+	:type:	gauge
+	:level:	debug
+	:oneliner:	Maximum instrumented interned-set acquisition time while holding obj_mtx
+.. vinyl_vsc:: volatile_interned_acquire_over_50us
+	:type:	counter
+	:level:	debug
+	:oneliner:	Instrumented interned-set acquisitions above 50 microseconds
+.. vinyl_vsc:: volatile_interned_acquire_over_250us
+	:type:	counter
+	:level:	debug
+	:oneliner:	Instrumented interned-set acquisitions above 250 microseconds
+.. vinyl_vsc:: volatile_interned_acquire_over_1ms
+	:type:	counter
+	:level:	debug
+	:oneliner:	Instrumented interned-set acquisitions above 1 millisecond
+.. vinyl_vsc:: volatile_interned_acquire_over_10ms
+	:type:	counter
+	:level:	debug
+	:oneliner:	Instrumented interned-set acquisitions above 10 milliseconds
+
+.. vinyl_vsc:: volatile_interned_table_grow_calls
+	:type:	counter
+	:level:	debug
+	:oneliner:	Instrumented bounded interned-table publication and migration calls while holding obj_mtx
+.. vinyl_vsc:: volatile_interned_table_grow_usec
+	:type:	counter
+	:level:	debug
+	:oneliner:	Instrumented bounded interned-table publication and migration microseconds while holding obj_mtx
+.. vinyl_vsc:: volatile_interned_table_grow_max_usec
+	:type:	gauge
+	:level:	debug
+	:oneliner:	Maximum bounded interned-table publication and migration time while holding obj_mtx
+
+.. vinyl_vsc:: volatile_interned_set_alloc_calls
+	:type:	counter
+	:level:	debug
+	:oneliner:	Legacy interned-set allocation calls while holding obj_mtx (always zero)
+.. vinyl_vsc:: volatile_interned_set_alloc_usec
+	:type:	counter
+	:level:	debug
+	:oneliner:	Legacy interned-set allocation microseconds while holding obj_mtx (always zero)
+.. vinyl_vsc:: volatile_interned_set_alloc_max_usec
+	:type:	gauge
+	:level:	debug
+	:oneliner:	Legacy maximum interned-set allocation time while holding obj_mtx (always zero)
+
+.. vinyl_vsc:: volatile_interned_candidate_alloc_calls
+	:type:	counter
+	:level:	debug
+	:oneliner:	Prepared intern-candidate allocations outside obj_mtx
+.. vinyl_vsc:: volatile_interned_candidate_alloc_usec
+	:type:	counter
+	:level:	debug
+	:oneliner:	Prepared intern-candidate allocation microseconds outside obj_mtx
+.. vinyl_vsc:: volatile_interned_candidate_alloc_max_usec
+	:type:	gauge
+	:level:	debug
+	:oneliner:	Maximum prepared intern-candidate allocation time outside obj_mtx
+.. vinyl_vsc:: volatile_interned_table_alloc_calls
+	:type:	counter
+	:level:	debug
+	:oneliner:	Intern-table bucket allocations outside obj_mtx
+.. vinyl_vsc:: volatile_interned_table_alloc_usec
+	:type:	counter
+	:level:	debug
+	:oneliner:	Intern-table bucket allocation microseconds outside obj_mtx
+.. vinyl_vsc:: volatile_interned_table_alloc_max_usec
+	:type:	gauge
+	:level:	debug
+	:oneliner:	Maximum intern-table bucket allocation time outside obj_mtx
+.. vinyl_vsc:: volatile_interned_migration_active
+	:type:	gauge
+	:level:	debug
+	:oneliner:	Intern-table migration active
+.. vinyl_vsc:: volatile_interned_old_table_bytes
+	:type:	gauge
+	:level:	debug
+	:oneliner:	Retiring intern-table bucket-array bytes
+.. vinyl_vsc:: volatile_interned_detached_set_bytes
+	:type:	gauge
+	:level:	debug
+	:oneliner:	Detached interned-set bytes awaiting outside-lock free
+.. vinyl_vsc:: volatile_interned_detached_table_bytes
+	:type:	gauge
+	:level:	debug
+	:oneliner:	Detached intern-table bytes awaiting outside-lock free
+.. vinyl_vsc:: volatile_interned_table_alloc_failures
+	:type:	counter
+	:level:	debug
+	:oneliner:	Intern-table bucket allocation failures
+.. vinyl_vsc:: volatile_interned_table_grow_failures
+	:type:	counter
+	:level:	debug
+	:oneliner:	Intern-table growth allocation failures retained by the active table
+.. vinyl_vsc:: volatile_interned_candidate_discards
+	:type:	counter
+	:level:	debug
+	:oneliner:	Unpublished intern candidates discarded outside the registry
+
 .. vinyl_vsc:: volatile_object_table_slots
 	:type:	gauge
 	:level:	info

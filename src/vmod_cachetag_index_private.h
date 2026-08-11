@@ -116,12 +116,24 @@ struct cachetag_index {
 	 */
 	struct cachetag_interned_set **intern_buckets;
 	size_t intern_nbuckets;
+	struct cachetag_interned_set **intern_old_buckets;
+	size_t intern_old_nbuckets;
+	size_t intern_migrate_cursor;
+	uint64_t intern_generation;
+	unsigned intern_migration_active;
+	size_t intern_detached_set_bytes;
+	size_t intern_detached_table_bytes;
 	size_t intern_sets;
 	size_t intern_refs;
 	size_t intern_bytes;
 	size_t intern_overflow_sets;
 	uint64_t intern_hits;
 	uint64_t intern_misses;
+	struct cachetag_timing_counters intern_acquire_timing;
+	struct cachetag_timing_counters intern_table_grow_timing;
+	struct cachetag_timing_counters intern_set_alloc_timing;
+	struct cachetag_timing_counters intern_candidate_alloc_timing;
+	struct cachetag_timing_counters intern_table_alloc_timing;
 #endif
 
 	struct cachetag_side_table side_primary;
@@ -166,6 +178,9 @@ struct cachetag_index {
 	unsigned test_fail_next_side_migration_alloc;
 #if CACHE_TAG_SET_INTERNING
 	unsigned test_fail_next_intern_alloc;
+	unsigned test_fail_next_intern_table_alloc;
+	unsigned test_intern_worker_hold;
+	size_t test_intern_initial_buckets;
 #endif
 	unsigned test_side_fingerprint_bits;
 	unsigned benchmark_obj_mtx_timing;
@@ -204,7 +219,8 @@ void cachetag_note_stale_detected(struct cachetag_index *);
 /*
  * Without set interning, a successful multi-fold attach takes ownership of
  * storage; the caller retains it on failure and for one fold. With set
- * interning, storage is sorted scratch space and the caller always frees it.
+ * interning, each multi-fold storage allocation is an unpublished complete
+ * interned-set candidate. This function consumes it on every return path.
  */
 int cachetag_record_attach_purgemap_take(struct cachetag_index *,
     struct objcore *, void *, unsigned, uint64_t,
@@ -212,6 +228,9 @@ int cachetag_record_attach_purgemap_take(struct cachetag_index *,
 void *cachetag_fold_storage_alloc(unsigned);
 uint64_t *cachetag_fold_storage_values(void *, unsigned);
 void cachetag_fold_storage_free(void *, unsigned);
+#if CACHE_TAG_SET_INTERNING
+void cachetag_note_intern_candidate_alloc(struct cachetag_index *, uint64_t);
+#endif
 void cachetag_record_invalidate(struct cachetag_index *, struct objcore *);
 void cachetag_record_shrink(struct cachetag_index *);
 enum cachetag_purgemap_probe_result cachetag_record_probe_purgemap(

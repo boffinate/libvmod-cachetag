@@ -18,6 +18,10 @@ server s1 {
 	txresp -body "d-old"
 
 	rxreq
+	expect req.url == "/c-hit"
+	txresp -body "c-hit-old"
+
+	rxreq
 	expect req.url == "/e"
 	txresp -body "e-old"
 } -start
@@ -56,7 +60,7 @@ vinyl v1 -vcl+backend {
 			tags.add_header("alpha,beta,gamma");
 		} else if (bereq.url == "/b") {
 			tags.add_header("gamma,alpha,beta");
-		} else if (bereq.url == "/c") {
+		} else if (bereq.url == "/c" || bereq.url == "/c-hit") {
 			tags.add_header("alpha,beta");
 		} else if (bereq.url == "/d") {
 			tags.add("solo");
@@ -174,6 +178,11 @@ client c_fail_seam {
 	rxresp
 	expect resp.status == 200
 
+	# A shared hit must leave the miss-only one-shot fault armed.
+	txreq -url "/c-hit"
+	rxresp
+	expect resp.status == 200
+
 	txreq -url "/e"
 	rxresp
 	expect resp.status == 200
@@ -184,8 +193,8 @@ client c_fail_seam {
 
 vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_attach_failures == 1
 vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 2
 vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
 
 server s1 -wait

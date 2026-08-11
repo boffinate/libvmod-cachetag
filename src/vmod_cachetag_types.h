@@ -46,6 +46,16 @@ struct cachetag_lockwait_counters {
 	uint64_t wait_over_50ms;
 };
 
+struct cachetag_timing_counters {
+	uint64_t calls;
+	uint64_t usec;
+	uint64_t max_usec;
+	uint64_t over_50us;
+	uint64_t over_250us;
+	uint64_t over_1ms;
+	uint64_t over_10ms;
+};
+
 struct cachetag_counters {
 	uint64_t index_memory_bytes;
 	uint64_t volatile_side_table_bytes;
@@ -61,6 +71,18 @@ struct cachetag_counters {
 	uint64_t volatile_interned_set_misses;
 	uint64_t volatile_interned_set_bytes;
 	uint64_t volatile_interned_table_bytes;
+	struct cachetag_timing_counters volatile_interned_acquire;
+	struct cachetag_timing_counters volatile_interned_table_grow;
+	struct cachetag_timing_counters volatile_interned_set_alloc;
+	struct cachetag_timing_counters volatile_interned_candidate_alloc;
+	struct cachetag_timing_counters volatile_interned_table_alloc;
+	uint64_t volatile_interned_migration_active;
+	uint64_t volatile_interned_old_table_bytes;
+	uint64_t volatile_interned_detached_set_bytes;
+	uint64_t volatile_interned_detached_table_bytes;
+	uint64_t volatile_interned_table_alloc_failures;
+	uint64_t volatile_interned_table_grow_failures;
+	uint64_t volatile_interned_candidate_discards;
 	uint64_t volatile_object_table_slots;
 	uint64_t volatile_object_table_shrinks;
 	uint64_t volatile_objects;

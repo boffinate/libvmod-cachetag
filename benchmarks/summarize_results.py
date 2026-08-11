@@ -36,6 +36,34 @@ SET_INTERNING_COUNTERS = (
     "volatile_interned_set_misses",
     "volatile_interned_set_bytes",
     "volatile_interned_table_bytes",
+    "volatile_interned_migration_active",
+    "volatile_interned_old_table_bytes",
+    "volatile_interned_detached_set_bytes",
+    "volatile_interned_detached_table_bytes",
+    "volatile_interned_table_alloc_failures",
+    "volatile_interned_table_grow_failures",
+    "volatile_interned_candidate_discards",
+)
+SET_INTERNING_TIMING_COUNTERS = (
+    "volatile_interned_acquire_calls",
+    "volatile_interned_acquire_usec",
+    "volatile_interned_acquire_max_usec",
+    "volatile_interned_acquire_over_50us",
+    "volatile_interned_acquire_over_250us",
+    "volatile_interned_acquire_over_1ms",
+    "volatile_interned_acquire_over_10ms",
+    "volatile_interned_table_grow_calls",
+    "volatile_interned_table_grow_usec",
+    "volatile_interned_table_grow_max_usec",
+    "volatile_interned_set_alloc_calls",
+    "volatile_interned_set_alloc_usec",
+    "volatile_interned_set_alloc_max_usec",
+    "volatile_interned_candidate_alloc_calls",
+    "volatile_interned_candidate_alloc_usec",
+    "volatile_interned_candidate_alloc_max_usec",
+    "volatile_interned_table_alloc_calls",
+    "volatile_interned_table_alloc_usec",
+    "volatile_interned_table_alloc_max_usec",
 )
 PURGEMAP_RESTART_PHASES = (
     "post_load",
@@ -1335,7 +1363,7 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
             "cachetag_index_memory_bytes": index_memory,
             **{
                 f"cachetag_{counter}": cachetag_counter(stats, counter)
-                for counter in SET_INTERNING_COUNTERS
+                for counter in SET_INTERNING_COUNTERS + SET_INTERNING_TIMING_COUNTERS
             },
             "cachetag_keys_total": historical_metrics.get("keys_total"),
             "cachetag_mem_keys": historical_metrics.get("mem_keys"),
@@ -1896,7 +1924,10 @@ def aggregate_workload_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "buddy_g_bytes",
             "buddy_g_space",
             "cachetag_index_memory_bytes",
-            *(f"cachetag_{counter}" for counter in SET_INTERNING_COUNTERS),
+            *(
+                f"cachetag_{counter}"
+                for counter in SET_INTERNING_COUNTERS + SET_INTERNING_TIMING_COUNTERS
+            ),
             "cachetag_volatile_side_table_bytes",
             "cachetag_volatile_side_table_buckets",
             "cachetag_side_table_grows",
@@ -2347,6 +2378,56 @@ def summarize_result(result_dir: Path) -> tuple[str, str]:
                     f"{fmt_float(row.get('cachetag_volatile_interned_set_misses_median'))} "
                     f"set_bytes={fmt_bytes(int(row['cachetag_volatile_interned_set_bytes_median']) if row.get('cachetag_volatile_interned_set_bytes_median') is not None else None)} "
                     f"table_bytes={fmt_bytes(int(row['cachetag_volatile_interned_table_bytes_median']) if row.get('cachetag_volatile_interned_table_bytes_median') is not None else None)}"
+                )
+            acquire_calls = row.get("cachetag_volatile_interned_acquire_calls_median")
+            if acquire_calls is not None:
+                acquire_usec = row.get("cachetag_volatile_interned_acquire_usec_median")
+                acquire_average = (
+                    acquire_usec / acquire_calls
+                    if acquire_usec is not None and acquire_calls > 0
+                    else None
+                )
+                lines.append(
+                    "    set interning under obj_mtx: "
+                    f"acquires={fmt_float(acquire_calls)} "
+                    f"total={fmt_float(acquire_usec, 'us')} "
+                    f"avg={fmt_float(acquire_average, 'us')} "
+                    f"max={fmt_float(row.get('cachetag_volatile_interned_acquire_max_usec_median'), 'us')} "
+                    f">50/250us/1/10ms={fmt_float(row.get('cachetag_volatile_interned_acquire_over_50us_median'))}/"
+                    f"{fmt_float(row.get('cachetag_volatile_interned_acquire_over_250us_median'))}/"
+                    f"{fmt_float(row.get('cachetag_volatile_interned_acquire_over_1ms_median'))}/"
+                    f"{fmt_float(row.get('cachetag_volatile_interned_acquire_over_10ms_median'))}"
+                )
+                lines.append(
+                    "      table grow: "
+                    f"calls={fmt_float(row.get('cachetag_volatile_interned_table_grow_calls_median'))} "
+                    f"total={fmt_float(row.get('cachetag_volatile_interned_table_grow_usec_median'), 'us')} "
+                    f"max={fmt_float(row.get('cachetag_volatile_interned_table_grow_max_usec_median'), 'us')}; "
+                    "set allocation: "
+                    f"calls={fmt_float(row.get('cachetag_volatile_interned_set_alloc_calls_median'))} "
+                    f"total={fmt_float(row.get('cachetag_volatile_interned_set_alloc_usec_median'), 'us')} "
+                    f"max={fmt_float(row.get('cachetag_volatile_interned_set_alloc_max_usec_median'), 'us')}"
+                )
+                lines.append(
+                    "      outside obj_mtx: "
+                    "candidate allocation "
+                    f"calls={fmt_float(row.get('cachetag_volatile_interned_candidate_alloc_calls_median'))} "
+                    f"total={fmt_float(row.get('cachetag_volatile_interned_candidate_alloc_usec_median'), 'us')} "
+                    f"max={fmt_float(row.get('cachetag_volatile_interned_candidate_alloc_max_usec_median'), 'us')}; "
+                    "table allocation "
+                    f"calls={fmt_float(row.get('cachetag_volatile_interned_table_alloc_calls_median'))} "
+                    f"total={fmt_float(row.get('cachetag_volatile_interned_table_alloc_usec_median'), 'us')} "
+                    f"max={fmt_float(row.get('cachetag_volatile_interned_table_alloc_max_usec_median'), 'us')}"
+                )
+                lines.append(
+                    "      migration/accounting: "
+                    f"active={fmt_float(row.get('cachetag_volatile_interned_migration_active_median'))} "
+                    f"old={fmt_bytes(int(row['cachetag_volatile_interned_old_table_bytes_median']) if row.get('cachetag_volatile_interned_old_table_bytes_median') is not None else None)} "
+                    f"detached_set={fmt_bytes(int(row['cachetag_volatile_interned_detached_set_bytes_median']) if row.get('cachetag_volatile_interned_detached_set_bytes_median') is not None else None)} "
+                    f"detached_table={fmt_bytes(int(row['cachetag_volatile_interned_detached_table_bytes_median']) if row.get('cachetag_volatile_interned_detached_table_bytes_median') is not None else None)} "
+                    f"alloc/grow_failures={fmt_float(row.get('cachetag_volatile_interned_table_alloc_failures_median'))}/"
+                    f"{fmt_float(row.get('cachetag_volatile_interned_table_grow_failures_median'))} "
+                    f"candidate_discards={fmt_float(row.get('cachetag_volatile_interned_candidate_discards_median'))}"
                 )
             if row.get("post_restart_tracked_memory_bytes_median") is not None:
                 lines.append(

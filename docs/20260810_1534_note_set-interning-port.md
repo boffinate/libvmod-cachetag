@@ -24,4 +24,12 @@ The private `feature/set-interning` branch has no merge base with current `main`
 
 ## Benchmark caveat
 
-No performance conclusion follows from this port. The enabled registry performs sort and hash work for every multi-fold attach, holds a grow-only hash table, and currently allocates or grows while the namespace object mutex is held. Benchmark resident memory, attach latency, purge/sweep latency, lock contention, and distinct-versus-repeated membership distributions before considering a production default.
+No performance conclusion follows from this port. The enabled registry performs sort and hash work for every multi-fold attach. Benchmark resident memory, attach latency, purge/sweep latency, lock contention, and distinct-versus-repeated membership distributions before considering a production default.
+
+## Outside-lock allocation and incremental migration
+
+The follow-up implementation in `20260810_1900_plan_set-interning-outside-obj-mtx.md` changes each multi-fold allocation into the complete unpublished intern candidate. Fold population, sorting, hashing, candidate allocation, and bucket-array allocation happen before `obj_mtx`. A locked publish transaction revalidates object and side-map capacity, searches the active and old tables, and either publishes the candidate or hands a losing candidate to caller-local outside-lock cleanup.
+
+Growth now publishes an empty active table while retaining the previous table as old. Request paths advance at most four migration steps and the existing resize worker advances bounded batches until the old table is empty, including when `sweep_interval = 0s`. Each step examines one empty bucket or relinks one set, so growth no longer allocates, frees, or walks the whole registry under `obj_mtx`. Active plus old bucket bytes remain charged throughout migration; detached set and table bytes remain charged until their caller-owned outside-lock free completes.
+
+Initial table allocation failure still fails an attachment closed. A later growth-allocation failure increments the grow-failure diagnostic and publishes the candidate into the existing table, allowing chains to grow until a later attach can retry growth. Namespace detach and delete detach both table inventories under the mutex and traverse/free them only after unlocking.
