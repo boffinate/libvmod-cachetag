@@ -195,6 +195,27 @@ cachetag_intern_hash(const uint64_t *folds, unsigned nfolds)
 	return (XXH3_64bits(folds, (size_t)nfolds * sizeof(uint64_t)));
 }
 
+static void
+cachetag_intern_sort(uint64_t *folds, unsigned nfolds)
+{
+	uint64_t fold;
+	unsigned i, j;
+
+	if (nfolds > TAG_INTERN_LOOKUP_FIRST_MAX_FOLDS) {
+		qsort(folds, nfolds, sizeof *folds, cachetag_fold_cmp);
+		return;
+	}
+	for (i = 1; i < nfolds; i++) {
+		fold = folds[i];
+		j = i;
+		while (j > 0 && folds[j - 1] > fold) {
+			folds[j] = folds[j - 1];
+			j--;
+		}
+		folds[j] = fold;
+	}
+}
+
 static struct cachetag_interned_set **
 cachetag_intern_bucket_for(struct cachetag_interned_set **buckets,
     size_t nbuckets, uint64_t hash)
@@ -222,14 +243,26 @@ cachetag_note_intern_timing(struct cachetag_index *idx,
 	counters->over_10ms += usec > 10000;
 }
 
-void
-cachetag_note_intern_candidate_alloc(struct cachetag_index *idx, uint64_t usec)
+void *
+cachetag_intern_candidate_alloc(struct cachetag_index *idx, unsigned nfolds)
 {
+	void *candidate;
+	uint64_t started, usec;
 
+	started = idx->benchmark_obj_mtx_timing ? cachetag_now_usec() : 0;
+	if (__atomic_exchange_n(&idx->test_fail_next_intern_alloc, 0,
+	    __ATOMIC_ACQ_REL))
+		candidate = NULL;
+	else
+		candidate = cachetag_fold_storage_alloc(nfolds);
+	if (!idx->benchmark_obj_mtx_timing)
+		return (candidate);
+	usec = cachetag_elapsed_usec(started, cachetag_now_usec());
 	PTOK(pthread_mutex_lock(&idx->counter_mtx));
 	cachetag_note_intern_timing(idx, &idx->intern_candidate_alloc_timing,
 	    usec);
 	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
+	return (candidate);
 }
 
 static void
@@ -237,6 +270,8 @@ cachetag_note_intern_table_alloc(struct cachetag_index *idx, uint64_t usec,
     int failed)
 {
 
+	if (!idx->benchmark_obj_mtx_timing && !failed)
+		return;
 	PTOK(pthread_mutex_lock(&idx->counter_mtx));
 	cachetag_note_intern_timing(idx, &idx->intern_table_alloc_timing, usec);
 	idx->counters.volatile_interned_table_alloc_failures += failed != 0;
@@ -2717,8 +2752,8 @@ removed:
 
 int
 cachetag_record_attach_purgemap_take(struct cachetag_index *idx,
-    struct objcore *oc, void *fold_storage, unsigned nfolds, uint64_t reg_seq,
-    enum cachetag_purge_mode *modep)
+    struct objcore *oc, void *fold_storage, uint64_t *fold_values,
+    unsigned nfolds, uint64_t reg_seq, enum cachetag_purge_mode *modep)
 {
 	struct cachetag_side_bucket *allocated_side_map, *detached_side_map;
 	struct cachetag_objent *ent, *segment;
@@ -2742,7 +2777,7 @@ cachetag_record_attach_purgemap_take(struct cachetag_index *idx,
 	unsigned segment_index, side_reason;
 	int found, r, resize_wake;
 #if CACHE_TAG_SET_INTERNING
-	int intern_grow_failed;
+	int intern_grow_failed, intern_migrate_budget_used;
 #endif
 
 	if (modep != NULL)
@@ -2759,23 +2794,23 @@ cachetag_record_attach_purgemap_take(struct cachetag_index *idx,
 	candidate = NULL;
 	intern_hash = 0;
 	if (nfolds == 1) {
-		folds = fold_storage;
+		folds = fold_values;
 	} else {
-		/* Canonicalize the complete unpublished candidate before obj_mtx. */
+		/* Canonicalize borrowed folds before obj_mtx. */
 		candidate = fold_storage;
-		scratch = cachetag_fold_storage_values(fold_storage, nfolds);
+		scratch = fold_values;
 		if (scratch == NULL) {
-			free(candidate);
+			cachetag_fold_storage_free(candidate, nfolds);
 			return (EINVAL);
 		}
-		qsort(scratch, nfolds, sizeof *scratch, cachetag_fold_cmp);
+		cachetag_intern_sort(scratch, nfolds);
 		intern_hash = cachetag_intern_hash(scratch, nfolds);
-		candidate->hash = intern_hash;
+		if (candidate != NULL)
+			candidate->hash = intern_hash;
 		folds = scratch;
 	}
 #else
-	folds = nfolds == 1 ? fold_storage :
-	    cachetag_fold_storage_values(fold_storage, nfolds);
+	folds = fold_values;
 #endif
 	if (folds == NULL)
 		return (EINVAL);
@@ -2785,6 +2820,7 @@ cachetag_record_attach_purgemap_take(struct cachetag_index *idx,
 	resize_wake = 0;
 	#if CACHE_TAG_SET_INTERNING
 	intern_grow_failed = 0;
+	intern_migrate_budget_used = 0;
 	#endif
 	low_water_wake_at = 0;
 	cachetag_request_obj_lock(idx, TAG_REQUEST_LOCK_ATTACH);
@@ -2933,11 +2969,18 @@ again:
 	 * migration step.
 	 */
 	acquire_started = idx->benchmark_obj_mtx_timing ? cachetag_now_usec() : 0;
-	migrate_started = idx->benchmark_obj_mtx_timing ? cachetag_now_usec() : 0;
-	cachetag_intern_migrate_locked(idx, TAG_INTERN_MIGRATE_STEPS, &cleanup);
-	if (idx->benchmark_obj_mtx_timing)
-		cachetag_note_intern_timing(idx, &idx->intern_table_grow_timing,
-		    cachetag_elapsed_usec(migrate_started, cachetag_now_usec()));
+	if (!intern_migrate_budget_used && idx->intern_migration_active) {
+		migrate_started = idx->benchmark_obj_mtx_timing ?
+		    cachetag_now_usec() : 0;
+		cachetag_intern_migrate_locked(idx, TAG_INTERN_MIGRATE_STEPS,
+		    &cleanup);
+		intern_migrate_budget_used = 1;
+		if (idx->benchmark_obj_mtx_timing)
+			cachetag_note_intern_timing(idx,
+			    &idx->intern_table_grow_timing,
+			    cachetag_elapsed_usec(migrate_started,
+			    cachetag_now_usec()));
+	}
 	set = nfolds > 1 ? cachetag_intern_lookup_locked(idx, folds, nfolds,
 	    intern_hash) : NULL;
 	if (nfolds > 1 && set == NULL) {
@@ -2946,11 +2989,13 @@ again:
 		if (r == EAGAIN) {
 			intern_generation = idx->intern_generation;
 			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
-			resize_started = cachetag_now_usec();
+			resize_started = idx->benchmark_obj_mtx_timing ?
+			    cachetag_now_usec() : 0;
 			allocated_intern_buckets = cachetag_intern_alloc_buckets(idx,
 			    intern_buckets);
 			cachetag_note_intern_table_alloc(idx,
-			    cachetag_elapsed_usec(resize_started, cachetag_now_usec()),
+			    idx->benchmark_obj_mtx_timing ? cachetag_elapsed_usec(
+			    resize_started, cachetag_now_usec()) : 0,
 			    allocated_intern_buckets == NULL);
 			if (allocated_intern_buckets == NULL) {
 				PTOK(pthread_mutex_lock(&idx->obj_mtx));
@@ -2991,13 +3036,21 @@ again:
 			    1);
 			return (r != 0 ? r : ENOMEM);
 		}
-		if (__atomic_exchange_n(&idx->test_fail_next_intern_alloc, 0,
-		    __ATOMIC_ACQ_REL)) {
+		if (candidate == NULL) {
 			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
-			free(detached_side_map);
-			cachetag_intern_attach_cleanup(idx, &cleanup, candidate,
-			    1);
-			return (ENOMEM);
+			candidate = cachetag_intern_candidate_alloc(idx, nfolds);
+			if (candidate == NULL) {
+				free(detached_side_map);
+				cachetag_intern_attach_cleanup(idx, &cleanup, NULL, 1);
+				return (ENOMEM);
+			}
+			scratch = cachetag_fold_storage_values(candidate, nfolds);
+			AN(scratch);
+			memcpy(scratch, folds, (size_t)nfolds * sizeof *scratch);
+			candidate->hash = intern_hash;
+			folds = scratch;
+			PTOK(pthread_mutex_lock(&idx->obj_mtx));
+			goto again;
 		}
 		set = cachetag_intern_publish_locked(idx, candidate);
 		candidate = NULL;

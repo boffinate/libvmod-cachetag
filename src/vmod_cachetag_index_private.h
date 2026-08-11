@@ -16,6 +16,9 @@
 #define TAG_INDEX_MAGIC 0x74616769
 #define TAG_OBJECT_SEGMENTS 32
 #define TAG_RESIZE_BATCH_YIELD_SEC 0.0001
+#if CACHE_TAG_SET_INTERNING
+#define TAG_INTERN_LOOKUP_FIRST_MAX_FOLDS 8U
+#endif
 
 struct cachetag_objent;
 struct cachetag_side_bucket;
@@ -219,17 +222,17 @@ void cachetag_note_stale_detected(struct cachetag_index *);
 /*
  * Without set interning, a successful multi-fold attach takes ownership of
  * storage; the caller retains it on failure and for one fold. With set
- * interning, each multi-fold storage allocation is an unpublished complete
- * interned-set candidate. This function consumes it on every return path.
+ * interning, candidate is an optional unpublished complete set consumed on
+ * every return path; folds is borrowed and may be stack-backed.
  */
 int cachetag_record_attach_purgemap_take(struct cachetag_index *,
-    struct objcore *, void *, unsigned, uint64_t,
+    struct objcore *, void *, uint64_t *, unsigned, uint64_t,
     enum cachetag_purge_mode *);
 void *cachetag_fold_storage_alloc(unsigned);
 uint64_t *cachetag_fold_storage_values(void *, unsigned);
 void cachetag_fold_storage_free(void *, unsigned);
 #if CACHE_TAG_SET_INTERNING
-void cachetag_note_intern_candidate_alloc(struct cachetag_index *, uint64_t);
+void *cachetag_intern_candidate_alloc(struct cachetag_index *, unsigned);
 #endif
 void cachetag_record_invalidate(struct cachetag_index *, struct objcore *);
 void cachetag_record_shrink(struct cachetag_index *);

@@ -172,7 +172,8 @@ VTC_TESTS_SET_INTERNING_TEST_HOOKS = \
 	vtc/cachetag_pm00030.vtc \
 	vtc/cachetag_pm00031.vtc \
 	vtc/cachetag_pm00032.vtc \
-	vtc/cachetag_pm00033.vtc
+	vtc/cachetag_pm00033.vtc \
+	vtc/cachetag_pm00034.vtc
 
 VTC_TESTS = $(VTC_TESTS_CORE)
 if CACHE_TAG_SET_INTERNING

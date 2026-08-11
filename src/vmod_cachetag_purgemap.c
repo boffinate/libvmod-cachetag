@@ -1199,10 +1199,12 @@ cachetag_attach(struct cachetag_index *idx, struct objcore *oc,
 {
 	struct cachetag_purgemap *pm;
 	void *fold_storage;
-	uint64_t inline_one = 0, *folds;
 #if CACHE_TAG_SET_INTERNING
-	uint64_t alloc_started;
+	uint64_t inline_folds[TAG_INTERN_LOOKUP_FIRST_MAX_FOLDS];
+#else
+	uint64_t inline_one;
 #endif
+	uint64_t *folds;
 	uint64_t reg_seq = 0;
 	unsigned u;
 	int r;
@@ -1212,23 +1214,33 @@ cachetag_attach(struct cachetag_index *idx, struct objcore *oc,
 		goto fail_closed;
 	if (nkeys > 1) {
 	#if CACHE_TAG_SET_INTERNING
-		alloc_started = cachetag_now_usec();
-	#endif
+		if (nkeys <= TAG_INTERN_LOOKUP_FIRST_MAX_FOLDS) {
+			fold_storage = NULL;
+			folds = inline_folds;
+		} else {
+			fold_storage = cachetag_intern_candidate_alloc(idx, nkeys);
+			if (fold_storage == NULL)
+				goto fail_closed;
+			folds = cachetag_fold_storage_values(fold_storage, nkeys);
+		}
+	#else
 		fold_storage = cachetag_fold_storage_alloc(nkeys);
-#if CACHE_TAG_SET_INTERNING
-		cachetag_note_intern_candidate_alloc(idx,
-		    cachetag_elapsed_usec(alloc_started, cachetag_now_usec()));
-#endif
 		if (fold_storage == NULL)
 			goto fail_closed;
 		folds = cachetag_fold_storage_values(fold_storage, nkeys);
+	#endif
 		if (folds == NULL) {
 			cachetag_fold_storage_free(fold_storage, nkeys);
 			goto fail_closed;
 		}
 	} else {
+	#if CACHE_TAG_SET_INTERNING
+		fold_storage = NULL;
+		folds = inline_folds;
+	#else
 		fold_storage = &inline_one;
 		folds = &inline_one;
+	#endif
 	}
 	for (u = 0; u < nkeys; u++) {
 		folds[u] = cachetag_fold_digest(keys[u].digest_hi,
@@ -1236,7 +1248,7 @@ cachetag_attach(struct cachetag_index *idx, struct objcore *oc,
 		if (reg_seq == 0)
 			reg_seq = keys[u].reg_seq;
 	}
-	r = cachetag_record_attach_purgemap_take(idx, oc, fold_storage, nkeys,
+	r = cachetag_record_attach_purgemap_take(idx, oc, fold_storage, folds, nkeys,
 	    reg_seq, attach_purge);
 #if CACHE_TAG_SET_INTERNING
 	if (r != 0)

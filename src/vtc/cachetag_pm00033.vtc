@@ -54,6 +54,5 @@ vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_sets =
 vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_set_refs == 2
 vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_set_misses == 1
 vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_set_hits == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_candidate_discards >= 1
 
 server s1 -wait
