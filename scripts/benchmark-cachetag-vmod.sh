@@ -292,6 +292,13 @@ Environment:
                         Optional workload basename to profile while still
                         running the rest normally (default: empty)
   BENCH_PERF_FREQ       perf record frequency (default: 99)
+  BENCH_PERF_STAT       required to count an acknowledged load phase on
+                        cache-main/vinyld, off to disable (default: off)
+  BENCH_PERF_STAT_EVENTS
+                        Comma-separated perf stat events (default:
+                        task-clock,instructions,cycles,ref-cycles)
+  BENCH_PERF_STAT_TIMEOUT
+                        Phase and acknowledgement timeout seconds (default: 180)
 EOF
 }
 
@@ -435,6 +442,9 @@ bench_perf_record_target=${BENCH_PERF_RECORD_TARGET:-vinyld}
 bench_perf_record_runs=${BENCH_PERF_RECORD_RUNS:-1}
 bench_perf_record_workload=${BENCH_PERF_RECORD_WORKLOAD:-}
 bench_perf_freq=${BENCH_PERF_FREQ:-99}
+bench_perf_stat=${BENCH_PERF_STAT:-off}
+bench_perf_stat_events=${BENCH_PERF_STAT_EVENTS:-task-clock,instructions,cycles,ref-cycles}
+bench_perf_stat_timeout=${BENCH_PERF_STAT_TIMEOUT:-180}
 xkey_src=${XKEY_SRC:-"$repo_dir/../varnish-modules"}
 run_xkey=${RUN_XKEY:-auto}
 if [ "$run_xkey" = auto ]; then
@@ -779,6 +789,9 @@ $docker_cmd run $docker_run_args --rm \
 	-e "BENCH_PERF_RECORD_RUNS=$bench_perf_record_runs" \
 	-e "BENCH_PERF_RECORD_WORKLOAD=$bench_perf_record_workload" \
 	-e "BENCH_PERF_FREQ=$bench_perf_freq" \
+	-e "BENCH_PERF_STAT=$bench_perf_stat" \
+	-e "BENCH_PERF_STAT_EVENTS=$bench_perf_stat_events" \
+	-e "BENCH_PERF_STAT_TIMEOUT=$bench_perf_stat_timeout" \
 	"$image" \
 bash -lc '
 set -euo pipefail
@@ -1171,6 +1184,9 @@ python3 /cachetag-host/benchmarks/generate_cachetag_benchmark_vtc.py \
 	printf "bench_perf_record_runs=%s\n" "$BENCH_PERF_RECORD_RUNS"
 	printf "bench_perf_record_workload=%s\n" "$BENCH_PERF_RECORD_WORKLOAD"
 	printf "bench_perf_freq=%s\n" "$BENCH_PERF_FREQ"
+	printf "bench_perf_stat=%s\n" "$BENCH_PERF_STAT"
+	printf "bench_perf_stat_events=%s\n" "$BENCH_PERF_STAT_EVENTS"
+	printf "bench_perf_stat_timeout=%s\n" "$BENCH_PERF_STAT_TIMEOUT"
 	printf "image=%s\n" "'"$image"'"
 	printf "docker_command=%s\n" "'"$docker_cmd"'"
 	printf "docker_run_args=%s\n" "'"$docker_run_args"'"
@@ -1232,6 +1248,13 @@ prime_perf_buildid_cache() {
 perf_record_enabled() {
 	case "$BENCH_PERF_RECORD" in
 		1|yes|true|on|required) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+perf_stat_enabled() {
+	case "$BENCH_PERF_STAT" in
+		required) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -1307,7 +1330,44 @@ for workload in /results/workloads/*.vtc; do
 		out="/results/${name}.run-${run}.log"
 		timing="/results/${name}.run-${run}.time"
 		printf "benchmark %s run %s/%s\n" "$name" "$run" "$RUNS" | tee -a /results/summary.txt
-		if perf_record_enabled && should_perf_record_run; then
+		if perf_stat_enabled && perf_record_enabled; then
+			echo "BENCH_PERF_STAT and BENCH_PERF_RECORD cannot both be enabled" >&2
+			exit 1
+		fi
+		if perf_stat_enabled; then
+			if [ "${BENCH_INSTRUMENT_OBJ_MTX:-0}" != 0 ]; then
+				echo "required phase perf stat rejects BENCH_INSTRUMENT_OBJ_MTX" >&2
+				exit 1
+			fi
+			if ! command -v perf >/dev/null 2>&1; then
+				echo "required phase perf stat requested but perf is unavailable" >&2
+				exit 1
+			fi
+			stat_output="/results/${name}.run-${run}.load.perf-stat.json"
+			stat_meta="/results/${name}.run-${run}.load.perf-stat.meta"
+			case "$name" in
+				noindex_load) stat_driver="/results/noindex_load.driver" ;;
+				*) stat_driver="/results/${artifact_prefix}_load.driver" ;;
+			esac
+			printf "perf-stat %s run %s phase=load target=cache-main events=%s\n" \
+				"$name" "$run" "$BENCH_PERF_STAT_EVENTS" |
+				tee -a /results/summary.txt
+			python3 /cachetag-host/benchmarks/run_with_metrics.py \
+				--metrics "$timing" --perf off -- \
+				python3 /cachetag-host/benchmarks/run_with_phase_stat.py \
+				--stat-output "$stat_output" \
+				--meta-output "$stat_meta" \
+				--marker-dir /results/phase-markers \
+				--marker-prefix "${name}.run-${run}" \
+				--phase load \
+				--events "$BENCH_PERF_STAT_EVENTS" \
+				--timeout "$BENCH_PERF_STAT_TIMEOUT" \
+				--ack-timeout "$BENCH_PERF_STAT_TIMEOUT" \
+				--driver-metrics "$stat_driver" \
+				--expected-requests "$OBJECTS" -- \
+				"$prefix/bin/vinyltest" -t "$VTC_TIMEOUT" \
+				-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
+		elif perf_record_enabled && should_perf_record_run; then
 			if ! command -v perf >/dev/null 2>&1; then
 				if [ "$BENCH_PERF_RECORD" = required ]; then
 					echo "perf record requested but perf is unavailable" >&2

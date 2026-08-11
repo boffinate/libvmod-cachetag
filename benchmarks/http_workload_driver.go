@@ -75,6 +75,7 @@ type config struct {
 	disableKeepAlives     bool
 	phaseMarkerDir        string
 	phaseMarkerPrefix     string
+	phaseRequireReady     bool
 	churnCompactEachCycle bool
 	churnGeneration       int
 	storageKind           string
@@ -738,6 +739,10 @@ func parseConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	phaseRequireReady, err := envBool("BENCH_PHASE_REQUIRE_READY", false)
+	if err != nil {
+		return config{}, err
+	}
 	churnCompactEachCycle, err := envBool("CACHE_TAG_CHURN_COMPACT_EACH_CYCLE", false)
 	if err != nil {
 		return config{}, err
@@ -828,6 +833,7 @@ func parseConfig() (config, error) {
 		disableKeepAlives:     disableKeepAlives,
 		phaseMarkerDir:        os.Getenv("BENCH_PHASE_MARKER_DIR"),
 		phaseMarkerPrefix:     os.Getenv("BENCH_PHASE_MARKER_PREFIX"),
+		phaseRequireReady:     phaseRequireReady,
 		churnCompactEachCycle: churnCompactEachCycle,
 		storageKind:           storageKind,
 		cacheTagPersist:       cacheTagPersist,
@@ -858,6 +864,17 @@ func writePhaseMarker(cfg config, phase string, event string) error {
 		event,
 	)
 	return os.WriteFile(path, []byte(body), 0644)
+}
+
+func startPhaseMarker(cfg config, phase string) error {
+	if err := writePhaseMarker(cfg, phase, "start"); err != nil {
+		return err
+	}
+	if !cfg.phaseRequireReady {
+		return nil
+	}
+	return waitForPhaseSignal(cfg, phase, "ready",
+		time.Duration(cfg.httpTimeout)*time.Second)
 }
 
 func tagsFor(cfg config, obj int) []string {
@@ -2065,10 +2082,13 @@ func purge(client *http.Client, baseURL string, key string, expected int, exact 
 }
 
 func runLoadObjectsPhase(client *http.Client, baseURL string, cfg config, lines *metrics) error {
-	start := beginPhase(lines, "load")
-	if err := writePhaseMarker(cfg, "load", "start"); err != nil {
+	if cfg.phaseRequireReady {
+		return runExactLoadObjectsPhase(client, baseURL, cfg, lines)
+	}
+	if err := startPhaseMarker(cfg, "load"); err != nil {
 		return err
 	}
+	start := beginPhase(lines, "load")
 	requests, err := loadObjects(client, baseURL, cfg, 0, cfg.objects, nil)
 	if err == nil {
 		err = waitForPendingZero(client, baseURL, cfg)
@@ -2087,10 +2107,10 @@ func runLoadObjectsPhase(client *http.Client, baseURL string, cfg config, lines 
 }
 
 func runExactLoadObjectsPhase(client *http.Client, baseURL string, cfg config, lines *metrics) error {
-	start := beginPhase(lines, "load")
-	if err := writePhaseMarker(cfg, "load", "start"); err != nil {
+	if err := startPhaseMarker(cfg, "load"); err != nil {
 		return err
 	}
+	start := beginPhase(lines, "load")
 	result, err := loadObjectsDetailed(client, baseURL, cfg, 0, cfg.objects, nil)
 	if err == nil && result.backendObjects != int64(cfg.objects) {
 		err = fmt.Errorf("exact load backend objects=%d expected=%d", result.backendObjects, cfg.objects)
@@ -4727,6 +4747,7 @@ func main() {
 	lines.add("driver_cachetag_persist", cfg.cacheTagPersist)
 	lines.add("driver_phase_marker_dir", cfg.phaseMarkerDir)
 	lines.add("driver_phase_marker_prefix", cfg.phaseMarkerPrefix)
+	lines.add("driver_phase_require_ready", cfg.phaseRequireReady)
 	lines.add("driver_purge_storm_rate_configured", cfg.purgeStormRate)
 	lines.add("driver_purge_storm_distinct_configured", cfg.purgeStormDistinct)
 	lines.add("driver_purge_storm_unknown_percent_configured", cfg.purgeStormUnknownPct)

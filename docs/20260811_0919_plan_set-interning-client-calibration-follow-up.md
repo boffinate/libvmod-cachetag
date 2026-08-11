@@ -2,6 +2,8 @@
 
 Rules reviewed: BR-001 through BR-026; applicable: BR-002, BR-008, BR-011, BR-014, BR-016 through BR-020, and BR-023 through BR-026.
 
+**Status:** Stopped before execution. A lower-client search could locate the achieved-rate peak but cannot solve the observed offered-load/harness under-saturation: yesterday's move from 24 to 48 clients reduced both rate and average CPU. The actual decision is incremental fixed-work compute cost with set interning disabled versus enabled, which does not require whole-host saturation. No remote row from this plan was run.
+
 **Host:** the rebuilt 2026-08-11 `ubuntu@51.159.202.218` cohort.
 
 **Sources:** baseline `a12a849`; patched implementation `1680f6f`.
@@ -23,4 +25,3 @@ At the selected client count run fresh-build B1, P1, B2, P2 rows sequentially an
 Retain the existing 24-client artifacts as diagnostic evidence; do not rerun them as comparison rows unless 24 is selected by the calibration. Stop after any invalidity, process failure, checksum failure, or swap. No replacement or extra profiling row is authorized.
 
 Fetch under `benchmarks/remote-results/20260811_51.159.202.218/set-interning-client-calibration/` and summarize only inside `vinyl-cache-ubuntu-build`.
-

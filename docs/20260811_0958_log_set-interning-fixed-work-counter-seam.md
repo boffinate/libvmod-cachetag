@@ -1,0 +1,15 @@
+# Set-interning fixed-work counter-seam log
+
+Rules reviewed: BR-001 through BR-026; applicable: BR-002, BR-008, BR-011, BR-013, BR-014, BR-016 through BR-020, and BR-023 through BR-026.
+
+The client-count calibration plan was stopped without remote rows. Yesterday's 24- and 48-client evidence showed that doubling clients reduced achieved throughput while average CPU remained below saturation, so lower client counts could not answer the actual question. The decision was reframed as enabled-versus-disabled compute for identical fixed work, independent of whole-host saturation.
+
+Existing artifacts bound the likely total effect to below roughly 1%, but do not isolate current cache-process CPU: the old enabled-versus-disabled rate differences were within same-code drift, the later comparison was old-enabled versus new-enabled, and whole-command counters include vinyltest, the driver, backend, setup, purge, and teardown.
+
+Implemented an acknowledged load-phase counter seam. The driver writes `load.start` and blocks; the controller identifies exactly one `cache-main` process whose executable is `vinyld`, starts `perf stat` disabled, enables it through the control FIFO, waits for `ack`, and only then writes `load.ready`. After the exact object load and pending-work barrier, the driver writes `load.end`; the controller disables and acknowledges counters and revalidates PID/start-time/executable identity. Required mode rejects missing or multiple targets, identity changes, marker and acknowledgement timeouts, counter failures, invalid event rows, non-exact driver evidence, mutex instrumentation, and simultaneous perf recording.
+
+Docker-only protocol verification passed eight Python cases covering success, stale readiness, missing and multiple targets, attach failure, acknowledgement timeout, missing end, target replacement, and malformed counters. A Go regression proved that the driver cannot leave `startPhaseMarker` before `ready`. Python syntax, Go compilation/test, and shell syntax all passed inside `vinyl-cache-ubuntu-build`; no host-local build or helper check was used.
+
+The first real remote smoke reached the full one-million-object end marker and returned all four counters, but the controller rejected perf's `-2` return after sending the terminating `SIGINT` itself. The harness was corrected to accept only zero or that explicit controller signal, while continuing to reject premature exits and invalid counters. It also corrected the pre-rename driver artifact path and made acknowledged ordinary loads emit exact backend-object evidence.
+
+The corrected enabled/shared remote smoke completed successfully on `ubuntu@51.159.202.218`: 1,000,000 requests and backend objects, zero driver errors, stable target identity, four counters at 100% running, zero swap, and `valid=1`. The acknowledged interval was 12.208 seconds wall time; process-wide task-clock was 60.632 seconds, confirming that `perf stat -p` aggregated the multithreaded cache process rather than only the wall duration of one thread. This smoke validates the seam only and is not an enabled-versus-disabled result.
