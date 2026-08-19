@@ -801,6 +801,12 @@ def arm_workload_keys(row: dict[str, Any], explicit_backends_by_profile: dict[st
     backend = historical_cachetag_backend_for_arm(row)
     if backend is not None:
         return [workload]
+    if implementation in {"cachetag", "cachetag-nostale", "xkey"} and profile in {
+        "mostly_unique_bound",
+        "mostly_shared_bound",
+        "ordinary_body_4k",
+    }:
+        return [profile]
     if implementation in {"cachetag", "cachetag-nostale"}:
         explicit_backends = explicit_backends_by_profile.get(profile, set())
         if explicit_backends:
@@ -1018,6 +1024,10 @@ def ratio(numerator: int | float | None, denominator: int | float | None) -> flo
     return float(numerator) / float(denominator)
 
 
+def scaled(value: int | float | None, factor: float) -> float | None:
+    return None if value is None else float(value) * factor
+
+
 def subtract(a: int | float | None, b: int | float | None) -> float | None:
     if a is None or b is None:
         return None
@@ -1177,6 +1187,18 @@ def _capture_identity(result_dir: Path, workload: str, run: int, endpoint: str) 
     return parse_kv(Path(str(prefix) + ".identity"))
 
 
+def cache_main_capture_pss_kb(result_dir: Path, workload: str, run: int, endpoint: str) -> int | None:
+    path = result_dir / f"{workload}.run-{run}.{endpoint}.cache-main.smaps_rollup"
+    if not path.is_file():
+        return None
+    match = re.search(
+        r"^Pss:\s+(\d+)\s+kB$",
+        path.read_text(encoding="utf-8", errors="replace"),
+        re.MULTILINE,
+    )
+    return int(match.group(1)) if match else None
+
+
 def _valid_sha256(value: str | None) -> bool:
     return bool(value and SHA256_VALUE_RE.fullmatch(value))
 
@@ -1295,6 +1317,23 @@ def _comparison_phase_cpu_validity(time_values: dict[str, str], reasons: list[st
                 reasons.append(f"phase_cpu_metric_invalid:{phase}_{process}_cpu_seconds")
 
 
+def _comparison_fixed_work_validity(driver: dict[str, str], reasons: list[str]) -> None:
+    for key in (
+        "driver_load_fixed_work_seconds",
+        "driver_load_pending_drain_seconds",
+    ):
+        value = as_float(driver, key)
+        if value is None:
+            reasons.append(f"fixed_work_metric_missing:{key}")
+        elif not math.isfinite(value) or value < 0:
+            reasons.append(f"fixed_work_metric_invalid:{key}")
+    warm_hits = as_int(driver, "driver_warm_hits")
+    if warm_hits is None:
+        reasons.append("warm_hit_metric_missing")
+    elif warm_hits <= 0:
+        reasons.append("warm_hit_metric_invalid")
+
+
 def comparison_contract_validity(
     result_dir: Path,
     workload: str,
@@ -1391,6 +1430,7 @@ def comparison_contract_validity(
         reasons.append("pacing_telemetry_incomplete")
     _comparison_pacing_validity(driver, reasons)
     _comparison_latency_sampling_validity(result_dir, run, driver, reasons)
+    _comparison_fixed_work_validity(driver, reasons)
     for key, configured in (
         ("driver_runtime_gomaxprocs", metadata.get("bench_driver_gomaxprocs")),
         ("driver_runtime_gogc", metadata.get("bench_driver_gogc")),
@@ -1442,17 +1482,12 @@ def comparison_contract_validity(
         identities.append((identity.get("boot_id", ""), identity.get("selected_pid", ""), identity.get("selected_starttime_ticks", "")))
     if identities and len(set(identities)) != 1:
         reasons.append("capture_process_identity_changed")
-    def captured_pss(endpoint: str) -> int | None:
-        path = result_dir / f"{workload}.run-{run}.{endpoint}.cache-main.smaps_rollup"
-        if not path.is_file():
-            return None
-        match = re.search(r"^Pss:\s+(\d+)\s+kB$", path.read_text(encoding="utf-8", errors="replace"), re.MULTILINE)
-        return int(match.group(1)) if match else None
-
-    first_pss = captured_pss("post_load")
-    confirm_pss = captured_pss("post_load_confirmation")
+    first_pss = cache_main_capture_pss_kb(result_dir, workload, run, "post_load")
+    confirm_pss = cache_main_capture_pss_kb(result_dir, workload, run, "post_load_confirmation")
     if first_pss is None or confirm_pss is None:
         reasons.append("post_load_confirmation_missing")
+    elif first_pss <= 0 or confirm_pss <= 0:
+        reasons.append("post_load_confirmation_invalid")
     elif max(first_pss, confirm_pss) and abs(first_pss - confirm_pss) / max(first_pss, confirm_pss) > 0.005:
         reasons.append("post_load_confirmation_drift")
     return int(not reasons), "ok" if not reasons else ",".join(reasons)
@@ -1595,6 +1630,14 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
             user_seconds + system_seconds
             if user_seconds is not None and system_seconds is not None
             else None
+        )
+        warm_hits = as_int(driver_values, "driver_warm_hits")
+        load_backend_objects = as_int(driver_values, "driver_load_backend_objects")
+        load_cache_main_cpu_seconds = as_float(
+            time_values, "system_phase_load_cache_main_cpu_seconds"
+        )
+        warm_cache_main_cpu_seconds = as_float(
+            time_values, "system_phase_warm_cache_main_cpu_seconds"
         )
         live_objects = stat_suffix(stats, "n_object")
         mem_edges = cachetag_counter(stats, "volatile_edges")
@@ -1832,6 +1875,12 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
             "fellow_disk_obj_get_fail": fellow_counter(stats, "c_dsk_obj_get_fail"),
             "vinyld_rss_max_kb": as_int(time_values, "system_tracked_vinyld_rss_max_kb"),
             "cgroup_peak_bytes": as_int(time_values, "system_cgroup_memory_peak_max_bytes"),
+            "cache_main_post_load_pss_kb": cache_main_capture_pss_kb(
+                result_dir, workload, run, "post_load"
+            ),
+            "cache_main_post_load_confirmation_pss_kb": cache_main_capture_pss_kb(
+                result_dir, workload, run, "post_load_confirmation"
+            ),
             "wall_seconds": as_float(time_values, "wall_seconds"),
             "vtc_cpu_seconds": vtc_cpu_seconds,
             "vtc_cpu_seconds_per_backend_object": ratio(
@@ -1839,7 +1888,27 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
                 driver_cycle_backend_total if driver_cycle_backend_total is not None else loaded_objects,
             ),
             "driver_load_requests_per_second": as_float(driver_values, "driver_load_requests_per_second"),
+            "driver_load_fixed_work_seconds": as_float(
+                driver_values, "driver_load_fixed_work_seconds"
+            ),
+            "driver_load_pending_drain_seconds": as_float(
+                driver_values, "driver_load_pending_drain_seconds"
+            ),
+            "cache_main_load_cpu_seconds": load_cache_main_cpu_seconds,
+            "cache_main_load_cpu_seconds_per_object": ratio(
+                load_cache_main_cpu_seconds, load_backend_objects
+            ),
             "driver_warm_requests_per_second": as_float(driver_values, "driver_warm_requests_per_second"),
+            "driver_warm_latency_p99_seconds": as_float(
+                driver_values, "driver_warm_latency_p99_seconds"
+            ),
+            "driver_warm_latency_max_seconds": as_float(
+                driver_values, "driver_warm_latency_max_seconds"
+            ),
+            "cache_main_warm_cpu_seconds": warm_cache_main_cpu_seconds,
+            "cache_main_warm_cpu_seconds_per_hit": ratio(
+                warm_cache_main_cpu_seconds, warm_hits
+            ),
             "driver_concurrent_reads": concurrent_reads,
             "driver_concurrent_inserts": concurrent_inserts,
             "driver_concurrent_purges": concurrent_purges,
@@ -2310,10 +2379,20 @@ def aggregate_workload_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ),
             "vinyld_rss_max_kb",
             "cgroup_peak_bytes",
+            "cache_main_post_load_pss_kb",
+            "cache_main_post_load_confirmation_pss_kb",
             "vtc_cpu_seconds",
             "vtc_cpu_seconds_per_backend_object",
             "driver_load_requests_per_second",
+            "driver_load_fixed_work_seconds",
+            "driver_load_pending_drain_seconds",
+            "cache_main_load_cpu_seconds",
+            "cache_main_load_cpu_seconds_per_object",
             "driver_warm_requests_per_second",
+            "driver_warm_latency_p99_seconds",
+            "driver_warm_latency_max_seconds",
+            "cache_main_warm_cpu_seconds",
+            "cache_main_warm_cpu_seconds_per_hit",
             "driver_concurrent_reads",
             "driver_concurrent_inserts",
             "driver_concurrent_purges",
@@ -3088,6 +3167,18 @@ def summarize_result(result_dir: Path) -> tuple[str, str]:
                 f"{fmt_float(row['driver_warm_requests_per_second_median'])} | "
                 f"{fmt_concurrent_read_rps(row)}"
             )
+            if row.get("cache_main_post_load_pss_kb_median") is not None:
+                lines.append(
+                    "    comparison endpoints: "
+                    f"post_load_pss={fmt_bytes(int(row['cache_main_post_load_pss_kb_median'] * 1024))} "
+                    f"confirmation_pss={fmt_bytes(int(row['cache_main_post_load_confirmation_pss_kb_median'] * 1024))} "
+                    f"fixed_work={fmt_float(row.get('driver_load_fixed_work_seconds_median'), 's')} "
+                    f"pending_drain={fmt_float(row.get('driver_load_pending_drain_seconds_median'), 's')} "
+                    f"load_cache_main={fmt_float(scaled(row.get('cache_main_load_cpu_seconds_per_object_median'), 1_000_000), 'us/object')} "
+                    f"warm_cache_main={fmt_float(scaled(row.get('cache_main_warm_cpu_seconds_per_hit_median'), 1_000_000), 'us/hit')} "
+                    f"warm_p99={fmt_float(scaled(row.get('driver_warm_latency_p99_seconds_median'), 1_000), 'ms')} "
+                    f"warm_max={fmt_float(scaled(row.get('driver_warm_latency_max_seconds_median'), 1_000), 'ms')}"
+                )
             if row.get("post_restart_tracked_memory_bytes_median") is not None:
                 lines.append(
                     "    restart: "
@@ -3379,7 +3470,18 @@ def summarize_result(result_dir: Path) -> tuple[str, str]:
 
 
 ARM_STATISTICAL_METRICS = (
+    "cache_main_post_load_pss_kb",
+    "cache_main_post_load_confirmation_pss_kb",
     "driver_load_requests_per_second",
+    "driver_load_fixed_work_seconds",
+    "driver_load_pending_drain_seconds",
+    "cache_main_load_cpu_seconds",
+    "cache_main_load_cpu_seconds_per_object",
+    "driver_warm_requests_per_second",
+    "driver_warm_latency_p99_seconds",
+    "driver_warm_latency_max_seconds",
+    "cache_main_warm_cpu_seconds",
+    "cache_main_warm_cpu_seconds_per_hit",
     "vtc_cpu_seconds",
     "vtc_cpu_seconds_per_backend_object",
     "wall_seconds",
@@ -3398,6 +3500,19 @@ ARM_EXACT_METRICS = (
     "cachetag_purgemap_prunes",
 )
 
+ARM_METRIC_DISPLAY: dict[str, tuple[float, str]] = {
+    "cache_main_post_load_pss_kb": (1.0 / 1024.0, "MiB"),
+    "cache_main_post_load_confirmation_pss_kb": (1.0 / 1024.0, "MiB"),
+    "cache_main_load_cpu_seconds_per_object": (1_000_000.0, "us/object"),
+    "driver_warm_latency_p99_seconds": (1_000.0, "ms"),
+    "driver_warm_latency_max_seconds": (1_000.0, "ms"),
+    "cache_main_warm_cpu_seconds_per_hit": (1_000_000.0, "us/hit"),
+    "vtc_cpu_seconds_per_backend_object": (1_000_000.0, "us/object"),
+    "vinyld_rss_max_kb": (1.0 / 1024.0, "MiB"),
+    "cgroup_peak_bytes": (1.0 / (1024.0 * 1024.0), "MiB"),
+    "cachetag_purgemap_bytes": (1.0 / (1024.0 * 1024.0), "MiB"),
+}
+
 
 def arm_stat(values: list[float]) -> dict[str, float | None]:
     if not values:
@@ -3405,12 +3520,12 @@ def arm_stat(values: list[float]) -> dict[str, float | None]:
     return {"min": min(values), "median": median(values), "max": max(values)}
 
 
-def fmt_arm_stat(stat: dict[str, float | None]) -> str:
+def fmt_arm_stat(stat: dict[str, float | None], scale: float = 1.0) -> str:
     if stat["median"] is None:
         return "n/a"
     return (
-        f"{fmt_float(stat['median'])} "
-        f"[{fmt_float(stat['min'])}, {fmt_float(stat['max'])}]"
+        f"{fmt_float(stat['median'] * scale)} "
+        f"[{fmt_float(stat['min'] * scale)}, {fmt_float(stat['max'] * scale)}]"
     )
 
 
@@ -3494,6 +3609,8 @@ def render_arm_comparison(arms: dict[str, list[dict[str, Any]]]) -> str:
         grouped: dict[str, list[dict[str, Any]]] = {}
         for result in results:
             for row in result["workloads"]:
+                if row.get("overall_valid") != 1:
+                    continue
                 for workload in arm_workload_keys(row, explicit_backends_by_profile):
                     grouped.setdefault(workload, []).append(row)
                     workloads.add(workload)
@@ -3504,7 +3621,16 @@ def render_arm_comparison(arms: dict[str, list[dict[str, Any]]]) -> str:
     lines = ["Arm comparison:"]
     for arm in arm_names:
         run_count = sum(len(result["workloads"]) for result in arms[arm])
-        lines.append(f"  {arm}: result_dirs={len(arms[arm])} workload_runs={run_count}")
+        valid_run_count = sum(
+            1
+            for result in arms[arm]
+            for row in result["workloads"]
+            if row.get("overall_valid") == 1
+        )
+        lines.append(
+            f"  {arm}: result_dirs={len(arms[arm])} "
+            f"workload_runs={run_count} valid_workload_runs={valid_run_count}"
+        )
     if len(hardware) == 1:
         lines.append(f"Hardware: {next(iter(hardware))}")
     else:
@@ -3532,12 +3658,14 @@ def render_arm_comparison(arms: dict[str, list[dict[str, Any]]]) -> str:
                 stats.append((arm, arm_stat(vals)))
             if all(stat["median"] is None for _, stat in stats):
                 continue
-            rendered = [f"{arm}={fmt_arm_stat(stat)}" for arm, stat in stats]
+            scale, unit = ARM_METRIC_DISPLAY.get(metric, (1.0, ""))
+            rendered = [f"{arm}={fmt_arm_stat(stat, scale)}" for arm, stat in stats]
             delta = None
             if len(stats) == 2:
                 delta = delta_percent(stats[1][1]["median"], stats[0][1]["median"])
             suffix = f" delta={fmt_float(delta, '%')}" if delta is not None else ""
-            lines.append(f"  {metric}: " + " | ".join(rendered) + suffix)
+            unit_suffix = f" ({unit})" if unit else ""
+            lines.append(f"  {metric}{unit_suffix}: " + " | ".join(rendered) + suffix)
         exact_parts = []
         for metric in ARM_EXACT_METRICS:
             rendered_values = []

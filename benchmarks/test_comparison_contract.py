@@ -9,8 +9,11 @@ import json
 from pathlib import Path
 
 from summarize_results import (
+    arm_workload_keys,
+    cache_main_capture_pss_kb,
     comparison_arm_cohort_validity,
     comparison_contract_validity,
+    render_arm_comparison,
     workload_driver_values,
 )
 
@@ -70,6 +73,8 @@ class ComparisonContractTest(unittest.TestCase):
             "driver_load_requests": "3", "driver_load_backend_objects": "3",
             "driver_load_backend_objects_expected": "3", "driver_load_backend_objects_validation": "true",
             "driver_errors": "0", "driver_phase_telemetry_schema": "phase-aligned-v1",
+            "driver_load_fixed_work_seconds": "1.0", "driver_load_pending_drain_seconds": "0.1",
+            "driver_warm_hits": "9",
             "driver_pacing_schema": "slot-skipping-v1", "driver_runtime_gomaxprocs": "1",
             "driver_runtime_gogc": "100", "driver_runtime_gomemlimit": "off",
             "driver_phase_scheduled_slots": "10", "driver_phase_executed_slots": "9",
@@ -118,6 +123,79 @@ class ComparisonContractTest(unittest.TestCase):
             driver, time_values, stats = self.write_valid_fixture(root)
             valid, reason = comparison_contract_validity(root, "fixture", 1, time_values, driver, stats)
         self.assertEqual((valid, reason), (1, "ok"))
+
+    def test_capture_pss_and_campaign_arm_key_are_reportable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.write_valid_fixture(root)
+            self.assertEqual(cache_main_capture_pss_kb(root, "fixture", 1, "post_load"), 100)
+        self.assertEqual(
+            arm_workload_keys(
+                {
+                    "implementation": "cachetag",
+                    "workload": "cachetag_mostly_unique_bound",
+                    "profile": "mostly_unique_bound",
+                },
+                {},
+            ),
+            ["mostly_unique_bound"],
+        )
+        self.assertEqual(
+            arm_workload_keys(
+                {
+                    "implementation": "xkey",
+                    "workload": "xkey_mostly_unique_bound",
+                    "profile": "mostly_unique_bound",
+                },
+                {},
+            ),
+            ["mostly_unique_bound"],
+        )
+        for profile in ("mostly_shared_bound", "ordinary_body_4k"):
+            for implementation in ("cachetag", "xkey"):
+                self.assertEqual(
+                    arm_workload_keys(
+                        {
+                            "implementation": implementation,
+                            "workload": f"{implementation}_{profile}",
+                            "profile": profile,
+                        },
+                        {},
+                    ),
+                    [profile],
+                )
+
+    def test_arm_comparison_excludes_invalid_repetitions(self) -> None:
+        base = {
+            "implementation": "cachetag",
+            "workload": "cachetag_mostly_unique_bound",
+            "profile": "mostly_unique_bound",
+        }
+        arms = {
+            "C": [{
+                "hardware": "test",
+                "path": "/does/not/exist",
+                "comparison_cohort_fingerprint": None,
+                "workloads": [
+                    {**base, "overall_valid": 1, "cache_main_post_load_pss_kb": 100},
+                    {**base, "overall_valid": 0, "cache_main_post_load_pss_kb": 1000},
+                ],
+            }],
+        }
+        rendered = render_arm_comparison(arms)
+        self.assertIn("workload_runs=2 valid_workload_runs=1", rendered)
+        self.assertIn("cache_main_post_load_pss_kb (MiB): C=0.10 [0.10, 0.10]", rendered)
+
+    def test_zero_pss_rejects_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            driver, time_values, stats = self.write_valid_fixture(root)
+            (root / "fixture.run-1.post_load.cache-main.smaps_rollup").write_text(
+                "Pss: 0 kB\n", encoding="utf-8"
+            )
+            valid, reason = comparison_contract_validity(root, "fixture", 1, time_values, driver, stats)
+        self.assertEqual(valid, 0)
+        self.assertIn("post_load_confirmation_invalid", reason)
 
     def test_zero_driver_errors_survives_multi_phase_aggregation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
