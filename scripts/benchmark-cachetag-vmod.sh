@@ -319,6 +319,8 @@ Environment:
                         vinyld to profile only the cache process during a
                         phase profile, or descendants to profile the whole
                         vinyltest process tree (default: vinyld)
+  BENCH_PERF_RECORD_CALL_GRAPH
+                        fp or dwarf call-graph unwinder (default: fp)
   BENCH_PERF_RECORD_RUNS
                         Number of runs per workload to record, or all
                         (default: 1)
@@ -561,6 +563,7 @@ bench_perf_record=${BENCH_PERF_RECORD:-off}
 bench_perf_record_scope=${BENCH_PERF_RECORD_SCOPE:-command}
 bench_perf_record_phase=${BENCH_PERF_RECORD_PHASE:-command}
 bench_perf_record_target=${BENCH_PERF_RECORD_TARGET:-vinyld}
+bench_perf_record_call_graph=${BENCH_PERF_RECORD_CALL_GRAPH:-fp}
 bench_perf_record_runs=${BENCH_PERF_RECORD_RUNS:-1}
 bench_perf_record_workload=${BENCH_PERF_RECORD_WORKLOAD:-}
 bench_perf_freq=${BENCH_PERF_FREQ:-99}
@@ -921,6 +924,7 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "BENCH_PERF_RECORD_SCOPE=$bench_perf_record_scope" \
 	-e "BENCH_PERF_RECORD_PHASE=$bench_perf_record_phase" \
 	-e "BENCH_PERF_RECORD_TARGET=$bench_perf_record_target" \
+	-e "BENCH_PERF_RECORD_CALL_GRAPH=$bench_perf_record_call_graph" \
 	-e "BENCH_PERF_RECORD_RUNS=$bench_perf_record_runs" \
 	-e "BENCH_PERF_RECORD_WORKLOAD=$bench_perf_record_workload" \
 	-e "BENCH_PERF_FREQ=$bench_perf_freq" \
@@ -1497,6 +1501,7 @@ fi
 	printf "bench_perf_record_scope=%s\n" "$BENCH_PERF_RECORD_SCOPE"
 	printf "bench_perf_record_phase=%s\n" "$BENCH_PERF_RECORD_PHASE"
 	printf "bench_perf_record_target=%s\n" "$BENCH_PERF_RECORD_TARGET"
+	printf "bench_perf_record_call_graph=%s\n" "$BENCH_PERF_RECORD_CALL_GRAPH"
 	printf "bench_perf_record_runs=%s\n" "$BENCH_PERF_RECORD_RUNS"
 	printf "bench_perf_record_workload=%s\n" "$BENCH_PERF_RECORD_WORKLOAD"
 	printf "bench_perf_freq=%s\n" "$BENCH_PERF_FREQ"
@@ -1600,13 +1605,21 @@ write_perf_reports() {
 	perf buildid-list -i "$perf_data" > "${report_prefix}.perf-buildids.txt" \
 		2> "${report_prefix}.perf-buildids.err" || true
 	perf report -i "$perf_data" --stdio --no-children \
-		--sort comm,dso,symbol > "${report_prefix}.perf-report.txt" \
+		--no-inline --sort comm,dso,symbol > "${report_prefix}.perf-report.txt" \
 		2> "${report_prefix}.perf-report.err" || true
 	perf report -i "$perf_data" --stdio --children \
-		--sort comm,dso,symbol > "${report_prefix}.perf-report-children.txt" \
+		--no-inline --sort comm,dso,symbol > "${report_prefix}.perf-report-children.txt" \
 		2> "${report_prefix}.perf-report-children.err" || true
-	perf script -i "$perf_data" 2> "${report_prefix}.perf-script.err" |
+	perf script -i "$perf_data" --no-inline 2> "${report_prefix}.perf-script.err" |
 		sed -n "1,20000p" > "${report_prefix}.perf-script.txt" || true
+	perf script -i "$perf_data" --no-inline \
+		2> "${report_prefix}.perf-script-cachetag.err" |
+		awk "BEGIN { RS = \"\"; ORS = \"\\n\\n\" } /cachetag_|vmod_cachetag/ { print }" \
+		> "${report_prefix}.perf-script-cachetag.txt" || true
+	perf script -i "$perf_data" --no-inline \
+		2> "${report_prefix}.perf-script-cachetag-locks.err" |
+		awk "BEGIN { RS = \"\"; ORS = \"\\n\\n\" } /cachetag_|vmod_cachetag/ && /pthread|futex|mutex/ { print }" \
+		> "${report_prefix}.perf-script-cachetag-locks.txt" || true
 }
 
 save_symbol_artifacts
@@ -1675,17 +1688,26 @@ for workload in /results/workloads/*.vtc; do
 						exit 1
 						;;
 				esac
-				printf "perf-record %s run %s phase=%s scope=%s target=%s freq=%s\n" \
+				printf "perf-record %s run %s phase=%s scope=%s target=%s call_graph=%s freq=%s\n" \
 					"$name" "$run" "$BENCH_PERF_RECORD_PHASE" \
 					"$BENCH_PERF_RECORD_SCOPE" "$BENCH_PERF_RECORD_TARGET" \
+					"$BENCH_PERF_RECORD_CALL_GRAPH" \
 					"$BENCH_PERF_FREQ" |
 					tee -a /results/summary.txt
+				case "$BENCH_PERF_RECORD_CALL_GRAPH" in
+					fp|dwarf) ;;
+					*)
+						echo "unknown BENCH_PERF_RECORD_CALL_GRAPH=$BENCH_PERF_RECORD_CALL_GRAPH" >&2
+						exit 1
+						;;
+				esac
 				case "$BENCH_PERF_RECORD_PHASE" in
 					command)
 						python3 /cachetag-host/benchmarks/run_with_metrics.py \
 							--metrics "$timing" --phase-marker-dir /results/phase-markers \
 							--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
-							perf record -F "$BENCH_PERF_FREQ" -g $perf_scope \
+							perf record -F "$BENCH_PERF_FREQ" \
+								--call-graph "$BENCH_PERF_RECORD_CALL_GRAPH" $perf_scope \
 							-o "$perf_data" -- \
 							$vinyltest_command -t "$VTC_TIMEOUT" \
 							-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
@@ -1700,6 +1722,7 @@ for workload in /results/workloads/*.vtc; do
 							--marker-prefix "$name" \
 							--phase "$BENCH_PERF_RECORD_PHASE" \
 							--freq "$BENCH_PERF_FREQ" \
+							--call-graph "$BENCH_PERF_RECORD_CALL_GRAPH" \
 							--scope "$BENCH_PERF_RECORD_SCOPE" \
 							--target "$BENCH_PERF_RECORD_TARGET" -- \
 							$vinyltest_command -t "$VTC_TIMEOUT" \

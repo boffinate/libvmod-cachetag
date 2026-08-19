@@ -45,6 +45,9 @@ Environment:
   CACHE_TAG_BENCH_SET_INTERNING
                            Override BENCH_SET_INTERNING: 0 for direct vectors or
                            1 for set interning (default: benchmark default)
+  CACHE_TAG_BENCH_BUILD_CFLAGS
+                           Override BENCH_BUILD_CFLAGS for the cachetag/xkey
+                           VMOD build (default: benchmark default)
   CACHE_TAG_BENCH_PERF_RECORD
                            Pass BENCH_PERF_RECORD to the benchmark container
                            for opt-in perf record profiling (default: empty)
@@ -55,6 +58,9 @@ Environment:
                            (default: benchmark default)
   CACHE_TAG_BENCH_PERF_RECORD_TARGET
                            vinyld or descendants for phase profiles
+                           (default: benchmark default)
+  CACHE_TAG_BENCH_PERF_RECORD_CALL_GRAPH
+                           fp or dwarf call-graph unwinder
                            (default: benchmark default)
   CACHE_TAG_BENCH_PERF_RECORD_RUNS
                            Number of runs per workload to record, or all
@@ -403,6 +409,7 @@ pressure_target_rps_override=${CACHE_TAG_PRESSURE_TARGET_RPS:-}
 pressure_purge_rate_override=${CACHE_TAG_PRESSURE_PURGE_RATE:-}
 skip_build=${CACHE_TAG_SKIP_BUILD:-0}
 bench_set_interning_override=${CACHE_TAG_BENCH_SET_INTERNING:-}
+bench_build_cflags_override=${CACHE_TAG_BENCH_BUILD_CFLAGS:-}
 # Retained only because the quoted remote environment line is a stable public
 # transport surface. The benchmark harness no longer consumes or honours it.
 allow_stale_build=
@@ -410,6 +417,7 @@ bench_perf_record_override=${CACHE_TAG_BENCH_PERF_RECORD:-}
 bench_perf_record_scope_override=${CACHE_TAG_BENCH_PERF_RECORD_SCOPE:-}
 bench_perf_record_phase_override=${CACHE_TAG_BENCH_PERF_RECORD_PHASE:-}
 bench_perf_record_target_override=${CACHE_TAG_BENCH_PERF_RECORD_TARGET:-}
+bench_perf_record_call_graph_override=${CACHE_TAG_BENCH_PERF_RECORD_CALL_GRAPH:-}
 bench_perf_record_runs_override=${CACHE_TAG_BENCH_PERF_RECORD_RUNS:-}
 bench_perf_record_workload_override=${CACHE_TAG_BENCH_PERF_RECORD_WORKLOAD:-}
 bench_workload_filter_override=${CACHE_TAG_BENCH_WORKLOAD_FILTER:-}
@@ -487,7 +495,12 @@ quote() {
 }
 
 remote_sh() {
-	{ printf 'CACHE_TAG_BENCH_SET_INTERNING=%s\n' "$(quote "$bench_set_interning_override")"; cat; } |
+	{
+		printf 'CACHE_TAG_BENCH_SET_INTERNING=%s\n' "$(quote "$bench_set_interning_override")"
+		printf 'CACHE_TAG_BENCH_BUILD_CFLAGS=%s\n' "$(quote "$bench_build_cflags_override")"
+		printf 'CACHE_TAG_BENCH_PERF_RECORD_CALL_GRAPH=%s\n' "$(quote "$bench_perf_record_call_graph_override")"
+		cat
+	} |
 		remote_sh_transport
 }
 
@@ -1285,6 +1298,7 @@ printf '%s\n' "\$result_dir" > "\$remote_dir/fetch/last-result-dir"
 	printf 'logical_cpus=%s\n' "\$cores"
 	printf 'physical_cores=%s\n' "\$physical_cores"
 	printf 'VTC_QUIET=%s\n' "\${CACHE_TAG_VTC_QUIET:-}"
+	printf 'bench_build_cflags=%s\n' "\${CACHE_TAG_BENCH_BUILD_CFLAGS:-}"
 	printf 'remote_dir=%s\n' "\$remote_dir"
 	printf 'docker_command=%s\n' "\$docker_cmd"
 	printf 'docker_run_args=%s\n' "\$REMOTE_DOCKER_RUN_ARGS"
@@ -1298,8 +1312,15 @@ export VINYL_DOCKER_IMAGE
 export BENCH_CLIENTS="\$bench_clients"
 export DOCKER="\$docker_cmd"
 export DOCKER_RUN_ARGS="\$REMOTE_DOCKER_RUN_ARGS"
+if [ -n "\$CACHE_TAG_BENCH_BUILD_CFLAGS" ]; then
+	export BENCH_BUILD_CFLAGS="\$CACHE_TAG_BENCH_BUILD_CFLAGS"
+fi
 if [ -n "\$CACHE_TAG_BENCH_PERF_RECORD" ]; then
 	export BENCH_PERF_RECORD="\$CACHE_TAG_BENCH_PERF_RECORD"
+	# Call-stack profiling and inherited hardware-counter collection are separate
+	# mechanisms. Keep remote perf-record rows single-profiler so their command
+	# metadata cannot silently retain a matrix's PERF_MODE=required default.
+	envs="\$envs PERF_MODE=off"
 fi
 if [ -n "\$CACHE_TAG_BENCH_PERF_RECORD_SCOPE" ]; then
 	export BENCH_PERF_RECORD_SCOPE="\$CACHE_TAG_BENCH_PERF_RECORD_SCOPE"
@@ -1309,6 +1330,9 @@ if [ -n "\$CACHE_TAG_BENCH_PERF_RECORD_PHASE" ]; then
 fi
 if [ -n "\$CACHE_TAG_BENCH_PERF_RECORD_TARGET" ]; then
 	export BENCH_PERF_RECORD_TARGET="\$CACHE_TAG_BENCH_PERF_RECORD_TARGET"
+fi
+if [ -n "\$CACHE_TAG_BENCH_PERF_RECORD_CALL_GRAPH" ]; then
+	export BENCH_PERF_RECORD_CALL_GRAPH="\$CACHE_TAG_BENCH_PERF_RECORD_CALL_GRAPH"
 fi
 if [ -n "\$CACHE_TAG_BENCH_PERF_RECORD_RUNS" ]; then
 	export BENCH_PERF_RECORD_RUNS="\$CACHE_TAG_BENCH_PERF_RECORD_RUNS"

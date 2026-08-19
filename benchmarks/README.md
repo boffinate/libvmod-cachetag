@@ -232,9 +232,11 @@ BENCH_PROFILE=low-fanout-unique OBJECTS=1000000 RUNS=1 RUN_XKEY=0 \
   PERF_MODE=off SKIP_BUILD=1 scripts/benchmark-cachetag-vmod.sh ../vinyl-cache
 ```
 
+The default `BENCH_PERF_RECORD_CALL_GRAPH=fp` profiles the production binary with frame-pointer unwinding. Use `BENCH_PERF_RECORD_CALL_GRAPH=dwarf` when the production build omits frame pointers and resolved ancestry is required. This changes the capture method and overhead, not the generated VMOD or Vinyl binary; retain it as a separate profiling cohort.
+
 Use `BENCH_PERF_RECORD_TARGET=descendants` to profile the whole `vinyltest` process tree during the warm phase. Use `BENCH_PERF_RECORD_SCOPE=system` only when system-wide attribution is needed; in that mode the target setting is ignored.
 
-The profiling wrapper writes `*.perf.data`, `*.perf-report.txt`, `*.perf-report-children.txt`, `*.perf-buildids.txt`, and a bounded `*.perf-script.txt` beside the normal run artifacts. It also copies the cachetag VMOD, installed Vinyl binaries, installed VMODs, and xkey VMOD when present into `symbols/` with `symbols/manifest.txt`, so downloaded artifacts retain the symbol material needed to diagnose unresolved `perf` frames.
+The profiling wrapper writes `*.perf.data`, `*.perf-report.txt`, `*.perf-report-children.txt`, `*.perf-buildids.txt`, a bounded `*.perf-script.txt`, and complete cachetag-focused `*.perf-script-cachetag.txt` and `*.perf-script-cachetag-locks.txt` extracts beside the normal run artifacts. It also copies the cachetag VMOD, installed Vinyl binaries, installed VMODs, and xkey VMOD when present into `symbols/` with `symbols/manifest.txt`, so downloaded artifacts retain the symbol material needed to diagnose unresolved `perf` frames.
 
 ## Remote Matrices
 
@@ -297,10 +299,13 @@ Remote matrix defaults can be tuned with environment variables:
 - `CACHE_TAG_PRESSURE_PURGE_RATE`: pressure matrix purge requests/second; empty means auto.
 - `CACHE_TAG_BENCH_PERF_RECORD`: pass `BENCH_PERF_RECORD` through to the Docker benchmark wrapper for opt-in `perf record` profiling.
 - `CACHE_TAG_BENCH_PERF_RECORD_SCOPE`: `command` or `system`; `system` adds `perf record -a`.
+- `CACHE_TAG_BENCH_BUILD_CFLAGS`: exact `BENCH_BUILD_CFLAGS` override for cachetag/xkey VMOD builds; use a fresh build and retain this as a separate cohort whenever it changes.
 - `CACHE_TAG_BENCH_PERF_RECORD_PHASE`: `command` for the whole `vinyltest` command or `warm` for driver warm-phase-only capture.
 - `CACHE_TAG_BENCH_PERF_RECORD_TARGET`: `vinyld` or `descendants` for phase profiles.
+- `CACHE_TAG_BENCH_PERF_RECORD_CALL_GRAPH`: `fp` or `dwarf`; use `dwarf` for production binaries built without frame pointers.
 - `CACHE_TAG_BENCH_PERF_RECORD_RUNS`: number of runs per workload to record, or `all`.
 - `CACHE_TAG_BENCH_PERF_RECORD_WORKLOAD`: optional workload basename to profile while other generated workloads run normally.
+- Remote rows with `CACHE_TAG_BENCH_PERF_RECORD` set force `PERF_MODE=off`, keeping call-stack sampling separate from inherited hardware-counter collection even when the named matrix defaults to `PERF_MODE=required`.
 - `CACHE_TAG_BENCH_VALIDATE_RESIDENCY`: override `BENCH_VALIDATE_RESIDENCY`.
 - `CACHE_TAG_BENCH_WARM_SECONDS`: override `BENCH_WARM_SECONDS`.
 - `CACHE_TAG_BENCH_SKIP_PURGE`: override `BENCH_SKIP_PURGE` for load-only probes.

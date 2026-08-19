@@ -92,12 +92,29 @@ def target_pids(root_pid: int, target: str) -> list[int]:
     raise ValueError(f"unknown target: {target}")
 
 
-def wait_for_marker(path: Path, proc: subprocess.Popen[bytes], poll_seconds: float) -> bool:
-    while not path.exists():
+def phase_marker_pairs(marker_dir: Path, marker_prefix: str, phase: str) -> list[tuple[Path, Path]]:
+    prefixes = [marker_prefix]
+    if phase == "warm":
+        prefixes.append(f"{marker_prefix}_warm")
+    return [
+        (
+            marker_dir / f"{prefix}.{phase}.start",
+            marker_dir / f"{prefix}.{phase}.end",
+        )
+        for prefix in prefixes
+    ]
+
+
+def wait_for_any_marker(
+    paths: list[Path], proc: subprocess.Popen[bytes], poll_seconds: float
+) -> Path | None:
+    while True:
+        for path in paths:
+            if path.exists():
+                return path
         if proc.poll() is not None:
-            return False
+            return None
         time.sleep(poll_seconds)
-    return True
 
 
 def stop_perf(proc: subprocess.Popen[bytes]) -> int:
@@ -114,6 +131,31 @@ def stop_perf(proc: subprocess.Popen[bytes]) -> int:
         return proc.wait()
 
 
+def perf_record_command(
+    perf_data: Path,
+    freq: str,
+    call_graph: str,
+    scope: str,
+    pids: list[int],
+) -> list[str]:
+    command = [
+        "perf",
+        "record",
+        "-F",
+        freq,
+        "--call-graph",
+        call_graph,
+        "-o",
+        str(perf_data),
+    ]
+    if scope == "system":
+        command.append("-a")
+    else:
+        command.extend(["-p", ",".join(str(pid) for pid in pids)])
+    command.extend(["--", "sleep", "86400"])
+    return command
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--perf-data", required=True, type=Path)
@@ -121,6 +163,7 @@ def main() -> int:
     parser.add_argument("--marker-prefix", required=True)
     parser.add_argument("--phase", default="warm")
     parser.add_argument("--freq", default="99")
+    parser.add_argument("--call-graph", choices=("fp", "dwarf"), default="fp")
     parser.add_argument("--scope", choices=("command", "system"), default="command")
     parser.add_argument("--target", choices=("vinyld", "descendants"), default="vinyld")
     parser.add_argument("--poll-seconds", type=float, default=0.05)
@@ -134,9 +177,8 @@ def main() -> int:
         parser.error("missing command after --")
 
     args.marker_dir.mkdir(parents=True, exist_ok=True)
-    start_marker = args.marker_dir / f"{args.marker_prefix}.{args.phase}.start"
-    end_marker = args.marker_dir / f"{args.marker_prefix}.{args.phase}.end"
-    for marker in (start_marker, end_marker):
+    marker_pairs = phase_marker_pairs(args.marker_dir, args.marker_prefix, args.phase)
+    for marker in (path for pair in marker_pairs for path in pair):
         try:
             marker.unlink()
         except FileNotFoundError:
@@ -152,13 +194,15 @@ def main() -> int:
     missing_marker = False
 
     try:
-        if not wait_for_marker(start_marker, child, args.poll_seconds):
+        start_marker = wait_for_any_marker(
+            [pair[0] for pair in marker_pairs], child, args.poll_seconds
+        )
+        if start_marker is None:
             missing_marker = True
         else:
-            perf_cmd = ["perf", "record", "-F", args.freq, "-g", "-o", str(args.perf_data)]
-            if args.scope == "system":
-                perf_cmd.append("-a")
-            else:
+            end_marker = next(end for start, end in marker_pairs if start == start_marker)
+            pids: list[int] = []
+            if args.scope != "system":
                 pids = target_pids(child.pid, args.target)
                 if not pids:
                     print(
@@ -166,18 +210,22 @@ def main() -> int:
                         file=sys.stderr,
                     )
                     missing_marker = True
-                else:
-                    perf_cmd.extend(["-p", ",".join(str(pid) for pid in pids)])
             if not missing_marker:
-                perf_cmd.extend(["--", "sleep", "86400"])
+                perf_cmd = perf_record_command(
+                    args.perf_data,
+                    args.freq,
+                    args.call_graph,
+                    args.scope,
+                    pids,
+                )
                 print(
                     "phase-perf "
                     f"phase={args.phase} scope={args.scope} target={args.target} "
-                    f"data={args.perf_data}",
+                    f"call_graph={args.call_graph} data={args.perf_data}",
                     file=sys.stderr,
                 )
                 perf_proc = subprocess.Popen(perf_cmd)
-                wait_for_marker(end_marker, child, args.poll_seconds)
+                wait_for_any_marker([end_marker], child, args.poll_seconds)
     finally:
         if perf_proc is not None:
             perf_rc = stop_perf(perf_proc)
@@ -187,7 +235,8 @@ def main() -> int:
         return child_rc
     if missing_marker:
         print(
-            f"phase perf marker not observed: start={start_marker} end={end_marker}",
+            "phase perf marker not observed: "
+            + " ".join(f"start={start} end={end}" for start, end in marker_pairs),
             file=sys.stderr,
         )
         return 2

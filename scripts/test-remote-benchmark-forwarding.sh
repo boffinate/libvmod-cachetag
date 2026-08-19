@@ -43,8 +43,14 @@ done
 grep -F 'envs="\$envs BENCHMARK_CONTRACT=\$CACHE_TAG_BENCHMARK_CONTRACT"' "$script" >/dev/null
 grep -F "CACHE_TAG_BENCH_SET_INTERNING=%s" "$script" >/dev/null
 grep -F 'envs="\$envs BENCH_SET_INTERNING=\$CACHE_TAG_BENCH_SET_INTERNING"' "$script" >/dev/null
+grep -F "CACHE_TAG_BENCH_BUILD_CFLAGS=%s" "$script" >/dev/null
+grep -F 'export BENCH_BUILD_CFLAGS="\$CACHE_TAG_BENCH_BUILD_CFLAGS"' "$script" >/dev/null
+grep -F 'bench_build_cflags=%s' "$script" >/dev/null
+grep -F "CACHE_TAG_BENCH_PERF_RECORD_CALL_GRAPH=%s" "$script" >/dev/null
+grep -F 'export BENCH_PERF_RECORD_CALL_GRAPH="\$CACHE_TAG_BENCH_PERF_RECORD_CALL_GRAPH"' "$script" >/dev/null
 grep -F 'envs="\$envs BENCH_CONCURRENT_TARGET_RPS=\$CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS"' "$script" >/dev/null
 grep -F 'envs="\$envs OBJECTS=\$CACHE_TAG_BENCH_OBJECTS"' "$script" >/dev/null
+grep -F 'envs="\$envs PERF_MODE=off"' "$script" >/dev/null
 
 if grep -F 'CACHE_TAG_BENCH_PERF_RECORD_WORKLOAD=$(quote "$bench_workload_filter_override")' "$script" >/dev/null; then
 	echo 'perf workload transport is coupled to workload filter' >&2
