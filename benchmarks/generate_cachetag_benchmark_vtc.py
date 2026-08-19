@@ -162,6 +162,12 @@ def vinyl_arg(
     timeout_idle: str = "",
     backend_idle_timeout: str = "",
 ) -> str:
+    # Vinyl's thread_pool_max and thread_pool_min are *per pool*. Keep the
+    # number of pools explicit as well so a client sweep has a stable server
+    # worker envelope rather than inheriting Vinyl's default.
+    thread_pools = int(os.getenv("BENCH_VINYL_THREAD_POOLS", "2"))
+    if thread_pools <= 0:
+        raise SystemExit("BENCH_VINYL_THREAD_POOLS must be positive")
     thread_min = min(vinyl_threads, 10)
     if storage_kind == "fellow":
         storage_arg = (
@@ -178,6 +184,7 @@ def vinyl_arg(
         # tests but throttles backend fetch throughput enough to dominate
         # benchmark results.
         "-p debug=none",
+        f"-p thread_pools={thread_pools}",
         f"-p thread_pool_min={thread_min}",
         f"-p thread_pool_max={vinyl_threads}",
     ]
@@ -285,6 +292,15 @@ def write_driver(
     validate_tag_shape = os.getenv("BENCH_VALIDATE_TAG_SHAPE", "")
     if validate_tag_shape:
         env_parts.append(f"BENCH_VALIDATE_TAG_SHAPE={validate_tag_shape}")
+    # Every driver invocation writes phase boundaries. The metrics sampler
+    # consumes these markers to retain phase-aligned process CPU deltas.
+    if "BENCH_PHASE_MARKER_DIR=" not in env:
+        env_parts.extend(
+            (
+                "BENCH_PHASE_MARKER_DIR=/results/phase-markers",
+                f"BENCH_PHASE_MARKER_PREFIX={name}",
+            )
+        )
     if env:
         env_parts.append(env)
     env = " ".join(env_parts)
@@ -300,7 +316,7 @@ def write_driver(
 def write_phase4_marker_snapshot(
     f, prefix: str, marker: str, stats_filter: str, stats_suffix: str, event: str = "end"
 ) -> None:
-    marker_path = f"/results/phase4-markers/{prefix}.{marker}.{event}"
+    marker_path = f"/results/phase-markers/{prefix}.{marker}.{event}"
     f.write(
         f'shell "i=0; while [ $i -lt 360000 ]; do test -f {marker_path} && exit 0; '
         'i=$((i + 1)); sleep 0.01; done; echo timed out waiting for Phase 4 marker; exit 1"\n'
@@ -311,7 +327,7 @@ def write_phase4_marker_snapshot(
 def write_phase5_marker_snapshot(
     f, prefix: str, marker: str, stats_filter: str, stats_suffix: str, event: str = "end"
 ) -> None:
-    marker_path = f"/results/phase5-markers/{prefix}.{marker}.{event}"
+    marker_path = f"/results/phase-markers/{prefix}.{marker}.{event}"
     f.write(
         f'shell "i=0; while [ $i -lt 360000 ]; do test -f {marker_path} && exit 0; '
         'i=$((i + 1)); sleep 0.01; done; echo timed out waiting for Phase 5 marker; exit 1"\n'
@@ -323,8 +339,8 @@ def write_phase6_cycle_snapshot(
     f, prefix: str, cycle: int, stats_filter: str, require_tripwire: bool = True
 ) -> None:
     marker = f"phase6_cycle_{cycle:02d}"
-    marker_path = f"/results/phase6-markers/{prefix}.{marker}.end"
-    snapshot_path = f"/results/phase6-markers/{prefix}.{marker}.snapshot"
+    marker_path = f"/results/phase-markers/{prefix}.{marker}.end"
+    snapshot_path = f"/results/phase-markers/{prefix}.{marker}.snapshot"
     stats_path = f"/results/{prefix}_{marker}_end.stats"
     memory_path = f"/results/{prefix}_{marker}_end.phase6_memory"
     f.write(
@@ -713,7 +729,7 @@ def write_workload(
                 cachetag_wal_fsync,
                 sweep_interval,
             )
-            stats_filter = storage_stats_filter("CACHETAG.*", storage_kind)
+            stats_filter = storage_stats_filter("CACHETAG.* -f MAIN.*", storage_kind)
         else:
             write_xkey_vcl(
                 f,
@@ -732,7 +748,7 @@ def write_workload(
                 timeout_idle,
                 backend_idle_timeout,
             )
-            stats_filter = storage_stats_filter("XKEY.*", storage_kind)
+            stats_filter = storage_stats_filter("XKEY.* -f MAIN.*", storage_kind)
 
         if profile == "untagged-fellow-load":
             if storage_kind != "fellow" or not cachetag_persist:
@@ -831,7 +847,7 @@ def write_workload(
             return
 
         if profile in {"phase4-sweep-latency", "phase4-refill-control"}:
-            f.write(f'shell "rm -rf /results/phase4-markers; mkdir -p /results/phase4-markers"\n')
+            f.write(f'shell "rm -rf /results/phase-markers; mkdir -p /results/phase-markers"\n')
             write_driver(
                 f,
                 objects,
@@ -841,7 +857,7 @@ def write_workload(
                 prefix,
                 driver_command,
                 env=(
-                    f"BENCH_PHASE_MARKER_DIR=/results/phase4-markers "
+                    f"BENCH_PHASE_MARKER_DIR=/results/phase-markers "
                     f"BENCH_PHASE_MARKER_PREFIX={prefix}"
                 ),
                 wait=False,
@@ -853,7 +869,7 @@ def write_workload(
             write_phase4_marker_snapshot(f, prefix, "phase4_post", stats_filter, "phase4_post")
             f.write("process p1 -wait\n\n")
         elif is_phase5_profile(profile):
-            f.write(f'shell "rm -rf /results/phase5-markers; mkdir -p /results/phase5-markers"\n')
+            f.write(f'shell "rm -rf /results/phase-markers; mkdir -p /results/phase-markers"\n')
             write_driver(
                 f,
                 objects,
@@ -863,7 +879,7 @@ def write_workload(
                 prefix,
                 driver_command,
                 env=(
-                    f"BENCH_PHASE_MARKER_DIR=/results/phase5-markers "
+                    f"BENCH_PHASE_MARKER_DIR=/results/phase-markers "
                     f"BENCH_PHASE_MARKER_PREFIX={prefix}"
                 ),
                 wait=False,
@@ -871,7 +887,7 @@ def write_workload(
             write_phase5_marker_snapshot(f, prefix, "phase5_hold_fetch", stats_filter, "phase5_hold_fetch_start", "start")
             if is_phase5_held_profile(profile):
                 f.write("barrier b_phase5_held sync\n")
-                f.write(f'shell "touch /results/phase5-markers/{prefix}.phase5_hold.active"\n')
+                f.write(f'shell "touch /results/phase-markers/{prefix}.phase5_hold.active"\n')
                 write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_phase5_hold_active.stats")
             else:
                 write_phase5_marker_snapshot(f, prefix, "phase5_hold", stats_filter, "phase5_hold_active", "active")
@@ -889,7 +905,7 @@ def write_workload(
                     f.write(
                         "process p_shutdown -log {\n"
                         "\tt0=$(date +%s%N)\n"
-                        f"\tprintf 'phase5_shutdown_cold_start_ns=%s\\n' \"$t0\" > /results/phase5-markers/{prefix}.phase5_shutdown.cold.start\n"
+                        f"\tprintf 'phase5_shutdown_cold_start_ns=%s\\n' \"$t0\" > /results/phase-markers/{prefix}.phase5_shutdown.cold.start\n"
                         "\tvinyladm -n ${v1_name} vcl.discard vcl1\n"
                         "\trc=$?\n"
                         "\tt1=$(date +%s%N)\n"
@@ -899,10 +915,10 @@ def write_workload(
                         "} -start\n"
                     )
                     f.write(
-                        f'shell "i=0; while [ $i -lt 360000 ]; do test -f /results/phase5-markers/{prefix}.phase5_shutdown.cold.start && exit 0; i=$((i + 1)); sleep 0.01; done; echo timed out waiting for shutdown discard start; exit 1"\n'
+                        f'shell "i=0; while [ $i -lt 360000 ]; do test -f /results/phase-markers/{prefix}.phase5_shutdown.cold.start && exit 0; i=$((i + 1)); sleep 0.01; done; echo timed out waiting for shutdown discard start; exit 1"\n'
                     )
                     f.write(
-                        f'shell "touch /results/phase5-markers/{prefix}.phase5_shutdown.release"\n'
+                        f'shell "touch /results/phase-markers/{prefix}.phase5_shutdown.release"\n'
                     )
                     f.write("barrier b_phase5_continue sync\n")
                     f.write("process p_shutdown -expect-exit 0 -wait\n")
@@ -928,7 +944,7 @@ def write_workload(
             cycles = int(os.getenv("CHURN_CYCLES", "10"))
             if cycles < 10:
                 raise SystemExit("phase6-fill-drain requires CHURN_CYCLES >= 10")
-            f.write(f'shell "rm -rf /results/phase6-markers; mkdir -p /results/phase6-markers"\n')
+            f.write(f'shell "rm -rf /results/phase-markers; mkdir -p /results/phase-markers"\n')
             write_driver(
                 f,
                 objects,
@@ -938,7 +954,7 @@ def write_workload(
                 prefix,
                 driver_command,
                 env=(
-                    f"BENCH_PHASE_MARKER_DIR=/results/phase6-markers "
+                    f"BENCH_PHASE_MARKER_DIR=/results/phase-markers "
                     f"BENCH_PHASE_MARKER_PREFIX={prefix}"
                 ),
                 wait=False,
@@ -1219,8 +1235,8 @@ def write_noindex_concurrent_workload(
 def write_noindex_phase6_drain_barrier(f, prefix: str, cycle: int, stage: str = "") -> None:
     suffix = f"_{stage}" if stage else ""
     marker = f"phase6_ban_{cycle:02d}{suffix}"
-    requested = f"/results/phase6-markers/{prefix}.{marker}.requested"
-    drained = f"/results/phase6-markers/{prefix}.{marker}.drained"
+    requested = f"/results/phase-markers/{prefix}.{marker}.requested"
+    drained = f"/results/phase-markers/{prefix}.{marker}.drained"
     f.write(
         f'shell "i=0; while [ $i -lt 360000 ]; do test -f {requested} && break; '
         'i=$((i + 1)); sleep 0.01; done; test -f '
@@ -1275,7 +1291,7 @@ def write_noindex_phase6_workload(
             backend_idle_timeout,
             phase6_bans=True,
         )
-        f.write('shell "rm -rf /results/phase6-markers; mkdir -p /results/phase6-markers"\n')
+        f.write('shell "rm -rf /results/phase-markers; mkdir -p /results/phase-markers"\n')
         write_driver(
             f,
             objects,
@@ -1286,7 +1302,7 @@ def write_noindex_phase6_workload(
             driver_command,
             "none",
             env=(
-                "BENCH_PHASE_MARKER_DIR=/results/phase6-markers "
+                "BENCH_PHASE_MARKER_DIR=/results/phase-markers "
                 f"BENCH_PHASE_MARKER_PREFIX={prefix}"
             ),
             wait=False,
@@ -1442,7 +1458,18 @@ def main() -> None:
     parser.add_argument("--storage", default="256m")
     parser.add_argument("--eviction-storage", default="1m")
     parser.add_argument("--cold-residency-storage", default="")
-    parser.add_argument("--vinyl-threads", type=int, default=16)
+    parser.add_argument(
+        "--vinyl-thread-pool-max",
+        type=int,
+        default=int(os.getenv("BENCH_VINYL_THREAD_POOL_MAX", "16")),
+        help="maximum Vinyl workers in each pool",
+    )
+    parser.add_argument(
+        "--vinyl-thread-pools",
+        type=int,
+        default=int(os.getenv("BENCH_VINYL_THREAD_POOLS", "2")),
+        help="explicit Vinyl worker-pool count",
+    )
     parser.add_argument("--driver-command", default="/work/cachetag-http-workload-driver")
     parser.add_argument("--backend-command", default="/work/cachetag-benchmark-backend")
     parser.add_argument("--backend-host", default="127.0.0.1")
@@ -1480,8 +1507,11 @@ def main() -> None:
         raise SystemExit("--eviction-storage must not be empty")
     if args.cold_residency_storage == "":
         args.cold_residency_storage = args.storage
-    if args.vinyl_threads <= 0:
-        raise SystemExit("--vinyl-threads must be positive")
+    if args.vinyl_thread_pool_max <= 0:
+        raise SystemExit("--vinyl-thread-pool-max must be positive")
+    if args.vinyl_thread_pools <= 0:
+        raise SystemExit("--vinyl-thread-pools must be positive")
+    os.environ["BENCH_VINYL_THREAD_POOLS"] = str(args.vinyl_thread_pools)
     if not args.driver_command:
         raise SystemExit("--driver-command must not be empty")
     if not args.backend_command:
@@ -1583,7 +1613,7 @@ def main() -> None:
                 args.objects,
                 args.tags_per_object,
                 args.storage,
-                args.vinyl_threads,
+                args.vinyl_thread_pool_max,
                 args.driver_command,
                 args.backend_command,
                 args.backend_host,
@@ -1605,7 +1635,7 @@ def main() -> None:
             args.out_dir / "noindex_load.vtc",
             args.objects,
             args.storage,
-            args.vinyl_threads,
+            args.vinyl_thread_pool_max,
             args.driver_command,
             args.backend_command,
             args.backend_host,
@@ -1627,7 +1657,7 @@ def main() -> None:
                 args.out_dir / "noindex_phase6_fill_drain.vtc",
                 args.objects,
                 args.storage,
-                args.vinyl_threads,
+                args.vinyl_thread_pool_max,
                 args.driver_command,
                 args.backend_command,
                 args.backend_host,
@@ -1649,7 +1679,7 @@ def main() -> None:
                 args.out_dir / "noindex_concurrent.vtc",
                 args.objects,
                 args.storage,
-                args.vinyl_threads,
+                args.vinyl_thread_pool_max,
                 args.driver_command,
                 args.backend_command,
                 args.backend_host,
@@ -1677,7 +1707,7 @@ def main() -> None:
                 args.tags_per_object,
                 args.storage,
                 args.eviction_storage,
-                args.vinyl_threads,
+                args.vinyl_thread_pool_max,
                 args.driver_command,
                 args.backend_command,
                 args.backend_host,
@@ -1711,7 +1741,7 @@ def main() -> None:
                 args.tags_per_object,
                 args.storage,
                 args.eviction_storage,
-                args.vinyl_threads,
+                args.vinyl_thread_pool_max,
                 args.driver_command,
                 args.backend_command,
                 args.backend_host,

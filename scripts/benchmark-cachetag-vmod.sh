@@ -250,8 +250,25 @@ Environment:
   BENCH_PURGEMAP_EXPECT_REBUILD
                         1 to assert purge-storm rebuilt the same-size purge map
                         rebuild and recovered empty slots (default: unset)
-  BENCH_VINYL_THREADS   Vinyl worker thread cap for generated workloads
-                        (default: 16)
+  BENCH_VINYL_THREAD_POOL_MAX
+                        Maximum Vinyl worker threads in each pool for generated
+                        workloads (default: 16). This is not a total-worker cap.
+  BENCH_VINYL_THREAD_POOLS
+                        Explicit Vinyl worker-pool count (default: 2). Hold both
+                        worker settings fixed through a client sweep.
+  BENCH_CPUSET_CPUS     Restrict the whole benchmark container to this CPU list.
+  BENCH_DRIVER_CPUSET_CPUS
+                        Restrict only the load driver with taskset -c.
+  BENCH_BACKEND_CPUSET_CPUS
+                        Restrict only the origin backend with taskset -c.
+  BENCH_DRIVER_HEADROOM_REQUIRED
+                        1 requires an assigned driver CPU set and explicit
+                        trivial-endpoint headroom declaration below (default: 0).
+  BENCH_DRIVER_HEADROOM_TARGET_RPS
+                        Target rate the measured lane must not exceed.
+  BENCH_DRIVER_HEADROOM_PROVEN_RPS
+                        Rate achieved by the driver against a trivial endpoint;
+                        required to be at least 120% of TARGET_RPS when gated.
   CHURN_CYCLES          Load/sleep cycles for short-ttl-high-churn (default: 3)
   RUNS                  Repetitions per workload (default: 3)
   BENCH_WORKLOAD_FILTER Optional exact workload basename to run after generation;
@@ -403,7 +420,40 @@ then
 fi
 bench_purgemap_expect_rebuild=${BENCH_PURGEMAP_EXPECT_REBUILD:-}
 bench_shutdown_drain_seconds=${BENCH_SHUTDOWN_DRAIN_SECONDS:-}
-bench_vinyl_threads=${BENCH_VINYL_THREADS:-16}
+bench_vinyl_thread_pool_max=${BENCH_VINYL_THREAD_POOL_MAX:-16}
+bench_vinyl_thread_pools=${BENCH_VINYL_THREAD_POOLS:-2}
+bench_cpuset_cpus=${BENCH_CPUSET_CPUS:-}
+bench_driver_cpuset_cpus=${BENCH_DRIVER_CPUSET_CPUS:-}
+bench_backend_cpuset_cpus=${BENCH_BACKEND_CPUSET_CPUS:-}
+bench_driver_headroom_required=${BENCH_DRIVER_HEADROOM_REQUIRED:-0}
+bench_driver_headroom_target_rps=${BENCH_DRIVER_HEADROOM_TARGET_RPS:-}
+bench_driver_headroom_proven_rps=${BENCH_DRIVER_HEADROOM_PROVEN_RPS:-}
+case "$bench_vinyl_thread_pool_max:$bench_vinyl_thread_pools" in
+	*[!0-9:]*|0:*|*:0)
+		echo "BENCH_VINYL_THREAD_POOL_MAX and BENCH_VINYL_THREAD_POOLS must be positive integers" >&2
+		exit 2
+		;;
+esac
+case "$bench_driver_headroom_required" in
+	0|1) ;;
+	*) echo "BENCH_DRIVER_HEADROOM_REQUIRED must be 0 or 1" >&2; exit 2 ;;
+esac
+if [ "$bench_driver_headroom_required" = 1 ]; then
+	case "$bench_driver_headroom_target_rps:$bench_driver_headroom_proven_rps" in
+		*[!0-9:]*|0:*|*:0)
+			echo "driver headroom gate requires positive integer TARGET_RPS and PROVEN_RPS" >&2
+			exit 2
+			;;
+	esac
+	if [ -z "$bench_driver_cpuset_cpus" ]; then
+		echo "driver headroom gate requires BENCH_DRIVER_CPUSET_CPUS" >&2
+		exit 2
+	fi
+	if [ "$bench_driver_headroom_proven_rps" -lt "$((bench_driver_headroom_target_rps * 120 / 100))" ]; then
+		echo "driver headroom gate requires PROVEN_RPS >= 120% of TARGET_RPS" >&2
+		exit 2
+	fi
+fi
 churn_cycles_default=3
 case ",$bench_profile," in
 	*,phase6-fill-drain,*) churn_cycles_default=10 ;;
@@ -647,7 +697,12 @@ cleanup_container() {
 }
 trap cleanup_container INT TERM HUP EXIT
 
-$docker_cmd run $docker_run_args --rm \
+docker_cpuset_args=
+if [ -n "$bench_cpuset_cpus" ]; then
+	docker_cpuset_args="--cpuset-cpus $bench_cpuset_cpus"
+fi
+
+$docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	--cidfile "$docker_cidfile" \
 	--label org.cachetag.benchmark=1 \
 	--label "org.cachetag.benchmark.matrix=$bench_matrix" \
@@ -748,7 +803,14 @@ $docker_cmd run $docker_run_args --rm \
 		-e "BENCH_CACHE_TAG_SWEEP_BATCH_YIELD=$bench_cache_tag_sweep_batch_yield" \
 		-e "BENCH_PURGEMAP_EXPECT_REBUILD=$bench_purgemap_expect_rebuild" \
 	-e "BENCH_SHUTDOWN_DRAIN_SECONDS=$bench_shutdown_drain_seconds" \
-	-e "BENCH_VINYL_THREADS=$bench_vinyl_threads" \
+	-e "BENCH_VINYL_THREAD_POOL_MAX=$bench_vinyl_thread_pool_max" \
+	-e "BENCH_VINYL_THREAD_POOLS=$bench_vinyl_thread_pools" \
+	-e "BENCH_CPUSET_CPUS=$bench_cpuset_cpus" \
+	-e "BENCH_DRIVER_CPUSET_CPUS=$bench_driver_cpuset_cpus" \
+	-e "BENCH_BACKEND_CPUSET_CPUS=$bench_backend_cpuset_cpus" \
+	-e "BENCH_DRIVER_HEADROOM_REQUIRED=$bench_driver_headroom_required" \
+	-e "BENCH_DRIVER_HEADROOM_TARGET_RPS=$bench_driver_headroom_target_rps" \
+	-e "BENCH_DRIVER_HEADROOM_PROVEN_RPS=$bench_driver_headroom_proven_rps" \
 	-e "CHURN_CYCLES=$churn_cycles" \
 	-e "RUNS=$runs" \
 	-e "BENCH_WORKLOAD_FILTER=$bench_workload_filter" \
@@ -942,6 +1004,12 @@ go build -o /work/cachetag-benchmark-backend \
 	/cachetag-host/benchmarks/http_backend.go
 driver_command=/work/cachetag-http-workload-driver
 backend_command=/work/cachetag-benchmark-backend
+if [ -n "${BENCH_DRIVER_CPUSET_CPUS}" ]; then
+	driver_command="taskset -c ${BENCH_DRIVER_CPUSET_CPUS} ${driver_command}"
+fi
+if [ -n "${BENCH_BACKEND_CPUSET_CPUS}" ]; then
+	backend_command="taskset -c ${BENCH_BACKEND_CPUSET_CPUS} ${backend_command}"
+fi
 
 if [ "${RUN_XKEY}" = 1 ]; then
 	rm -rf /results/xkey-build
@@ -949,12 +1017,12 @@ if [ "${RUN_XKEY}" = 1 ]; then
 	cd /results/xkey-build
 	# Vinyl renamed cache/cache_vinyld.h to cache/cache_int.h upstream
 	# (6d36364cc1); accept either so the shim works on 9.0.1 and trunk.
-	printf '%s\n' \
-		'#if defined(__has_include) && __has_include(<cache/cache_int.h>)' \
-		'#  include <cache/cache_int.h>' \
-		'#else' \
-		'#  include <cache/cache_vinyld.h>' \
-		'#endif' > cache/cache_varnishd.h
+	printf "%s\n" \
+		"#if defined(__has_include) && __has_include(<cache/cache_int.h>)" \
+		"#  include <cache/cache_int.h>" \
+		"#else" \
+		"#  include <cache/cache_vinyld.h>" \
+		"#endif" > cache/cache_varnishd.h
 	python3 /vinyl-src/lib/libvcc/vmodtool.py --strict --boilerplate \
 		-o vcc_xkey_if /xkey-src/src/vmod_xkey.vcc
 	python3 /vinyl-src/lib/libvsc/vsctool.py -c /xkey-src/src/xkey.vsc
@@ -1003,7 +1071,8 @@ python3 /cachetag-host/benchmarks/generate_cachetag_benchmark_vtc.py \
 	--storage "$BENCH_STORAGE" \
 	--eviction-storage "$BENCH_EVICTION_STORAGE" \
 	--cold-residency-storage "$BENCH_COLD_RESIDENCY_STORAGE" \
-	--vinyl-threads "$BENCH_VINYL_THREADS" \
+	--vinyl-thread-pool-max "$BENCH_VINYL_THREAD_POOL_MAX" \
+	--vinyl-thread-pools "$BENCH_VINYL_THREAD_POOLS" \
 	--driver-command "$driver_command" \
 	--backend-command "$backend_command" \
 	--backend-body-bytes "$BENCH_BACKEND_BODY_BYTES" \
@@ -1129,7 +1198,15 @@ python3 /cachetag-host/benchmarks/generate_cachetag_benchmark_vtc.py \
 	printf "bench_cache_tag_sweep_batch_hold=%s\n" "$BENCH_CACHE_TAG_SWEEP_BATCH_HOLD"
 	printf "bench_cache_tag_sweep_batch_yield=%s\n" "$BENCH_CACHE_TAG_SWEEP_BATCH_YIELD"
 	printf "bench_purgemap_expect_rebuild=%s\n" "$BENCH_PURGEMAP_EXPECT_REBUILD"
-	printf "bench_vinyl_threads=%s\n" "$BENCH_VINYL_THREADS"
+	printf "bench_vinyl_thread_pool_max=%s\n" "$BENCH_VINYL_THREAD_POOL_MAX"
+	printf "bench_vinyl_thread_pools=%s\n" "$BENCH_VINYL_THREAD_POOLS"
+	printf "bench_vinyl_configured_worker_ceiling=%s\n" "$((BENCH_VINYL_THREAD_POOL_MAX * BENCH_VINYL_THREAD_POOLS))"
+	printf "bench_cpuset_cpus=%s\n" "$BENCH_CPUSET_CPUS"
+	printf "bench_driver_cpuset_cpus=%s\n" "$BENCH_DRIVER_CPUSET_CPUS"
+	printf "bench_backend_cpuset_cpus=%s\n" "$BENCH_BACKEND_CPUSET_CPUS"
+	printf "bench_driver_headroom_required=%s\n" "$BENCH_DRIVER_HEADROOM_REQUIRED"
+	printf "bench_driver_headroom_target_rps=%s\n" "$BENCH_DRIVER_HEADROOM_TARGET_RPS"
+	printf "bench_driver_headroom_proven_rps=%s\n" "$BENCH_DRIVER_HEADROOM_PROVEN_RPS"
 	printf "churn_cycles=%s\n" "$CHURN_CYCLES"
 	printf "runs=%s\n" "$RUNS"
 	printf "bench_workload_filter=%s\n" "$BENCH_WORKLOAD_FILTER"
@@ -1281,6 +1358,8 @@ for workload in /results/workloads/*.vtc; do
 	for run in $(seq 1 "$RUNS"); do
 		out="/results/${name}.run-${run}.log"
 		timing="/results/${name}.run-${run}.time"
+		rm -rf /results/phase-markers
+		mkdir -p /results/phase-markers
 		printf "benchmark %s run %s/%s\n" "$name" "$run" "$RUNS" | tee -a /results/summary.txt
 		if perf_record_enabled && should_perf_record_run; then
 			if ! command -v perf >/dev/null 2>&1; then
@@ -1291,7 +1370,8 @@ for workload in /results/workloads/*.vtc; do
 				printf "WARNING: perf record requested but perf is unavailable for %s run %s\n" \
 					"$name" "$run" | tee -a /results/summary.txt
 				python3 /cachetag-host/benchmarks/run_with_metrics.py \
-					--metrics "$timing" --perf "$PERF_MODE" -- \
+					--metrics "$timing" --phase-marker-dir /results/phase-markers \
+					--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
 					"$prefix/bin/vinyltest" -t "$VTC_TIMEOUT" \
 					-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
 			else
@@ -1317,7 +1397,8 @@ for workload in /results/workloads/*.vtc; do
 				case "$BENCH_PERF_RECORD_PHASE" in
 					command)
 						python3 /cachetag-host/benchmarks/run_with_metrics.py \
-							--metrics "$timing" --perf "$PERF_MODE" -- \
+							--metrics "$timing" --phase-marker-dir /results/phase-markers \
+							--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
 							perf record -F "$BENCH_PERF_FREQ" -g $perf_scope \
 							-o "$perf_data" -- \
 							"$prefix/bin/vinyltest" -t "$VTC_TIMEOUT" \
@@ -1325,11 +1406,12 @@ for workload in /results/workloads/*.vtc; do
 						;;
 					load|warm|concurrent)
 						python3 /cachetag-host/benchmarks/run_with_metrics.py \
-							--metrics "$timing" --perf "$PERF_MODE" -- \
+							--metrics "$timing" --phase-marker-dir /results/phase-markers \
+							--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
 							python3 /cachetag-host/benchmarks/run_with_phase_perf.py \
 							--perf-data "$perf_data" \
 							--marker-dir /results/phase-markers \
-							--marker-prefix "${name}.run-${run}" \
+							--marker-prefix "$name" \
 							--phase "$BENCH_PERF_RECORD_PHASE" \
 							--freq "$BENCH_PERF_FREQ" \
 							--scope "$BENCH_PERF_RECORD_SCOPE" \
@@ -1347,7 +1429,8 @@ for workload in /results/workloads/*.vtc; do
 			fi
 		else
 			python3 /cachetag-host/benchmarks/run_with_metrics.py \
-				--metrics "$timing" --perf "$PERF_MODE" -- \
+				--metrics "$timing" --phase-marker-dir /results/phase-markers \
+				--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
 				"$prefix/bin/vinyltest" -t "$VTC_TIMEOUT" \
 				-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
 		fi

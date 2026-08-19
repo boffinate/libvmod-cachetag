@@ -148,10 +148,35 @@ func newLatencyRecorder(limit int) *latencyRecorder {
 	return &latencyRecorder{limit: limit}
 }
 
+// workerLatencyLimit bounds the amount of sample storage allocated to each
+// worker while preserving the recorder's global limit when the samples are
+// merged after the phase.
+func workerLatencyLimit(limit int, workers int) int {
+	if limit <= 0 || workers <= 0 {
+		return 0
+	}
+	return (limit + workers - 1) / workers
+}
+
 func (r *latencyRecorder) add(d time.Duration) {
 	r.mu.Lock()
 	if len(r.samples) < r.limit {
 		r.samples = append(r.samples, d.Seconds())
+	}
+	r.mu.Unlock()
+}
+
+func (r *latencyRecorder) mergeSamples(samples []float64) {
+	if len(samples) == 0 {
+		return
+	}
+	r.mu.Lock()
+	remaining := r.limit - len(r.samples)
+	if remaining > 0 {
+		if remaining > len(samples) {
+			remaining = len(samples)
+		}
+		r.samples = append(r.samples, samples[:remaining]...)
 	}
 	r.mu.Unlock()
 }
@@ -1408,24 +1433,50 @@ func waitForObjectCount(client *http.Client, baseURL string, cfg config, target 
 }
 
 func loadObjectsDetailed(client *http.Client, baseURL string, cfg config, start int, objects int, recorder *latencyRecorder) (loadObjectsResult, error) {
-	jobs := make(chan int, cfg.clients*2)
+	workers := cfg.clients
+	if workers < 1 {
+		workers = 1
+	}
+	end := start + objects
+	workerResults := make([]loadObjectsResult, workers)
+	workerSamples := make([][]float64, workers)
+	if recorder != nil {
+		limit := workerLatencyLimit(recorder.limit, workers)
+		for worker := range workerSamples {
+			workerSamples[worker] = make([]float64, 0, limit)
+		}
+	}
 	var result loadObjectsResult
 	var firstErr error
 	var firstErrMu sync.Mutex
-	var stop atomic.Bool
+	stop := make(chan struct{})
+	var stopOnce sync.Once
 	var wg sync.WaitGroup
-	for worker := 0; worker < cfg.clients; worker++ {
+	for worker := 0; worker < workers; worker++ {
 		wg.Add(1)
-		go func() {
+		go func(worker int) {
 			defer wg.Done()
-			for obj := range jobs {
-				if stop.Load() {
-					continue
+			var local loadObjectsResult
+			var samples []float64
+			if recorder != nil {
+				samples = workerSamples[worker]
+			}
+			defer func() {
+				workerResults[worker] = local
+				if recorder != nil {
+					workerSamples[worker] = samples
+				}
+			}()
+			for obj := start + worker; obj < end; obj += workers {
+				select {
+				case <-stop:
+					return
+				default:
 				}
 				t0 := time.Now()
 				resp, err := objectRequest(client, baseURL, cfg, obj)
-				if recorder != nil {
-					recorder.add(time.Since(t0))
+				if recorder != nil && len(samples) < cap(samples) {
+					samples = append(samples, time.Since(t0).Seconds())
 				}
 				if err != nil {
 					firstErrMu.Lock()
@@ -1433,25 +1484,26 @@ func loadObjectsDetailed(client *http.Client, baseURL string, cfg config, start 
 						firstErr = err
 					}
 					firstErrMu.Unlock()
-					stop.Store(true)
-					continue
+					stopOnce.Do(func() { close(stop) })
+					return
 				}
-				atomic.AddInt64(&result.requests, 1)
-				atomic.AddInt64(&result.loadSuccesses, 1)
+				local.requests++
+				local.loadSuccesses++
 				if resp.cacheState != "hit" {
-					atomic.AddInt64(&result.backendObjects, 1)
+					local.backendObjects++
 				}
 			}
-		}()
+		}(worker)
 	}
-	for obj := start; obj < start+objects; obj++ {
-		if stop.Load() {
-			break
-		}
-		jobs <- obj
-	}
-	close(jobs)
 	wg.Wait()
+	for worker := range workerResults {
+		result.requests += workerResults[worker].requests
+		result.loadSuccesses += workerResults[worker].loadSuccesses
+		result.backendObjects += workerResults[worker].backendObjects
+		if recorder != nil {
+			recorder.mergeSamples(workerSamples[worker])
+		}
+	}
 	firstErrMu.Lock()
 	err := firstErr
 	firstErrMu.Unlock()
@@ -2125,52 +2177,82 @@ func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics
 	}
 	deadline := time.Now().Add(time.Duration(cfg.warmSeconds) * time.Second)
 	latencies := newLatencyRecorder(200000)
-	var requests, hits, misses, errors int64
-	var next atomic.Int64
+	type warmWorkerResult struct {
+		samples  []float64
+		requests int64
+		hits     int64
+		misses   int64
+		errors   int64
+	}
+	workerResults := make([]warmWorkerResult, cfg.clients)
+	perWorkerLimit := workerLatencyLimit(latencies.limit, cfg.clients)
 	var firstErr error
 	var firstErrMu sync.Mutex
-	var stop atomic.Bool
+	stop := make(chan struct{})
+	var stopOnce sync.Once
 	var wg sync.WaitGroup
 
-	recordErr := func(err error) {
+	recordErr := func(local *warmWorkerResult, err error) {
 		if err == nil {
 			return
 		}
-		atomic.AddInt64(&errors, 1)
+		local.errors++
 		firstErrMu.Lock()
 		if firstErr == nil {
 			firstErr = err
 		}
 		firstErrMu.Unlock()
-		stop.Store(true)
+		stopOnce.Do(func() { close(stop) })
 	}
 
 	for worker := 0; worker < cfg.clients; worker++ {
 		wg.Add(1)
-		go func() {
+		go func(workerID int) {
 			defer wg.Done()
-			for time.Now().Before(deadline) && !stop.Load() {
-				obj := int(next.Add(1)-1) % cfg.objects
+			local := warmWorkerResult{samples: make([]float64, 0, perWorkerLimit)}
+			defer func() { workerResults[workerID] = local }()
+			obj := workerID % cfg.objects
+			for time.Now().Before(deadline) {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				// A worker-local stride avoids an atomic request allocator on every
+				// warm request while retaining deterministic coverage of all objects.
 				t0 := time.Now()
 				resp, err := objectRequest(client, baseURL, cfg, obj)
-				latencies.add(time.Since(t0))
-				if err != nil {
-					recordErr(err)
-					continue
+				if len(local.samples) < cap(local.samples) {
+					local.samples = append(local.samples, time.Since(t0).Seconds())
 				}
-				atomic.AddInt64(&requests, 1)
+				if err != nil {
+					recordErr(&local, err)
+					return
+				}
+				local.requests++
 				if resp.cacheState == "hit" {
-					atomic.AddInt64(&hits, 1)
+					local.hits++
 				} else {
-					atomic.AddInt64(&misses, 1)
+					local.misses++
 					if cfg.warmValidateHit {
-						recordErr(fmt.Errorf("warm request returned %q for object %d", resp.cacheState, obj))
+						recordErr(&local, fmt.Errorf("warm request returned %q for object %d", resp.cacheState, obj))
+						return
 					}
 				}
+				obj = (obj + cfg.clients) % cfg.objects
 			}
-		}()
+		}(worker)
 	}
 	wg.Wait()
+	var requests, hits, misses, errors int64
+	for worker := range workerResults {
+		local := &workerResults[worker]
+		requests += local.requests
+		hits += local.hits
+		misses += local.misses
+		errors += local.errors
+		latencies.mergeSamples(local.samples)
+	}
 	markerErr := writePhaseMarker(cfg, "warm", "end")
 
 	seconds := time.Since(start).Seconds()

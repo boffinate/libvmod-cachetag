@@ -1,0 +1,19 @@
+{
+  "hardware": "test-host",
+  "build": ["vinyl-a", "cachetag-a", "slash-a", "", "test-image"],
+  "workload": "cachetag_low_fanout",
+  "phase": "load",
+  "worker_cap": 16,
+  "thread_pools": 2,
+  "match_identity": [
+    ["cachetag_configure_args", "--enable-demo-diagnostics"],
+    ["bench_set_interning", "1"],
+    ["objects", "1000000"],
+    ["bench_storage_kind", "default"],
+    ["bench_storage", "4g"]
+  ],
+  "points": {
+    "24": [100000, 100400, 99600],
+    "48": [85000, 85400, 84600]
+  }
+}

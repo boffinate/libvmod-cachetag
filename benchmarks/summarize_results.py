@@ -15,6 +15,9 @@ from typing import Any, Iterable
 
 LOW_CPU_BUSY_PERCENT = 25.0
 LOW_MEMORY_DROP_PERCENT = 5.0
+SWEEP_MIN_REPETITIONS = 2
+SWEEP_MIN_SIGNIFICANT_CHANGE_PERCENT = 2.0
+SWEEP_NOISE_MULTIPLIER = 3.0
 SAMPLER_MIN_CADENCE_RATIO = 0.80
 SAMPLER_MAX_GAP_INTERVALS = 5.0
 SAMPLER_MAX_GAP_FLOOR_SECONDS = 1.0
@@ -1267,6 +1270,7 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
         component_seen = historical_metrics.get("component_bytes") is not None
         index_non_key_bytes = historical_metrics.get("index_non_key_bytes")
         phase6_cycles = phase6_cycle_rows(result_dir, workload, run, driver_values)
+        phase_samples = phase_sample_classifications(time_path)
         row: dict[str, Any] = {
             "workload": workload,
             "run": run,
@@ -1296,6 +1300,14 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
                 )
                 if valid != 1
             ),
+            # These are signatures, not a capacity judgement. A .time file
+            # spans a benchmark workload, so phase-specific resource capture
+            # is unavailable in historical artifacts; phase classifications
+            # below retain that scope explicitly instead of borrowing another
+            # workload's conclusion.
+            "resource_signature": classify_resource_signature([time_values]),
+            "attribution": classify_attribution([time_values]),
+            "phase_sample_classifications": phase_samples,
             "stats_file": stats_file,
             "phase6_cycles": phase6_cycles,
             "phase6_warnings": phase6_interpretation_warnings(workload, run, phase6_cycles),
@@ -1307,6 +1319,11 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
             "live_objects": live_objects,
             "live_edges": mem_edges,
             "lru_nuked": stat_suffix(stats, "n_lru_nuked"),
+            "server_threads": stats.get("MAIN.threads"),
+            "server_thread_queue_len": stats.get("MAIN.thread_queue_len"),
+            "server_threads_limited": stats.get("MAIN.threads_limited"),
+            "server_threads_created": stats.get("MAIN.threads_created"),
+            "server_threads_failed": stats.get("MAIN.threads_failed"),
             "buddy_c_req": buddy_counter(stats, "c_req"),
             "buddy_c_fail": buddy_counter(stats, "c_fail"),
             "buddy_c_bytes": buddy_counter(stats, "c_bytes"),
@@ -2148,6 +2165,7 @@ def result_data(result_dir: Path) -> dict[str, Any]:
     ]
     valid_count = sum(1 for row in rows if row.get("overall_valid") == 1)
     invalid_count = len(rows) - valid_count
+    classifications = workload_phase_classifications(rows)
     return {
         "result_id": result_id,
         "matrix": matrix,
@@ -2188,10 +2206,14 @@ def result_data(result_dir: Path) -> dict[str, Any]:
             "write_await_ms_max": max(disk_write_await_max) if disk_write_await_max else None,
             "flush_await_ms_max": max(disk_flush_await_max) if disk_flush_await_max else None,
         },
-        "likely_limit": classify_limit(judged_times),
+        # A result-level label would conflate unrelated workloads and phases.
+        # The only matrix roll-up is deliberately non-diagnostic.
+        "classification_rollup": "mixed",
         "driver_errors": driver_errors,
         "workloads": rows,
         "workload_summaries": aggregate_workload_rows(rows),
+        "workload_phase_classifications": classifications,
+        "sweep_configuration": sweep_configuration(result_dir),
     }
 
 
@@ -2223,7 +2245,8 @@ def render_cross_result_audit(results: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def classify_limit(times: list[dict[str, str]]) -> str:
+def classify_resource_signature(times: list[dict[str, str]]) -> str:
+    """Return the strongest observed host-resource signature, not a limit claim."""
     max_cpu = max((as_float(t, "system_cpu_busy_max_percent") or 0.0 for t in times), default=0.0)
     max_core = max((as_float(t, "system_cpu_any_core_busy_max_percent") or 0.0 for t in times), default=0.0)
     max_iowait = max((as_float(t, "system_cpu_iowait_max_percent") or 0.0 for t in times), default=0.0)
@@ -2234,14 +2257,382 @@ def classify_limit(times: list[dict[str, str]]) -> str:
     )
     swap = any((as_int(t, "swap_activity") or 0) > 0 for t in times)
     if swap or (min_mem is not None and min_mem < 10.0):
-        return "memory limited"
+        return "memory"
     if max_iowait >= 20.0 or max_disk_util >= 80.0:
-        return "IO limited"
+        return "IO"
+    # A serial constraint remains evidence even when other work makes the
+    # aggregate CPU figure high. The old classifier suppressed this case.
+    if max_core >= 90.0:
+        return "single-core"
     if max_cpu >= 85.0:
-        return "CPU limited"
-    if max_core >= 90.0 and max_cpu < 70.0:
-        return "single-core limited"
-    return "harness/under-saturated"
+        return "aggregate CPU"
+    return "none observed"
+
+
+def classify_attribution(times: list[dict[str, str]]) -> str:
+    """Classify process CPU evidence conservatively from sampled maxima.
+
+    The maxima are not coincident and cannot prove causality. We report one
+    component only when it is materially higher than every other tracked
+    component; otherwise this is explicitly mixed or unresolved.
+    """
+    labels = {
+        "vinyld": "system_tracked_cache_process_cpu_max_percent",
+        "driver": "system_tracked_driver_cpu_max_percent",
+        "backend": "system_tracked_backend_cpu_max_percent",
+    }
+    maxima = {
+        label: max((as_float(time, key) or 0.0 for time in times), default=0.0)
+        for label, key in labels.items()
+    }
+    observed = {label: value for label, value in maxima.items() if value > 0.0}
+    if not observed:
+        return "unresolved"
+    highest_label, highest = max(observed.items(), key=lambda item: item[1])
+    others = [value for label, value in observed.items() if label != highest_label]
+    # A one-core sample is too weak to assign a system knee, and maxima from
+    # competing processes within 25% are co-located mixed evidence.
+    if highest < 100.0:
+        return "unresolved"
+    if others and highest < max(others) * 1.25:
+        return "mixed"
+    return highest_label
+
+
+def phase_sample_classifications(time_path: Path) -> dict[str, dict[str, Any]]:
+    """Classify only samples that the driver marked as belonging to a phase."""
+    sample_path = Path(str(time_path) + ".samples.jsonl")
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    try:
+        lines = sample_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        return {}
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            sample = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        phases = str(sample.get("phase_active", "")).split(",")
+        for phase in (phase.strip() for phase in phases):
+            if phase:
+                grouped.setdefault(phase, []).append(sample)
+
+    classifications: dict[str, dict[str, Any]] = {}
+    for phase, samples in grouped.items():
+        def maximum(key: str) -> float | None:
+            values = [float(sample[key]) for sample in samples if sample.get(key) is not None]
+            return max(values) if values else None
+
+        signature_values = {
+            "system_cpu_busy_max_percent": maximum("system_cpu_busy_percent"),
+            "system_cpu_any_core_busy_max_percent": maximum(
+                "system_cpu_any_core_busy_percent"
+            ),
+            "system_cpu_iowait_max_percent": maximum("system_cpu_iowait_percent"),
+            "system_disk_util_percent_max": maximum("system_disk_util_percent"),
+            "system_memavailable_min_percent": None,
+            "swap_activity": 0,
+            "system_tracked_cache_process_cpu_max_percent": maximum(
+                "tracked_cache_process_cpu_percent"
+            ),
+            "system_tracked_driver_cpu_max_percent": maximum("tracked_driver_cpu_percent"),
+            "system_tracked_backend_cpu_max_percent": maximum("tracked_backend_cpu_percent"),
+        }
+        mem_percentages = []
+        for sample in samples:
+            available = sample.get("system_meminfo_memavailable_kb")
+            total = sample.get("system_meminfo_memtotal_kb")
+            if available is not None and total:
+                mem_percentages.append(100.0 * float(available) / float(total))
+        if mem_percentages:
+            signature_values["system_memavailable_min_percent"] = min(mem_percentages)
+        signature_values = {
+            key: value for key, value in signature_values.items() if value is not None
+        }
+        classifications[phase] = {
+            "sample_count": len(samples),
+            "resource_signature": classify_resource_signature([signature_values]),
+            "attribution": classify_attribution([signature_values]),
+        }
+    return classifications
+
+
+def phase_rates(row: dict[str, Any]) -> list[tuple[str, float]]:
+    """Extract independent throughput measurements for marked workload phases."""
+    fields = (
+        ("load", "driver_load_requests_per_second"),
+        ("warm", "driver_warm_requests_per_second"),
+        ("phase4_pre", "driver_phase4_pre_requests_per_second"),
+        ("phase4_sweep", "driver_phase4_sweep_requests_per_second"),
+        ("phase4_post", "driver_phase4_post_requests_per_second"),
+    )
+    return [
+        (phase, float(row[field]))
+        for phase, field in fields
+        if row.get(field) is not None and float(row[field]) > 0.0
+    ]
+
+
+def one_value_or_mixed(values: Iterable[str]) -> str:
+    distinct = sorted(set(values))
+    return distinct[0] if len(distinct) == 1 else "mixed"
+
+
+def workload_phase_classifications(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep workload and marked-phase classification scopes independent."""
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        if row.get("overall_valid") != 1:
+            continue
+        for phase, rps in phase_rates(row):
+            item = dict(row)
+            item["requests_per_second"] = rps
+            phase_evidence = row.get("phase_sample_classifications", {}).get(phase, {})
+            item["phase_resource_signature"] = phase_evidence.get(
+                "resource_signature", "none observed"
+            )
+            item["phase_attribution"] = phase_evidence.get("attribution", "unresolved")
+            item["phase_sample_count"] = phase_evidence.get("sample_count", 0)
+            grouped.setdefault((str(row["workload"]), phase), []).append(item)
+    classifications: list[dict[str, Any]] = []
+    for (workload, phase), items in sorted(grouped.items()):
+        classifications.append(
+            {
+                "workload": workload,
+                "phase": phase,
+                # A result directory has no client sweep. It must not infer
+                # under-saturation merely because a host threshold was quiet.
+                "load_state": "inconclusive",
+                "resource_signature": one_value_or_mixed(
+                    str(item["phase_resource_signature"]) for item in items
+                ),
+                "attribution": one_value_or_mixed(
+                    str(item["phase_attribution"]) for item in items
+                ),
+                "phase_samples": sum(int(item["phase_sample_count"]) for item in items),
+                "valid_runs": len(items),
+                "requests_per_second_median": median(
+                    [float(item["requests_per_second"]) for item in items]
+                ),
+                # Do not discard repetitions here. A normal RUNS=3 artifact
+                # is one client point with three independent observations,
+                # not one observation whose median happened to be retained.
+                "run_requests_per_second": [
+                    {
+                        "run": item.get("run"),
+                        "requests_per_second": float(item["requests_per_second"]),
+                    }
+                    for item in sorted(items, key=lambda item: int(item.get("run", 0)))
+                ],
+            }
+        )
+    return classifications
+
+
+def command_env_value(remote: dict[str, str], key: str) -> str | None:
+    for token in remote.get("command_env", "").split():
+        if token.startswith(key + "="):
+            return token.split("=", 1)[1]
+    return None
+
+
+def sweep_configuration(result_dir: Path) -> dict[str, Any]:
+    metadata = parse_kv(result_dir / "metadata.env")
+    remote = parse_kv(result_dir / "remote-run.env")
+    provenance = parse_kv(result_dir / "build-provenance.env")
+    client_count = (
+        metadata.get("bench_clients")
+        or remote.get("bench_clients_auto")
+        or command_env_value(remote, "BENCH_CLIENTS")
+    )
+    worker_cap = (
+        metadata.get("bench_vinyl_thread_pool_max")
+        or remote.get("bench_vinyl_thread_pool_max")
+        or command_env_value(remote, "BENCH_VINYL_THREAD_POOL_MAX")
+    )
+    thread_pools = (
+        metadata.get("bench_vinyl_thread_pools")
+        or remote.get("bench_vinyl_thread_pools")
+        or command_env_value(remote, "BENCH_VINYL_THREAD_POOLS")
+    )
+    env_names = {
+        "cachetag_configure_args": "CACHE_TAG_CONFIGURE_ARGS",
+        "bench_set_interning": "BENCH_SET_INTERNING",
+        "objects": "OBJECTS",
+        "tags_per_object": "TAGS_PER_OBJECT",
+        "bench_profile": "BENCH_PROFILE",
+        "bench_buckets": "BENCH_BUCKETS",
+        "bench_tag_universe": "BENCH_TAG_UNIVERSE",
+        "bench_tag_length_class": "BENCH_TAG_LENGTH_CLASS",
+        "bench_storage": "BENCH_STORAGE",
+        "bench_storage_kind": "BENCH_STORAGE_KIND",
+        "bench_fellow_size": "BENCH_FELLOW_SIZE",
+        "bench_fellow_segment_size": "BENCH_FELLOW_SEGMENT_SIZE",
+        "bench_fellow_block_size": "BENCH_FELLOW_BLOCK_SIZE",
+        "bench_buddy_size": "BENCH_BUDDY_SIZE",
+        "bench_backend_body_bytes": "BENCH_BACKEND_BODY_BYTES",
+        "bench_http_timeout": "BENCH_HTTP_TIMEOUT",
+        "bench_warm_seconds": "BENCH_WARM_SECONDS",
+        "cache_tag_bench_ttl": "CACHE_TAG_BENCH_TTL",
+        "bench_cache_tag_persist": "BENCH_CACHE_TAG_PERSIST",
+        "bench_cache_tag_wal_fsync": "BENCH_CACHE_TAG_WAL_FSYNC",
+        "bench_cpuset_cpus": "BENCH_CPUSET_CPUS",
+        "bench_driver_cpuset_cpus": "BENCH_DRIVER_CPUSET_CPUS",
+        "bench_backend_cpuset_cpus": "BENCH_BACKEND_CPUSET_CPUS",
+    }
+    match_identity = tuple(
+        (key, metadata.get(key, command_env_value(remote, env_name) or ""))
+        for key, env_name in env_names.items()
+    )
+    revisions = {
+        key: metadata.get(key, "")
+        for key in ("vinyl_revision", "cachetag_revision", "slash_revision", "xkey_revision")
+    }
+    build_hashes = {
+        key: value
+        for key, value in (
+            ("vinyl_build_input_sha256", provenance.get("vinyl_build_input_sha256", "")),
+            ("cachetag_build_input_sha256", provenance.get("cachetag_build_input_sha256", "")),
+            ("slash_build_input_sha256", provenance.get("slash_build_input_sha256", "")),
+        )
+        if value and value != "none"
+    }
+    return {
+        "client_count": as_int({"value": client_count or ""}, "value"),
+        "worker_cap": as_int({"value": worker_cap or ""}, "value"),
+        "thread_pools": as_int({"value": thread_pools or ""}, "value"),
+        # Build-input hashes are authoritative for dirty source trees, where
+        # the revision fields are intentionally empty. Keep both in the key:
+        # a changed hash must never merge into a same-revision cohort.
+        "build": tuple(
+            (key, value)
+            for key, value in (
+                *revisions.items(),
+                *build_hashes.items(),
+                ("image", metadata.get("image", "")),
+            )
+        ),
+        "match_identity": match_identity,
+        # A dirty source tree is identified by its captured build-input hash.
+        # Reject only when neither revision nor authoritative hash exists.
+        "cachetag_source_identity_recorded": bool(
+            revisions["cachetag_revision"] or build_hashes.get("cachetag_build_input_sha256")
+        ),
+    }
+
+
+def relative_noise_percent(values: list[float]) -> float | None:
+    average = sum(values) / len(values)
+    if average <= 0.0 or len(values) < 2:
+        return None
+    variance = sum((value - average) ** 2 for value in values) / (len(values) - 1)
+    return math.sqrt(variance) / average * 100.0
+
+
+def analyze_campaign_sweeps(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Find repeated, matched client-sweep knees without assigning a cause.
+
+    A single point can describe a resource signature but cannot prove a knee.
+    This analyser therefore requires same-code repeated measurements at every
+    client count and rejects changed worker settings rather than treating a
+    two-variable experiment as a client sweep.
+    """
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for result in results:
+        config = result.get("sweep_configuration") or {}
+        for classification in result.get("workload_phase_classifications", []):
+            key = (
+                result.get("hardware"),
+                tuple(config.get("build", ())),
+                tuple(config.get("match_identity", ())),
+                classification["workload"],
+                classification["phase"],
+            )
+            for repetition in classification.get("run_requests_per_second", []):
+                grouped.setdefault(key, []).append(
+                    {
+                        "path": result.get("path"),
+                        "run": repetition.get("run"),
+                        "client_count": config.get("client_count"),
+                        "worker_cap": config.get("worker_cap"),
+                        "thread_pools": config.get("thread_pools"),
+                        "cachetag_source_identity_recorded": config.get("cachetag_source_identity_recorded"),
+                        "requests_per_second": repetition["requests_per_second"],
+                    }
+                )
+    analyses: list[dict[str, Any]] = []
+    for (hardware, build, match_identity, workload, phase), observations in sorted(grouped.items(), key=lambda item: str(item[0])):
+        errors: list[str] = []
+        worker_settings = {(item["worker_cap"], item["thread_pools"]) for item in observations}
+        if not all(item.get("cachetag_source_identity_recorded") for item in observations):
+            errors.append("cachetag_source_identity_missing")
+        if None in {item["client_count"] for item in observations}:
+            errors.append("client_count_missing")
+        if any(cap is None or pools is None for cap, pools in worker_settings):
+            errors.append("worker_configuration_missing")
+        if len(worker_settings) != 1:
+            errors.append("worker_configuration_changed")
+        points: list[dict[str, Any]] = []
+        for client_count in sorted({item["client_count"] for item in observations if item["client_count"] is not None}):
+            values = [
+                float(item["requests_per_second"])
+                for item in observations
+                if item["client_count"] == client_count
+            ]
+            if len(values) < SWEEP_MIN_REPETITIONS:
+                errors.append(f"insufficient_repetitions:c{client_count}")
+            points.append(
+                {
+                    "client_count": client_count,
+                    "repetitions": len(values),
+                    "requests_per_second_median": median(values),
+                    "noise_percent": relative_noise_percent(values),
+                }
+            )
+        if len(points) < 2:
+            errors.append("insufficient_client_points")
+        noise_values = [
+            float(point["noise_percent"])
+            for point in points
+            if point["noise_percent"] is not None
+        ]
+        noise = max(noise_values, default=math.inf)
+        threshold = max(SWEEP_MIN_SIGNIFICANT_CHANGE_PERCENT, noise * SWEEP_NOISE_MULTIPLIER)
+        state = "inconclusive"
+        if not errors:
+            peak_index = max(range(len(points)), key=lambda index: points[index]["requests_per_second_median"])
+            peak = points[peak_index]["requests_per_second_median"]
+            has_significant_rollover = any(
+                (peak - point["requests_per_second_median"]) / peak * 100.0 > threshold
+                for point in points[peak_index + 1:]
+            )
+            if has_significant_rollover:
+                state = "rollover"
+            elif all(
+                abs(points[index]["requests_per_second_median"] - points[index - 1]["requests_per_second_median"])
+                / points[index - 1]["requests_per_second_median"] * 100.0 <= threshold
+                for index in range(1, len(points))
+            ):
+                state = "plateau"
+            elif points[-1]["requests_per_second_median"] > points[0]["requests_per_second_median"]:
+                state = "rising"
+        analyses.append(
+            {
+                "hardware": hardware,
+                "build": build,
+                "match_identity": match_identity,
+                "workload": workload,
+                "phase": phase,
+                "load_state": state,
+                "validation": "ok" if not errors else "failed",
+                "validation_errors": sorted(set(errors)),
+                "significance_threshold_percent": threshold if math.isfinite(threshold) else None,
+                "points": points,
+            }
+        )
+    return analyses
 
 
 def summarize_result(result_dir: Path) -> tuple[str, str]:
@@ -2271,7 +2662,7 @@ def summarize_result(result_dir: Path) -> tuple[str, str]:
             f"Swap: {'yes' if data['swap']['activity'] else 'no'}",
             f"Disk sectors delta: read={disk['read_sectors_delta']} write={disk['write_sectors_delta']}",
             f"Disk IO sampled max: read={fmt_rate(disk['read_bytes_per_second_max'])} write={fmt_rate(disk['write_bytes_per_second_max'])} flush={fmt_float(disk['flush_ios_per_second_max'], '/s')} util={fmt_float(disk['util_percent_max'], '%')} write_await={fmt_float(disk['write_await_ms_max'], 'ms')} flush_await={fmt_float(disk['flush_await_ms_max'], 'ms')}",
-            f"Likely limit: {data['likely_limit']}",
+            "Classification roll-up: mixed (see per-workload/per-phase classifications)",
         ]
     )
     if (
@@ -2297,6 +2688,17 @@ def summarize_result(result_dir: Path) -> tuple[str, str]:
     if data["driver_errors"]:
         rendered = [f"{row['file']}: {row['error']}" for row in data["driver_errors"][:10]]
         lines.append("Driver errors: " + " | ".join(rendered))
+    if data["workload_phase_classifications"]:
+        lines.append("Per-workload/per-phase classification:")
+        for classification in data["workload_phase_classifications"]:
+            lines.append(
+                "  "
+                f"{classification['workload']}/{classification['phase']}: "
+                f"load_state={classification['load_state']} "
+                f"resource_signature={classification['resource_signature']} "
+                f"attribution={classification['attribution']} "
+                f"rps={fmt_float(classification['requests_per_second_median'])}"
+            )
     workload_summaries = data["workload_summaries"]
     if workload_summaries:
         lines.append("Per-workload memory and throughput:")
@@ -2810,6 +3212,7 @@ def main() -> int:
                         "hardware_groups": groups,
                         "results": results,
                         "memory_slope_audit": audit_memory_slopes(results),
+                        "campaign_sweep_analysis": analyze_campaign_sweeps(results),
                     },
                     indent=2,
                     sort_keys=True,
@@ -2835,6 +3238,22 @@ def main() -> int:
         if audit_lines:
             print()
             print("\n".join(audit_lines))
+        sweep_analyses = analyze_campaign_sweeps(result_payloads)
+        if sweep_analyses:
+            print()
+            print("Campaign sweep analysis:")
+            for analysis in sweep_analyses:
+                points = ", ".join(
+                    f"c{point['client_count']}={fmt_float(point['requests_per_second_median'])}/s"
+                    for point in analysis["points"]
+                )
+                errors = ",".join(analysis["validation_errors"]) or "none"
+                print(
+                    "  "
+                    f"{analysis['workload']}/{analysis['phase']}: "
+                    f"load_state={analysis['load_state']} validation={analysis['validation']} "
+                    f"errors={errors}; {points}"
+                )
     finally:
         if tempdir is not None:
             tempdir.cleanup()

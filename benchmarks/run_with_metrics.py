@@ -721,11 +721,17 @@ class SystemSampler:
         sample_path: Path | None = None,
         detailed_memory_interval: float = 1.0,
         detailed_memory_timeout: float = 0.5,
+        phase_marker_dir: Path | None = None,
+        phase_marker_prefix: str = "",
     ) -> None:
         self.interval = interval
         self.sample_path = sample_path
         self.detailed_memory_interval = detailed_memory_interval
         self.detailed_memory_timeout = detailed_memory_timeout
+        self.phase_marker_dir = phase_marker_dir
+        self.phase_marker_prefix = phase_marker_prefix
+        self.seen_phase_markers: set[str] = set()
+        self.active_phases: set[str] = set()
         self.start_monotonic = 0.0
         self.stop_monotonic: float | None = None
         self.stop_event = threading.Event()
@@ -771,6 +777,7 @@ class SystemSampler:
         self.process_root_pid: int | None = None
         self.prev_thread_cpu: dict[tuple[int, int], ThreadCpuSample] | None = None
         self.prev_process_sample_monotonic: float | None = None
+        self.latest_tracked_cpu: dict[str, tuple[int, float, float]] = {}
         self.hot_threads: dict[tuple[int, int], tuple[float, ThreadCpuSample]] = {}
         self.hot_processes: dict[int, tuple[float, ThreadCpuSample]] = {}
         self.tracked_processes = {
@@ -838,6 +845,7 @@ class SystemSampler:
 
     def _sample(self) -> None:
         sample_started = time.monotonic()
+        interval_values: dict[str, float] = {}
         with self.lock:
             root_pid = self.process_root_pid
         curr_cpu = read_proc_stat()
@@ -847,10 +855,14 @@ class SystemSampler:
         mem = system_memory_snapshot()
         cgroup = cgroup_memory_snapshot()
         load = load_snapshot()
+        phase_events = self._read_phase_markers()
 
         with self.lock:
             if self.prev_cpu is not None and "cpu" in self.prev_cpu and "cpu" in curr_cpu:
                 busy, iowait, steal = cpu_percentages(self.prev_cpu["cpu"], curr_cpu["cpu"])
+                interval_values["system_cpu_busy_percent"] = busy
+                interval_values["system_cpu_iowait_percent"] = iowait
+                interval_values["system_cpu_steal_percent"] = steal
                 self.cpu_samples += 1
                 self.cpu_busy_sum += busy
                 self.cpu_busy_max = max(self.cpu_busy_max, busy)
@@ -865,15 +877,25 @@ class SystemSampler:
                     core_busy, _, _ = cpu_percentages(prev, curr_cpu[name])
                     any_core_busy = max(any_core_busy, core_busy)
                 self.cpu_any_core_busy_max = max(self.cpu_any_core_busy_max, any_core_busy)
+                interval_values["system_cpu_any_core_busy_percent"] = any_core_busy
             self.prev_cpu = curr_cpu
-            self._sample_disk_locked(curr_disk, sample_started)
+            for key, value in self._sample_disk_locked(curr_disk, sample_started).items():
+                interval_values[f"system_disk_{key}"] = value
             self._sample_process_cpu_locked(curr_threads, current_processes, sample_started)
             self._update_non_cpu_locked(mem, cgroup, load)
             self._drain_detailed_results_locked()
             monotonic_seconds = max(0.0, sample_started - self.start_monotonic)
             self.samples += 1
             self.sample_timestamps.append(monotonic_seconds)
-            row = self._sample_row_locked(current_processes, mem, cgroup, monotonic_seconds)
+            row = self._sample_row_locked(
+                current_processes,
+                curr_threads,
+                mem,
+                cgroup,
+                monotonic_seconds,
+                phase_events,
+                interval_values,
+            )
 
         if self.sample_path is not None:
             try:
@@ -945,7 +967,7 @@ class SystemSampler:
             if self.procs_blocked_max is None or blocked > self.procs_blocked_max:
                 self.procs_blocked_max = blocked
 
-    def _sample_disk_locked(self, curr_disk: dict[str, int], now: float) -> None:
+    def _sample_disk_locked(self, curr_disk: dict[str, int], now: float) -> dict[str, float]:
         elapsed = now - self.prev_disk_monotonic
         interval_metrics = disk_sample_metrics(self.prev_disk, curr_disk, elapsed)
         if interval_metrics:
@@ -955,6 +977,7 @@ class SystemSampler:
                 self.disk_metric_max[key] = max(self.disk_metric_max.get(key, 0.0), value)
         self.prev_disk = curr_disk
         self.prev_disk_monotonic = now
+        return interval_metrics
 
     def _sample_process_cpu_locked(
         self,
@@ -1000,6 +1023,14 @@ class SystemSampler:
                 if previous_process is None or percent > previous_process[0]:
                     self.hot_processes[pid] = (percent, sample)
         self._update_tracked_processes(current_processes, process_deltas, elapsed, now)
+        self.latest_tracked_cpu = {}
+        if elapsed > 0:
+            ticks_per_second = max(1, os.sysconf(os.sysconf_names["SC_CLK_TCK"]))
+            for label in TRACKED_PROCESS_LABELS:
+                matches = tracked_process_matches(label, self.process_root_pid, current_processes)
+                ticks = sum(process_deltas.get(sample.pid, (0, sample))[0] for sample in matches)
+                seconds = ticks / ticks_per_second
+                self.latest_tracked_cpu[label] = (ticks, seconds, 100.0 * seconds / elapsed)
         self.prev_thread_cpu = curr
         self.prev_process_sample_monotonic = now
 
@@ -1111,14 +1142,24 @@ class SystemSampler:
     def _sample_row_locked(
         self,
         current: dict[int, ThreadCpuSample],
+        threads: dict[tuple[int, int], ThreadCpuSample],
         mem: dict[str, int],
         cgroup: dict[str, int | str],
         monotonic_seconds: float,
+        phase_events: list[dict[str, int | str]],
+        interval_values: dict[str, float] | None = None,
     ) -> dict[str, int | float | str]:
         row: dict[str, int | float | str] = {
             "monotonic_seconds": monotonic_seconds,
             "sampler_interval_seconds": self.interval,
         }
+        row.update(interval_values or {})
+        if self.active_phases:
+            row["phase_active"] = ",".join(sorted(self.active_phases))
+        if phase_events:
+            row["phase_marker_events"] = json.dumps(
+                phase_events, sort_keys=True, separators=(",", ":")
+            )
         for key, value in mem.items():
             row[f"system_{key}"] = value
         row.update(cgroup)
@@ -1132,6 +1173,14 @@ class SystemSampler:
                 continue
             row[f"{prefix}_pids"] = ",".join(str(sample.pid) for sample in matches)
             row[f"{prefix}_rss_kb"] = sum(sample.rss_kb for sample in matches)
+            match_pids = {sample.pid for sample in matches}
+            row[f"{prefix}_thread_count"] = sum(
+                1 for sample in threads.values() if sample.pid in match_pids
+            )
+            ticks, seconds, percent = self.latest_tracked_cpu.get(label, (0, 0.0, 0.0))
+            row[f"{prefix}_cpu_delta_ticks"] = ticks
+            row[f"{prefix}_cpu_delta_seconds"] = seconds
+            row[f"{prefix}_cpu_percent"] = percent
             if len(matches) == 1:
                 row[f"{prefix}_comm"] = matches[0].comm
                 row[f"{prefix}_exe"] = matches[0].exe
@@ -1152,6 +1201,55 @@ class SystemSampler:
                 for key, value in tracked.detail_values.items():
                     row[f"{prefix}_{key}"] = value
         return row
+
+    def _read_phase_markers(self) -> list[dict[str, int | str]]:
+        """Persist marker events beside sampled process CPU deltas.
+
+        Markers are created by the driver, so their embedded wall-clock time
+        is more precise than the sampler cadence. ``phase_active`` identifies
+        the marked interval that ended at each sample.
+        """
+        if self.phase_marker_dir is None or not self.phase_marker_prefix:
+            return []
+        try:
+            paths = sorted(self.phase_marker_dir.glob(f"{self.phase_marker_prefix}*"))
+        except OSError:
+            return []
+        events: list[tuple[dict[str, int | str], str]] = []
+        for path in paths:
+            key = str(path)
+            if key in self.seen_phase_markers or not path.is_file():
+                continue
+            if not path.name.startswith(self.phase_marker_prefix):
+                continue
+            unix_nano = 0
+            phase = ""
+            event = ""
+            try:
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if line.startswith("time_unix_nano="):
+                        unix_nano = int(line.split("=", 1)[1])
+                    elif line.startswith("phase="):
+                        phase = line.split("=", 1)[1]
+                    elif line.startswith("event="):
+                        event = line.split("=", 1)[1]
+            except (OSError, ValueError):
+                continue
+            if not phase or event not in {"start", "end", "active", "requested", "drained", "ready", "release", "snapshot"}:
+                continue
+            events.append(({"phase": phase, "event": event, "time_unix_nano": unix_nano}, key))
+        events.sort(key=lambda item: (int(item[0]["time_unix_nano"]), item[1]))
+        ordered_events: list[dict[str, int | str]] = []
+        for marker, key in events:
+            self.seen_phase_markers.add(key)
+            phase = str(marker["phase"])
+            event = str(marker["event"])
+            if event == "start":
+                self.active_phases.add(phase)
+            elif event == "end":
+                self.active_phases.discard(phase)
+            ordered_events.append(marker)
+        return ordered_events
 
     def _cadence_metrics_locked(self) -> dict[str, float | int | str]:
         end = self.stop_monotonic if self.stop_monotonic is not None else time.monotonic()
@@ -1581,6 +1679,17 @@ def main() -> int:
         default="auto",
         help="Collect inherited perf_event counters when available",
     )
+    parser.add_argument(
+        "--phase-marker-dir",
+        type=Path,
+        default=Path(os.environ.get("BENCH_PHASE_MARKER_DIR", "/results/phase-markers")),
+        help="Directory containing driver phase markers",
+    )
+    parser.add_argument(
+        "--phase-marker-prefix",
+        default=os.environ.get("BENCH_PHASE_MARKER_PREFIX", ""),
+        help="Workload prefix shared by its driver phase markers",
+    )
     parser.add_argument("cmd", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -1616,6 +1725,8 @@ def main() -> int:
             Path(str(args.metrics) + ".samples.jsonl"),
             args.detailed_memory_interval,
             args.detailed_memory_timeout,
+            args.phase_marker_dir,
+            args.phase_marker_prefix,
         )
         sampler.start()
     t0 = time.monotonic()
