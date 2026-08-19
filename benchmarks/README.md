@@ -90,6 +90,7 @@ BENCH_PROFILE=all BENCH_BUCKETS=64 CHURN_CYCLES=3 OBJECTS=10000 RUNS=3 \
 - `OBJECTS`: objects loaded per run.
 - `TAGS_PER_OBJECT`: tags attached per object.
 - `BENCH_PROFILE`: one of the profiles above, `all`, or a comma-separated profile list.
+- `BENCH_SET_INTERNING`: `0` builds the direct-vector baseline and `1` builds with `--enable-set-interning`; default `0`. The selected value and resolved configure argument are retained in `metadata.env` and `build-provenance.env`, and `SKIP_BUILD=1` rejects a cached build made with the other selection.
 - `BENCH_BUCKETS`: bucket cardinality for shared bucket tags.
 - `BENCH_CLIENTS`: concurrent HTTP clients for the Go driver, default `1`.
 - `BENCH_WARM_SECONDS`: timed post-load warm-hit phase duration for long-TTL load profiles, default `5`; set `0` to disable.
@@ -152,6 +153,8 @@ BENCH_PROFILE=all BENCH_BUCKETS=64 CHURN_CYCLES=3 OBJECTS=10000 RUNS=3 \
 - `VTC_LOG_BYTES`: internal `vinyltest` log buffer, default `20M`.
 - `RESULTS_DIR`: explicit output directory.
 - `VINYL_DOCKER_IMAGE`: build/test image.
+
+For a `BENCH_SET_INTERNING=1` row, the summarizer retains and renders the final VSC snapshot for live interned sets and references, reuse hits and creation misses, plus interned-set node bytes and hash-table bytes. These are final-state/accounting counters; compare them with the matched direct-vector row rather than treating them as process-PSS attribution.
 
 Use `SKIP_BUILD=1` after the first build when only rerunning generated benchmarks against an already-built tree. Reuse is provenance-checked: the build records source-content hashes in `build-provenance.env` (also copied into each result dir), and a `SKIP_BUILD=1` run fails if the mounted sources no longer match the cached build ([BR-016](rules/BR-016-build-cache-contamination.md)). There is no stale-build override for comparison rows. Build caches created before provenance recording fail their first `SKIP_BUILD=1` run; rebuild once to mint the provenance file.
 
@@ -313,7 +316,7 @@ Remote matrix defaults can be tuned with environment variables:
 - `CACHE_TAG_WAL_FSYNC`: override `BENCH_CACHE_TAG_WAL_FSYNC`.
 - `CACHE_TAG_SWEEP_BATCH_OBJECTS`, `CACHE_TAG_SWEEP_BATCH_HOLD`, `CACHE_TAG_SWEEP_BATCH_YIELD`: override the matching `BENCH_CACHE_TAG_*` bounded-sweep knobs.
 - `CACHE_TAG_BENCH_PERF_FREQ`: `perf record` frequency.
-- `CACHE_TAG_BENCHMARK_CONTRACT`: `development-v1` or `comparison-v1`.
+- `CACHE_TAG_BENCHMARK_CONTRACT`: `development-v1`, `comparison-v1`, or `interning-screen-v1`.
 - `CACHE_TAG_BENCH_CPUSET_CPUS`, `CACHE_TAG_BENCH_DRIVER_CPUSET_CPUS`, `CACHE_TAG_BENCH_BACKEND_CPUSET_CPUS`, `CACHE_TAG_BENCH_VINYL_CPUSET_CPUS`: whole-container and per-process CPU placement.
 - `CACHE_TAG_BENCH_DRIVER_HEADROOM_REQUIRED`, `CACHE_TAG_BENCH_DRIVER_HEADROOM_TARGET_RPS`, `CACHE_TAG_BENCH_DRIVER_HEADROOM_SECONDS`: executable trivial-endpoint headroom gate controls.
 - `CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS`: generic offered-rate override; `CACHE_TAG_PRESSURE_TARGET_RPS` remains the pressure-matrix override.
@@ -323,6 +326,8 @@ Remote matrix defaults can be tuned with environment variables:
 - `CACHE_TAG_BENCH_OBJECTS`, `CACHE_TAG_BENCH_BUCKETS`, `CACHE_TAG_BENCH_STORAGE`, `CACHE_TAG_BENCH_HTTP_TIMEOUT`, `CACHE_TAG_BENCH_RESIDENCY_VALIDATE_OBJECTS`: synthetic scale and validation overrides applied after the named matrix defaults.
 
 The reset comparison's `comparison-v1` rows require explicit CPU sets, an executable headroom target matching `BENCH_CONCURRENT_TARGET_RPS`, comparison memory endpoints, and pinned Go controls. The wrapper forwards these controls to the remote benchmark command and records them in `remote-run.env`; it still does not perform owner admission or choose a target rate. Run `sh scripts/test-benchmark-comparison-preflight.sh` for the local regression; it uses a fake Docker command and never starts a benchmark container.
+
+`interning-screen-v1` applies the same fail-closed placement, headroom, PSS-endpoint, pacing, work-volume, provenance/cohort, power-state, and phase-CPU gates to a direct-vector versus set-interning screen. It requires `RUN_XKEY=0` and `RUN_NOINDEX=0`; each row records either `BENCH_SET_INTERNING=0` or `BENCH_SET_INTERNING=1`, never an xkey or no-index arm. The summarizer treats both rows as comparison-contract-active. Run `sh scripts/test-benchmark-interning-screen-preflight.sh` for its local fake-Docker regression.
 
 Slash-backed storage benchmarks are deliberately isolated from the default in-memory matrices. Use `BENCH_STORAGE_KIND=fellow` or the dedicated `fellow-*` remote matrices when the question is Fellow-backed persistent storage behavior; these lanes build patched Slash/Fellow inside the benchmark container and run cachetag with a persistent namespace by default. Use `BENCH_STORAGE_KIND=buddy` or the dedicated `buddy-*` remote matrices when the question is Buddy-backed volatile storage behavior; Buddy lanes build patched Slash/Buddy inside the benchmark container and keep cachetag persistence disabled by default.
 

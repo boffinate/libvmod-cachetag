@@ -51,7 +51,8 @@ class ComparisonContractTest(unittest.TestCase):
             "build_provenance_version": "3", "build_provenance_mode": "strict",
             "build_provenance_eligible": "1",
             "cachetag_dirty_state": "clean", "vinyl_dirty_state": "clean", "xkey_dirty_state": "clean",
-            "docker_image_id": "sha256:image",
+            "docker_image_id": "sha256:image", "bench_set_interning": "0",
+            "cachetag_configure_args": "--disable-set-interning",
         }
         for key in (
             "vinyl_build_input_sha256", "cachetag_build_input_sha256", "xkey_build_input_sha256",
@@ -286,6 +287,48 @@ class ComparisonContractTest(unittest.TestCase):
             }
             valid, reason = comparison_arm_cohort_validity(arms)
         self.assertEqual((valid, reason), (0, "cohort_fingerprint_changed_across_arms"))
+
+    def test_interning_screen_is_comparison_active_without_xkey_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            driver, time_values, stats = self.write_valid_fixture(root)
+            metadata = root / "metadata.env"
+            metadata.write_text(
+                metadata.read_text(encoding="utf-8")
+                .replace("benchmark_contract=comparison-v1", "benchmark_contract=interning-screen-v1")
+                + "run_xkey=0\nrun_noindex=0\nbench_set_interning=1\n"
+                + "cachetag_configure_args=--enable-set-interning\n",
+                encoding="utf-8",
+            )
+            provenance = root / "build-provenance.env"
+            provenance.write_text(
+                provenance.read_text(encoding="utf-8")
+                .replace("build_provenance_version=3", "build_provenance_version=4")
+                .replace("xkey_dirty_state=clean", "xkey_dirty_state=not-applicable")
+                .replace("xkey_build_input_sha256=" + self.fingerprint, "xkey_build_input_sha256=none")
+                .replace("bench_set_interning=0", "bench_set_interning=1")
+                .replace("cachetag_configure_args=--disable-set-interning", "cachetag_configure_args=--enable-set-interning"),
+                encoding="utf-8",
+            )
+            valid, reason = comparison_contract_validity(root, "fixture", 1, time_values, driver, stats)
+        self.assertEqual((valid, reason), (1, "ok"))
+
+    def test_interning_screen_rejects_xkey_and_noindex_arms(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            driver, time_values, stats = self.write_valid_fixture(root)
+            metadata = root / "metadata.env"
+            metadata.write_text(
+                metadata.read_text(encoding="utf-8")
+                .replace("benchmark_contract=comparison-v1", "benchmark_contract=interning-screen-v1")
+                + "run_xkey=1\nrun_noindex=1\nbench_set_interning=0\n"
+                + "cachetag_configure_args=--disable-set-interning\n",
+                encoding="utf-8",
+            )
+            valid, reason = comparison_contract_validity(root, "fixture", 1, time_values, driver, stats)
+        self.assertEqual(valid, 0)
+        self.assertIn("interning_screen_xkey_arm_present", reason)
+        self.assertIn("interning_screen_noindex_arm_present", reason)
 
     def test_missing_inputs_are_retained_as_scoped_rejections(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

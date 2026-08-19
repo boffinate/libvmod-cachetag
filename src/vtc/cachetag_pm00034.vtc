@@ -1,0 +1,120 @@
+vtest "small shared intern sets look up before candidate allocation"
+
+server s1 -repeat 8 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("intern_lookup_first", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "FAILINTERN") {
+			if (!tags.test_fail_next_intern_alloc()) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.http.Load) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url ~ "^/first") {
+			tags.add_header("alpha,beta,gamma,delta,epsilon");
+		} else if (bereq.url ~ "^/shared") {
+			tags.add_header("epsilon,delta,gamma,beta,alpha");
+		} else if (bereq.url ~ "^/eight-a") {
+			tags.add_header("a,b,c,d,e,f,g,h");
+		} else if (bereq.url ~ "^/eight-b") {
+			tags.add_header("h,g,f,e,d,c,b,a");
+		} else if (bereq.url ~ "^/nine-a") {
+			tags.add_header("a,b,c,d,e,f,g,h,i");
+		} else if (bereq.url ~ "^/nine-b") {
+			tags.add_header("i,h,g,f,e,d,c,b,a");
+		} else {
+			tags.add_header("one,two,three,four,five");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+} -start
+
+client c_first {
+	txreq -url "/first" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_sets == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_refs == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_misses == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_candidate_discards == 0
+
+client c_arm_then_shared_hit {
+	txreq -req FAILINTERN
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/shared" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_attach_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_sets == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_refs == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_hits == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_candidate_discards == 0
+
+client c_unique_failure_then_retry {
+	txreq -url "/unique" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/unique-retry" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_attach_failures == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_sets == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_refs == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_misses == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_candidate_discards == 0
+
+client c_thresholds {
+	txreq -url "/eight-a" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/eight-b" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/nine-a" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/nine-b" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_sets == 4
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_refs == 7
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_misses == 4
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_hits == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_candidate_discards == 1
+
+server s1 -wait

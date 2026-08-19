@@ -36,7 +36,11 @@ struct cachetag_objent {
 	struct objcore *oc;
 	uint64_t reg_seq;
 	union {
+#if CACHE_TAG_SET_INTERNING
+		struct cachetag_interned_set *set;
+#else
 		uint64_t *vector;
+#endif
 		uint64_t inline_one;
 	} membership;
 };
@@ -48,6 +52,25 @@ _Static_assert(sizeof(struct cachetag_objent) == 24,
 #define TAG_OBJCOUNT_DIRECT_MAX 254U
 #define TAG_OBJCOUNT_OVERFLOW UINT8_MAX
 #define TAG_FOLD_STORAGE_MAGIC UINT32_C(0x63746676)
+
+#if CACHE_TAG_SET_INTERNING
+#define TAG_INTERNED_SET_MAGIC UINT32_C(0x63747369)
+#define TAG_INTERN_INITIAL_BUCKETS 64U
+#define TAG_INTERN_MIGRATE_STEPS 4U
+#define TAG_RESIZE_INTERN_BATCH_STEPS 64U
+
+struct cachetag_interned_set {
+	uint32_t magic;
+	unsigned nfolds;
+	uint64_t hash;
+	uint64_t refs;
+	struct cachetag_interned_set *next;
+	uint64_t folds[];
+};
+
+_Static_assert(sizeof(struct cachetag_interned_set) == 32,
+	"interned set header must remain 32 bytes");
+#endif
 
 struct cachetag_fold_storage_header {
 	uint32_t magic;
@@ -63,11 +86,27 @@ _Static_assert(offsetof(struct cachetag_fold_storage_header, folds) == 8,
 void *
 cachetag_fold_storage_alloc(unsigned nfolds)
 {
+	#if CACHE_TAG_SET_INTERNING
+	struct cachetag_interned_set *set;
+	#else
 	struct cachetag_fold_storage_header *header;
+	#endif
 	size_t bytes;
 
 	if (nfolds <= 1)
 		return (NULL);
+	#if CACHE_TAG_SET_INTERNING
+	if ((size_t)nfolds >
+	    (SIZE_MAX - sizeof *set) / sizeof(uint64_t))
+		return (NULL);
+	bytes = sizeof *set + (size_t)nfolds * sizeof(uint64_t);
+	set = calloc(1, bytes);
+	if (set == NULL)
+		return (NULL);
+	set->magic = TAG_INTERNED_SET_MAGIC;
+	set->nfolds = nfolds;
+	return (set);
+	#else
 	if (nfolds <= TAG_OBJCOUNT_DIRECT_MAX) {
 		if ((size_t)nfolds > SIZE_MAX / sizeof(uint64_t))
 			return (NULL);
@@ -83,15 +122,26 @@ cachetag_fold_storage_alloc(unsigned nfolds)
 	header->magic = TAG_FOLD_STORAGE_MAGIC;
 	header->nfolds = nfolds;
 	return (header);
+	#endif
 }
 
 uint64_t *
 cachetag_fold_storage_values(void *storage, unsigned nfolds)
 {
+	#if CACHE_TAG_SET_INTERNING
+	struct cachetag_interned_set *set;
+	#else
 	struct cachetag_fold_storage_header *header;
+	#endif
 
 	if (storage == NULL || nfolds <= 1)
 		return (NULL);
+	#if CACHE_TAG_SET_INTERNING
+	set = storage;
+	if (set->magic != TAG_INTERNED_SET_MAGIC || set->nfolds != nfolds)
+		return (NULL);
+	return (set->folds);
+	#else
 	if (nfolds <= TAG_OBJCOUNT_DIRECT_MAX)
 		return (storage);
 	header = storage;
@@ -99,6 +149,7 @@ cachetag_fold_storage_values(void *storage, unsigned nfolds)
 	    header->nfolds != nfolds)
 		return (NULL);
 	return (header->folds);
+	#endif
 }
 
 void
@@ -107,6 +158,452 @@ cachetag_fold_storage_free(void *storage, unsigned nfolds)
 	if (nfolds > 1)
 		free(storage);
 }
+
+#if CACHE_TAG_SET_INTERNING
+
+/*
+ * Process-local hash-consed membership sets. Every multi-fold membership
+ * references one refcounted node; folds are sorted so registrations in
+ * different call order share a node. The registry is guarded by obj_mtx,
+ * along with the dense table and side map. It is volatile by construction:
+ * restart creates an empty registry and a node dies with its last object.
+ */
+
+static size_t
+cachetag_interned_set_bytes(const struct cachetag_interned_set *set)
+{
+
+	return (sizeof *set + (size_t)set->nfolds * sizeof(uint64_t));
+}
+
+static int
+cachetag_fold_cmp(const void *va, const void *vb)
+{
+	uint64_t a, b;
+
+	memcpy(&a, va, sizeof a);
+	memcpy(&b, vb, sizeof b);
+	if (a < b)
+		return (-1);
+	return (a > b);
+}
+
+static uint64_t
+cachetag_intern_hash(const uint64_t *folds, unsigned nfolds)
+{
+
+	return (XXH3_64bits(folds, (size_t)nfolds * sizeof(uint64_t)));
+}
+
+static void
+cachetag_intern_sort(uint64_t *folds, unsigned nfolds)
+{
+	uint64_t fold;
+	unsigned i, j;
+
+	if (nfolds > TAG_INTERN_LOOKUP_FIRST_MAX_FOLDS) {
+		qsort(folds, nfolds, sizeof *folds, cachetag_fold_cmp);
+		return;
+	}
+	for (i = 1; i < nfolds; i++) {
+		fold = folds[i];
+		j = i;
+		while (j > 0 && folds[j - 1] > fold) {
+			folds[j] = folds[j - 1];
+			j--;
+		}
+		folds[j] = fold;
+	}
+}
+
+static struct cachetag_interned_set **
+cachetag_intern_bucket_for(struct cachetag_interned_set **buckets,
+    size_t nbuckets, uint64_t hash)
+{
+
+	AN(buckets);
+	assert(nbuckets > 0);
+	return (&buckets[hash & (nbuckets - 1)]);
+}
+
+static void
+cachetag_note_intern_timing(struct cachetag_index *idx,
+    struct cachetag_timing_counters *counters, uint64_t usec)
+{
+
+	if (!idx->benchmark_obj_mtx_timing)
+		return;
+	counters->calls++;
+	counters->usec += usec;
+	if (usec > counters->max_usec)
+		counters->max_usec = usec;
+	counters->over_50us += usec > 50;
+	counters->over_250us += usec > 250;
+	counters->over_1ms += usec > 1000;
+	counters->over_10ms += usec > 10000;
+}
+
+void *
+cachetag_intern_candidate_alloc(struct cachetag_index *idx, unsigned nfolds)
+{
+	void *candidate;
+	uint64_t started, usec;
+
+	started = idx->benchmark_obj_mtx_timing ? cachetag_now_usec() : 0;
+	if (__atomic_exchange_n(&idx->test_fail_next_intern_alloc, 0,
+	    __ATOMIC_ACQ_REL))
+		candidate = NULL;
+	else
+		candidate = cachetag_fold_storage_alloc(nfolds);
+	if (!idx->benchmark_obj_mtx_timing)
+		return (candidate);
+	usec = cachetag_elapsed_usec(started, cachetag_now_usec());
+	PTOK(pthread_mutex_lock(&idx->counter_mtx));
+	cachetag_note_intern_timing(idx, &idx->intern_candidate_alloc_timing,
+	    usec);
+	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
+	return (candidate);
+}
+
+static void
+cachetag_note_intern_table_alloc(struct cachetag_index *idx, uint64_t usec,
+    int failed)
+{
+
+	if (!idx->benchmark_obj_mtx_timing && !failed)
+		return;
+	PTOK(pthread_mutex_lock(&idx->counter_mtx));
+	cachetag_note_intern_timing(idx, &idx->intern_table_alloc_timing, usec);
+	idx->counters.volatile_interned_table_alloc_failures += failed != 0;
+	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
+}
+
+struct cachetag_intern_cleanup {
+	struct cachetag_interned_set *unpublished;
+	struct cachetag_interned_set *sets;
+	size_t set_bytes;
+	struct {
+		struct cachetag_interned_set **buckets;
+		size_t nbuckets;
+	} tables[2];
+	unsigned ntables;
+	size_t table_bytes;
+	unsigned inventory;
+};
+
+static size_t
+cachetag_intern_table_bytes(size_t nbuckets)
+{
+
+	return (nbuckets * sizeof(struct cachetag_interned_set *));
+}
+
+static void
+cachetag_intern_cleanup_add_set_locked(struct cachetag_index *idx,
+    struct cachetag_intern_cleanup *cleanup, struct cachetag_interned_set *set)
+{
+	size_t bytes;
+
+	AN(cleanup);
+	AN(set);
+	bytes = cachetag_interned_set_bytes(set);
+	set->next = cleanup->sets;
+	cleanup->sets = set;
+	cleanup->set_bytes += bytes;
+	idx->intern_detached_set_bytes += bytes;
+}
+
+static void
+cachetag_intern_cleanup_add_table_locked(struct cachetag_index *idx,
+    struct cachetag_intern_cleanup *cleanup,
+    struct cachetag_interned_set **buckets, size_t nbuckets)
+{
+	size_t bytes;
+
+	if (buckets == NULL)
+		return;
+	AN(cleanup);
+	assert(cleanup->ntables < sizeof cleanup->tables / sizeof cleanup->tables[0]);
+	bytes = cachetag_intern_table_bytes(nbuckets);
+	cleanup->tables[cleanup->ntables].buckets = buckets;
+	cleanup->tables[cleanup->ntables].nbuckets = nbuckets;
+	cleanup->ntables++;
+	cleanup->table_bytes += bytes;
+	idx->intern_detached_table_bytes += bytes;
+}
+
+static void
+cachetag_intern_cleanup_free(struct cachetag_index *idx,
+    struct cachetag_intern_cleanup *cleanup)
+{
+	struct cachetag_interned_set *set, *next;
+	unsigned u;
+	size_t b;
+
+	if (cleanup->unpublished != NULL)
+		cachetag_counter_add(idx,
+		    &idx->counters.volatile_interned_candidate_discards, 1);
+	if (cleanup->unpublished != NULL)
+		free(cleanup->unpublished);
+	for (set = cleanup->sets; set != NULL; set = next) {
+		next = set->next;
+		free(set);
+	}
+	if (cleanup->inventory) {
+		for (u = 0; u < cleanup->ntables; u++) {
+			for (b = 0; b < cleanup->tables[u].nbuckets; b++) {
+				for (set = cleanup->tables[u].buckets[b]; set != NULL;
+				    set = next) {
+					next = set->next;
+					free(set);
+				}
+			}
+		}
+	}
+	for (u = 0; u < cleanup->ntables; u++)
+		free(cleanup->tables[u].buckets);
+	if (cleanup->set_bytes != 0 || cleanup->table_bytes != 0) {
+		PTOK(pthread_mutex_lock(&idx->obj_mtx));
+		assert(idx->intern_detached_set_bytes >= cleanup->set_bytes);
+		assert(idx->intern_detached_table_bytes >= cleanup->table_bytes);
+		idx->intern_detached_set_bytes -= cleanup->set_bytes;
+		idx->intern_detached_table_bytes -= cleanup->table_bytes;
+		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	}
+	memset(cleanup, 0, sizeof *cleanup);
+}
+
+static struct cachetag_interned_set *
+cachetag_intern_lookup_table_locked(struct cachetag_interned_set **buckets,
+    size_t nbuckets, const uint64_t *folds, unsigned nfolds, uint64_t hash)
+{
+	struct cachetag_interned_set *set;
+
+	if (buckets == NULL)
+		return (NULL);
+	for (set = *cachetag_intern_bucket_for(buckets, nbuckets, hash);
+	    set != NULL; set = set->next) {
+		if (set->hash == hash && set->nfolds == nfolds &&
+		    memcmp(set->folds, folds,
+		    (size_t)nfolds * sizeof(uint64_t)) == 0)
+			return (set);
+	}
+	return (NULL);
+}
+
+static struct cachetag_interned_set *
+cachetag_intern_lookup_locked(struct cachetag_index *idx,
+    const uint64_t *folds, unsigned nfolds, uint64_t hash)
+{
+	struct cachetag_interned_set *set;
+
+	set = cachetag_intern_lookup_table_locked(idx->intern_buckets,
+	    idx->intern_nbuckets, folds, nfolds, hash);
+	if (set == NULL)
+		set = cachetag_intern_lookup_table_locked(idx->intern_old_buckets,
+		    idx->intern_old_nbuckets, folds, nfolds, hash);
+	if (set != NULL) {
+		set->refs++;
+		idx->intern_refs++;
+		idx->intern_hits++;
+	}
+	return (set);
+}
+
+static int
+cachetag_intern_prepare_insert_locked(struct cachetag_index *idx,
+    size_t *bucketsp)
+{
+	if (bucketsp != NULL)
+		*bucketsp = 0;
+	if (idx->intern_buckets == NULL) {
+		if (bucketsp != NULL)
+			*bucketsp = idx->test_intern_initial_buckets != 0 ?
+			    idx->test_intern_initial_buckets : TAG_INTERN_INITIAL_BUCKETS;
+		return (EAGAIN);
+	}
+	if (idx->intern_sets + 1 <= idx->intern_nbuckets ||
+	    idx->intern_migration_active)
+		return (0);
+	if (idx->intern_nbuckets > SIZE_MAX / 2 ||
+	    idx->intern_nbuckets * 2 > SIZE_MAX / sizeof *idx->intern_buckets)
+		return (0);
+	if (bucketsp != NULL)
+		*bucketsp = idx->intern_nbuckets * 2;
+	return (EAGAIN);
+}
+
+static int
+cachetag_intern_publish_table_locked(struct cachetag_index *idx,
+    struct cachetag_interned_set **buckets, size_t nbuckets,
+    uint64_t generation)
+{
+	if (buckets == NULL || nbuckets == 0 ||
+	    (nbuckets & (nbuckets - 1)) != 0 || idx->intern_migration_active ||
+	    generation != idx->intern_generation)
+		return (EINVAL);
+	if (idx->intern_buckets == NULL) {
+		if (nbuckets != (idx->test_intern_initial_buckets != 0 ?
+		    idx->test_intern_initial_buckets : TAG_INTERN_INITIAL_BUCKETS))
+			return (ESTALE);
+		idx->intern_buckets = buckets;
+		idx->intern_nbuckets = nbuckets;
+		idx->intern_generation++;
+		return (0);
+	}
+	if (nbuckets != idx->intern_nbuckets * 2 ||
+	    idx->intern_sets + 1 <= idx->intern_nbuckets)
+		return (ESTALE);
+	idx->intern_old_buckets = idx->intern_buckets;
+	idx->intern_old_nbuckets = idx->intern_nbuckets;
+	idx->intern_buckets = buckets;
+	idx->intern_nbuckets = nbuckets;
+	idx->intern_migrate_cursor = 0;
+	idx->intern_migration_active = 1;
+	idx->intern_generation++;
+	return (0);
+}
+
+static struct cachetag_interned_set **
+cachetag_intern_alloc_buckets(struct cachetag_index *idx, size_t buckets)
+{
+
+	if (__atomic_exchange_n(&idx->test_fail_next_intern_table_alloc, 0,
+	    __ATOMIC_ACQ_REL))
+		return (NULL);
+	return (calloc(buckets, sizeof(struct cachetag_interned_set *)));
+}
+
+static void
+cachetag_intern_migrate_locked(struct cachetag_index *idx, size_t steps,
+    struct cachetag_intern_cleanup *cleanup)
+{
+	struct cachetag_interned_set **head, *set;
+
+	while (idx->intern_migration_active && steps-- != 0) {
+		if (idx->intern_migrate_cursor == idx->intern_old_nbuckets) {
+			cachetag_intern_cleanup_add_table_locked(idx, cleanup,
+			    idx->intern_old_buckets, idx->intern_old_nbuckets);
+			idx->intern_old_buckets = NULL;
+			idx->intern_old_nbuckets = 0;
+			idx->intern_migrate_cursor = 0;
+			idx->intern_migration_active = 0;
+			break;
+		}
+		head = &idx->intern_old_buckets[idx->intern_migrate_cursor];
+		if (*head == NULL) {
+			idx->intern_migrate_cursor++;
+			continue;
+		}
+		set = *head;
+		*head = set->next;
+		head = cachetag_intern_bucket_for(idx->intern_buckets,
+		    idx->intern_nbuckets, set->hash);
+		set->next = *head;
+		*head = set;
+	}
+	if (idx->intern_migration_active &&
+	    idx->intern_migrate_cursor == idx->intern_old_nbuckets) {
+		cachetag_intern_cleanup_add_table_locked(idx, cleanup,
+		    idx->intern_old_buckets, idx->intern_old_nbuckets);
+		idx->intern_old_buckets = NULL;
+		idx->intern_old_nbuckets = 0;
+		idx->intern_migrate_cursor = 0;
+		idx->intern_migration_active = 0;
+	}
+}
+
+static struct cachetag_interned_set *
+cachetag_intern_publish_locked(struct cachetag_index *idx,
+    struct cachetag_interned_set *candidate)
+{
+	struct cachetag_interned_set **head;
+
+	AN(candidate);
+	assert(candidate->refs == 0);
+	head = cachetag_intern_bucket_for(idx->intern_buckets,
+	    idx->intern_nbuckets, candidate->hash);
+	candidate->refs = 1;
+	candidate->next = *head;
+	*head = candidate;
+	idx->intern_sets++;
+	idx->intern_refs++;
+	idx->intern_misses++;
+	idx->intern_bytes += cachetag_interned_set_bytes(candidate);
+	idx->intern_overflow_sets += candidate->nfolds >= TAG_OBJCOUNT_OVERFLOW;
+	return (candidate);
+}
+
+static void
+cachetag_intern_release_locked(struct cachetag_index *idx,
+    struct cachetag_interned_set *set, struct cachetag_intern_cleanup *cleanup)
+{
+	struct cachetag_interned_set **link;
+
+	AN(set);
+	assert(set->magic == TAG_INTERNED_SET_MAGIC);
+	assert(set->refs > 0);
+	assert(idx->intern_refs > 0);
+	idx->intern_refs--;
+	if (--set->refs > 0)
+		return;
+	link = NULL;
+	if (idx->intern_buckets != NULL) {
+		for (link = cachetag_intern_bucket_for(idx->intern_buckets,
+		    idx->intern_nbuckets, set->hash); *link != NULL;
+		    link = &(*link)->next) {
+			if (*link == set)
+				break;
+		}
+	}
+	if ((link == NULL || *link == NULL) && idx->intern_old_buckets != NULL) {
+		for (link = cachetag_intern_bucket_for(idx->intern_old_buckets,
+		    idx->intern_old_nbuckets, set->hash); *link != NULL;
+		    link = &(*link)->next) {
+			if (*link == set)
+				break;
+		}
+	}
+	AN(link);
+	AN(*link);
+	*link = set->next;
+	assert(idx->intern_sets > 0);
+	idx->intern_sets--;
+	assert(idx->intern_bytes >= cachetag_interned_set_bytes(set));
+	idx->intern_bytes -= cachetag_interned_set_bytes(set);
+	if (set->nfolds >= TAG_OBJCOUNT_OVERFLOW) {
+		assert(idx->intern_overflow_sets > 0);
+		idx->intern_overflow_sets--;
+	}
+	cachetag_intern_cleanup_add_set_locked(idx, cleanup, set);
+}
+
+static void
+cachetag_intern_detach_all_locked(struct cachetag_index *idx,
+    struct cachetag_intern_cleanup *cleanup)
+{
+
+	cachetag_intern_cleanup_add_table_locked(idx, cleanup,
+	    idx->intern_buckets, idx->intern_nbuckets);
+	cachetag_intern_cleanup_add_table_locked(idx, cleanup,
+	    idx->intern_old_buckets, idx->intern_old_nbuckets);
+	cleanup->set_bytes += idx->intern_bytes;
+	idx->intern_detached_set_bytes += idx->intern_bytes;
+	cleanup->inventory = 1;
+	idx->intern_generation++;
+	idx->intern_buckets = NULL;
+	idx->intern_nbuckets = 0;
+	idx->intern_old_buckets = NULL;
+	idx->intern_old_nbuckets = 0;
+	idx->intern_migrate_cursor = 0;
+	idx->intern_migration_active = 0;
+	idx->intern_sets = 0;
+	idx->intern_refs = 0;
+	idx->intern_bytes = 0;
+	idx->intern_overflow_sets = 0;
+}
+
+#endif /* CACHE_TAG_SET_INTERNING */
 
 #define TAG_OBJECT_SEGMENT0_SLOTS 64U
 
@@ -212,7 +709,11 @@ cachetag_object_count_at(const struct cachetag_index *idx, size_t slot)
 static unsigned
 cachetag_objent_nfolds(const struct cachetag_index *idx, size_t slot)
 {
+#if CACHE_TAG_SET_INTERNING
+	const struct cachetag_interned_set *set;
+#else
 	const struct cachetag_fold_storage_header *header;
+#endif
 	const struct cachetag_objent *ent;
 	unsigned code;
 
@@ -220,6 +721,19 @@ cachetag_objent_nfolds(const struct cachetag_index *idx, size_t slot)
 	code = *cachetag_object_count_at(idx, slot);
 	if (code == TAG_OBJCOUNT_INVALID)
 		return (0);
+#if CACHE_TAG_SET_INTERNING
+	if (code == 1)
+		return (1);
+	set = ent->membership.set;
+	if (set == NULL || set->magic != TAG_INTERNED_SET_MAGIC)
+		return (0);
+	if (code != TAG_OBJCOUNT_OVERFLOW)
+		return (set->nfolds == code ? code : 0);
+	if (set->nfolds < TAG_OBJCOUNT_OVERFLOW ||
+	    set->nfolds > idx->limits.max_keys_per_object)
+		return (0);
+	return (set->nfolds);
+#else
 	if (code != TAG_OBJCOUNT_OVERFLOW)
 		return (code);
 	header = (const void *)ent->membership.vector;
@@ -228,12 +742,15 @@ cachetag_objent_nfolds(const struct cachetag_index *idx, size_t slot)
 	    header->nfolds > idx->limits.max_keys_per_object)
 		return (0);
 	return (header->nfolds);
+#endif
 }
 
 static const uint64_t *
 cachetag_objent_folds(const struct cachetag_index *idx, size_t slot)
 {
+#if !CACHE_TAG_SET_INTERNING
 	const struct cachetag_fold_storage_header *header;
+#endif
 	const struct cachetag_objent *ent;
 	unsigned nfolds;
 
@@ -243,12 +760,17 @@ cachetag_objent_folds(const struct cachetag_index *idx, size_t slot)
 		return (NULL);
 	if (nfolds == 1)
 		return (&ent->membership.inline_one);
+#if CACHE_TAG_SET_INTERNING
+	return (ent->membership.set->folds);
+#else
 	if (nfolds <= TAG_OBJCOUNT_DIRECT_MAX)
 		return (ent->membership.vector);
 	header = (const void *)ent->membership.vector;
 	return (header->folds);
+#endif
 }
 
+#if !CACHE_TAG_SET_INTERNING
 static void
 cachetag_objent_dispose(struct cachetag_index *idx, size_t slot)
 {
@@ -261,6 +783,7 @@ cachetag_objent_dispose(struct cachetag_index *idx, size_t slot)
 		cachetag_fold_storage_free(ent->membership.vector, nfolds);
 	*cachetag_object_count_at(idx, slot) = TAG_OBJCOUNT_INVALID;
 }
+#endif
 
 static size_t
 cachetag_object_table_bytes(const struct cachetag_index *idx)
@@ -645,6 +1168,66 @@ cachetag_account_objects_locked(struct cachetag_index *idx)
 	idx->counters.resize_detached_bytes = idx->resize_detached_bytes;
 	idx->counters.resize_reconciled_bytes = active_bytes +
 	    side_retiring_bytes + idx->resize_detached_bytes;
+#if CACHE_TAG_SET_INTERNING
+	idx->counters.volatile_interned_sets = idx->intern_sets;
+	idx->counters.volatile_interned_set_refs = idx->intern_refs;
+	idx->counters.volatile_interned_set_hits = idx->intern_hits;
+	idx->counters.volatile_interned_set_misses = idx->intern_misses;
+	idx->counters.volatile_interned_set_bytes = idx->intern_bytes;
+	idx->counters.volatile_interned_table_bytes =
+	    cachetag_intern_table_bytes(idx->intern_nbuckets) +
+	    cachetag_intern_table_bytes(idx->intern_old_nbuckets);
+	idx->counters.volatile_interned_migration_active =
+	    idx->intern_migration_active;
+	idx->counters.volatile_interned_old_table_bytes =
+	    cachetag_intern_table_bytes(idx->intern_old_nbuckets);
+	idx->counters.volatile_interned_detached_set_bytes =
+	    idx->intern_detached_set_bytes;
+	idx->counters.volatile_interned_detached_table_bytes =
+	    idx->intern_detached_table_bytes;
+	idx->counters.volatile_interned_acquire = idx->intern_acquire_timing;
+	idx->counters.volatile_interned_table_grow =
+	    idx->intern_table_grow_timing;
+	idx->counters.volatile_interned_set_alloc = idx->intern_set_alloc_timing;
+	idx->counters.volatile_interned_candidate_alloc =
+	    idx->intern_candidate_alloc_timing;
+	idx->counters.volatile_interned_table_alloc =
+	    idx->intern_table_alloc_timing;
+	idx->counters.volatile_object_count_overflow_bytes =
+	    idx->intern_overflow_sets * sizeof(struct cachetag_interned_set);
+	idx->counters.index_memory_bytes = sizeof *idx + idx->namespace_len + 1 +
+		object_bytes + count_bytes +
+		side_bytes +
+		idx->resize_detached_bytes +
+		idx->counters.volatile_interned_set_bytes +
+		idx->counters.volatile_interned_table_bytes +
+		idx->counters.volatile_interned_detached_set_bytes +
+		idx->counters.volatile_interned_detached_table_bytes +
+		idx->counters.purgemap_bytes;
+#else
+	idx->counters.volatile_interned_sets = 0;
+	idx->counters.volatile_interned_set_refs = 0;
+	idx->counters.volatile_interned_set_hits = 0;
+	idx->counters.volatile_interned_set_misses = 0;
+	idx->counters.volatile_interned_set_bytes = 0;
+	idx->counters.volatile_interned_table_bytes = 0;
+	idx->counters.volatile_interned_migration_active = 0;
+	idx->counters.volatile_interned_old_table_bytes = 0;
+	idx->counters.volatile_interned_detached_set_bytes = 0;
+	idx->counters.volatile_interned_detached_table_bytes = 0;
+	idx->counters.volatile_interned_table_alloc_failures = 0;
+	idx->counters.volatile_interned_table_grow_failures = 0;
+	idx->counters.volatile_interned_candidate_discards = 0;
+	memset(&idx->counters.volatile_interned_acquire, 0,
+	    sizeof idx->counters.volatile_interned_acquire);
+	memset(&idx->counters.volatile_interned_table_grow, 0,
+	    sizeof idx->counters.volatile_interned_table_grow);
+	memset(&idx->counters.volatile_interned_set_alloc, 0,
+	    sizeof idx->counters.volatile_interned_set_alloc);
+	memset(&idx->counters.volatile_interned_candidate_alloc, 0,
+	    sizeof idx->counters.volatile_interned_candidate_alloc);
+	memset(&idx->counters.volatile_interned_table_alloc, 0,
+	    sizeof idx->counters.volatile_interned_table_alloc);
 	idx->counters.index_memory_bytes = sizeof *idx + idx->namespace_len + 1 +
 		object_bytes + count_bytes +
 		side_bytes +
@@ -653,6 +1236,7 @@ cachetag_account_objects_locked(struct cachetag_index *idx)
 		idx->counters.volatile_inline_folds) * sizeof(uint64_t) +
 		idx->counters.volatile_object_count_overflow_bytes +
 		idx->counters.purgemap_bytes;
+#endif
 }
 
 enum cachetag_request_lock_category {
@@ -1584,6 +2168,10 @@ static int
 cachetag_resize_needs_work_locked(struct cachetag_index *idx)
 {
 
+#if CACHE_TAG_SET_INTERNING
+	if (idx->intern_migration_active)
+		return (1);
+#endif
 	if (idx->side_migration_active && idx->side_migration_auto)
 		return (1);
 	if (cachetag_object_soft_growth_locked(idx, NULL, NULL, NULL, NULL))
@@ -1592,6 +2180,58 @@ cachetag_resize_needs_work_locked(struct cachetag_index *idx)
 		return (1);
 	return (cachetag_side_soft_resize_locked(idx, NULL, NULL));
 }
+
+#if CACHE_TAG_SET_INTERNING
+static int
+cachetag_resize_migrate_intern_batch(struct cachetag_index *idx)
+{
+	struct cachetag_intern_cleanup cleanup;
+	uint64_t migrate_started;
+	int did;
+
+	memset(&cleanup, 0, sizeof cleanup);
+	did = 0;
+	PTOK(pthread_mutex_lock(&idx->sweep_mtx));
+	PTOK(pthread_mutex_lock(&idx->obj_mtx));
+	if (idx->intern_migration_active && !idx->test_intern_worker_hold) {
+		migrate_started = idx->benchmark_obj_mtx_timing ?
+		    cachetag_now_usec() : 0;
+		cachetag_intern_migrate_locked(idx, TAG_RESIZE_INTERN_BATCH_STEPS,
+		    &cleanup);
+		if (idx->benchmark_obj_mtx_timing)
+			cachetag_note_intern_timing(idx,
+			    &idx->intern_table_grow_timing,
+			    cachetag_elapsed_usec(migrate_started,
+			    cachetag_now_usec()));
+		did = 1;
+	}
+	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	PTOK(pthread_mutex_unlock(&idx->sweep_mtx));
+	cachetag_intern_cleanup_free(idx, &cleanup);
+	return (did);
+}
+#endif
+
+#if CACHE_TAG_SET_INTERNING
+static void
+cachetag_intern_attach_cleanup(struct cachetag_index *idx,
+    struct cachetag_intern_cleanup *cleanup,
+    struct cachetag_interned_set *candidate, int wake_if_migrating)
+{
+	int resize_wake;
+
+	cleanup->unpublished = candidate;
+	cachetag_intern_cleanup_free(idx, cleanup);
+	resize_wake = 0;
+	if (wake_if_migrating) {
+		PTOK(pthread_mutex_lock(&idx->obj_mtx));
+		resize_wake = idx->intern_migration_active != 0;
+		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	}
+	if (resize_wake)
+		cachetag_resize_wake(idx);
+}
+#endif
 
 void
 cachetag_resize_wake(struct cachetag_index *idx)
@@ -2004,7 +2644,13 @@ cachetag_resize_maintenance(struct cachetag_index *idx)
 
 	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
 	(void)cachetag_low_water_promote_rearm(idx);
-	did = cachetag_resize_migrate_side_batch(idx);
+	#if CACHE_TAG_SET_INTERNING
+	did = cachetag_resize_migrate_intern_batch(idx);
+	#else
+	did = 0;
+	#endif
+	if (!did)
+		did = cachetag_resize_migrate_side_batch(idx);
 	if (!did)
 		did = cachetag_resize_publish_object_segment(idx);
 	if (!did)
@@ -2106,46 +2752,103 @@ removed:
 
 int
 cachetag_record_attach_purgemap_take(struct cachetag_index *idx,
-    struct objcore *oc, void *fold_storage, unsigned nfolds, uint64_t reg_seq,
-    enum cachetag_purge_mode *modep)
+    struct objcore *oc, void *fold_storage, uint64_t *fold_values,
+    unsigned nfolds, uint64_t reg_seq, enum cachetag_purge_mode *modep)
 {
 	struct cachetag_side_bucket *allocated_side_map, *detached_side_map;
 	struct cachetag_objent *ent, *segment;
 	struct cachetag_side_location loc;
+#if CACHE_TAG_SET_INTERNING
+	struct cachetag_intern_cleanup cleanup;
+	struct cachetag_interned_set *candidate, *set;
+	struct cachetag_interned_set **allocated_intern_buckets;
+#endif
 	struct cachetag_purgemap *pm;
 	const uint64_t *folds;
+#if CACHE_TAG_SET_INTERNING
+	uint64_t *scratch;
+#endif
 	size_t cap, old_capacity, old_side_buckets, side_buckets;
 	uint64_t low_water_wake_at, resize_started, resize_usec;
+#if CACHE_TAG_SET_INTERNING
+	size_t intern_buckets;
+	uint64_t acquire_started, intern_generation, intern_hash, migrate_started;
+#endif
 	unsigned segment_index, side_reason;
 	int found, r, resize_wake;
+#if CACHE_TAG_SET_INTERNING
+	int intern_grow_failed, intern_migrate_budget_used;
+#endif
 
 	if (modep != NULL)
 		*modep = (enum cachetag_purge_mode)-1;
-	if (nfolds == 0 || nfolds > idx->limits.max_keys_per_object)
+	if (nfolds == 0 || nfolds > idx->limits.max_keys_per_object) {
+#if CACHE_TAG_SET_INTERNING
+		cachetag_fold_storage_free(fold_storage, nfolds);
+#endif
 		return (E2BIG);
-	folds = nfolds == 1 ? fold_storage :
-	    cachetag_fold_storage_values(fold_storage, nfolds);
+	}
+#if CACHE_TAG_SET_INTERNING
+	memset(&cleanup, 0, sizeof cleanup);
+	allocated_intern_buckets = NULL;
+	candidate = NULL;
+	intern_hash = 0;
+	if (nfolds == 1) {
+		folds = fold_values;
+	} else {
+		/* Canonicalize borrowed folds before obj_mtx. */
+		candidate = fold_storage;
+		scratch = fold_values;
+		if (scratch == NULL) {
+			cachetag_fold_storage_free(candidate, nfolds);
+			return (EINVAL);
+		}
+		cachetag_intern_sort(scratch, nfolds);
+		intern_hash = cachetag_intern_hash(scratch, nfolds);
+		if (candidate != NULL)
+			candidate->hash = intern_hash;
+		folds = scratch;
+	}
+#else
+	folds = fold_values;
+#endif
 	if (folds == NULL)
 		return (EINVAL);
 	segment = NULL;
 	allocated_side_map = NULL;
 	detached_side_map = NULL;
 	resize_wake = 0;
+	#if CACHE_TAG_SET_INTERNING
+	intern_grow_failed = 0;
+	intern_migrate_budget_used = 0;
+	#endif
 	low_water_wake_at = 0;
 	cachetag_request_obj_lock(idx, TAG_REQUEST_LOCK_ATTACH);
 again:
 	if (__atomic_exchange_n(&idx->test_force_next_attach_slot_overflow,
 	    0, __ATOMIC_ACQ_REL) || idx->nobjects >= TAG_SIDE_MAX_OBJECTS) {
 		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	#if CACHE_TAG_SET_INTERNING
+		cachetag_intern_attach_cleanup(idx, &cleanup, candidate,
+		    1);
+	#endif
 		return (EOVERFLOW);
 	}
 	found = cachetag_side_find_locked(idx, oc, &loc);
 	if (found < 0) {
 		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	#if CACHE_TAG_SET_INTERNING
+		cachetag_intern_attach_cleanup(idx, &cleanup, candidate,
+		    1);
+	#endif
 		return (EFAULT);
 	}
 	if (found > 0) {
 		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	#if CACHE_TAG_SET_INTERNING
+		cachetag_intern_attach_cleanup(idx, &cleanup, candidate,
+		    1);
+	#endif
 		return (EEXIST);
 	}
 	if (idx->nobjects == idx->capobjects) {
@@ -2157,6 +2860,10 @@ again:
 			    idx->capobjects, idx->capobjects, 0, 1,
 			    idx->sweep_active);
 			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+		#if CACHE_TAG_SET_INTERNING
+			cachetag_intern_attach_cleanup(idx, &cleanup, candidate,
+			    1);
+		#endif
 			return (EOVERFLOW);
 		}
 		cap = cachetag_object_capacity_for_segments(segment_index + 1);
@@ -2165,6 +2872,10 @@ again:
 			cachetag_note_resize(idx, &idx->counters.object_grow,
 			    idx->capobjects, cap, 0, 1, idx->sweep_active);
 			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+		#if CACHE_TAG_SET_INTERNING
+			cachetag_intern_attach_cleanup(idx, &cleanup, candidate,
+			    1);
+		#endif
 			return (EOVERFLOW);
 		}
 		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
@@ -2177,6 +2888,10 @@ again:
 		if (segment == NULL) {
 			cachetag_note_resize(idx, &idx->counters.object_grow,
 			    old_capacity, cap, resize_usec, 1, 0);
+		#if CACHE_TAG_SET_INTERNING
+			cachetag_intern_attach_cleanup(idx, &cleanup, candidate,
+			    1);
+		#endif
 			return (ENOMEM);
 		}
 		PTOK(pthread_mutex_lock(&idx->obj_mtx));
@@ -2215,6 +2930,10 @@ again:
 		if (allocated_side_map == NULL) {
 			cachetag_note_side_rehash(idx, old_side_buckets,
 			    side_buckets, resize_usec, 1);
+		#if CACHE_TAG_SET_INTERNING
+			cachetag_intern_attach_cleanup(idx, &cleanup, candidate,
+			    1);
+		#endif
 			return (ENOMEM);
 		}
 		PTOK(pthread_mutex_lock(&idx->obj_mtx));
@@ -2237,25 +2956,139 @@ again:
 	if (r != 0) {
 		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
 		free(detached_side_map);
+	#if CACHE_TAG_SET_INTERNING
+		cachetag_intern_attach_cleanup(idx, &cleanup, candidate,
+		    1);
+	#endif
 		return (r);
 	}
+#if CACHE_TAG_SET_INTERNING
+	/*
+	 * Allocation and population happened before obj_mtx.  This part only
+	 * publishes an already prepared table/candidate, or advances a bounded
+	 * migration step.
+	 */
+	acquire_started = idx->benchmark_obj_mtx_timing ? cachetag_now_usec() : 0;
+	if (!intern_migrate_budget_used && idx->intern_migration_active) {
+		migrate_started = idx->benchmark_obj_mtx_timing ?
+		    cachetag_now_usec() : 0;
+		cachetag_intern_migrate_locked(idx, TAG_INTERN_MIGRATE_STEPS,
+		    &cleanup);
+		intern_migrate_budget_used = 1;
+		if (idx->benchmark_obj_mtx_timing)
+			cachetag_note_intern_timing(idx,
+			    &idx->intern_table_grow_timing,
+			    cachetag_elapsed_usec(migrate_started,
+			    cachetag_now_usec()));
+	}
+	set = nfolds > 1 ? cachetag_intern_lookup_locked(idx, folds, nfolds,
+	    intern_hash) : NULL;
+	if (nfolds > 1 && set == NULL) {
+		r = intern_grow_failed ? 0 :
+		    cachetag_intern_prepare_insert_locked(idx, &intern_buckets);
+		if (r == EAGAIN) {
+			intern_generation = idx->intern_generation;
+			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+			resize_started = idx->benchmark_obj_mtx_timing ?
+			    cachetag_now_usec() : 0;
+			allocated_intern_buckets = cachetag_intern_alloc_buckets(idx,
+			    intern_buckets);
+			cachetag_note_intern_table_alloc(idx,
+			    idx->benchmark_obj_mtx_timing ? cachetag_elapsed_usec(
+			    resize_started, cachetag_now_usec()) : 0,
+			    allocated_intern_buckets == NULL);
+			if (allocated_intern_buckets == NULL) {
+				PTOK(pthread_mutex_lock(&idx->obj_mtx));
+				if (idx->intern_buckets == NULL) {
+					PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+					free(detached_side_map);
+					cachetag_intern_attach_cleanup(idx, &cleanup,
+					    candidate, 1);
+					return (ENOMEM);
+				}
+				PTOK(pthread_mutex_lock(&idx->counter_mtx));
+				idx->counters.volatile_interned_table_grow_failures++;
+				PTOK(pthread_mutex_unlock(&idx->counter_mtx));
+				intern_grow_failed = 1;
+				PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+				PTOK(pthread_mutex_lock(&idx->obj_mtx));
+				goto again;
+			}
+			PTOK(pthread_mutex_lock(&idx->obj_mtx));
+			r = cachetag_intern_publish_table_locked(idx,
+			    allocated_intern_buckets, intern_buckets,
+			    intern_generation);
+			if (r == 0) {
+				allocated_intern_buckets = NULL;
+				resize_wake = 1;
+				goto again;
+			}
+			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+			free(allocated_intern_buckets);
+			allocated_intern_buckets = NULL;
+			PTOK(pthread_mutex_lock(&idx->obj_mtx));
+			goto again;
+		}
+		if (r != 0 || idx->intern_buckets == NULL) {
+			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+			free(detached_side_map);
+			cachetag_intern_attach_cleanup(idx, &cleanup, candidate,
+			    1);
+			return (r != 0 ? r : ENOMEM);
+		}
+		if (candidate == NULL) {
+			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+			candidate = cachetag_intern_candidate_alloc(idx, nfolds);
+			if (candidate == NULL) {
+				free(detached_side_map);
+				cachetag_intern_attach_cleanup(idx, &cleanup, NULL, 1);
+				return (ENOMEM);
+			}
+			scratch = cachetag_fold_storage_values(candidate, nfolds);
+			AN(scratch);
+			memcpy(scratch, folds, (size_t)nfolds * sizeof *scratch);
+			candidate->hash = intern_hash;
+			folds = scratch;
+			PTOK(pthread_mutex_lock(&idx->obj_mtx));
+			goto again;
+		}
+		set = cachetag_intern_publish_locked(idx, candidate);
+		candidate = NULL;
+	}
+	if (idx->benchmark_obj_mtx_timing)
+		cachetag_note_intern_timing(idx, &idx->intern_acquire_timing,
+		    cachetag_elapsed_usec(acquire_started, cachetag_now_usec()));
+#endif
 	ent = cachetag_object_at(idx, idx->nobjects);
 	ent->oc = oc;
 	ent->reg_seq = reg_seq;
-	if (nfolds == 1)
+	if (nfolds == 1) {
 		ent->membership.inline_one = folds[0];
-	else
+	} else {
+#if CACHE_TAG_SET_INTERNING
+		ent->membership.set = set;
+#else
 		ent->membership.vector = fold_storage;
+#endif
+	}
 	*cachetag_object_count_at(idx, idx->nobjects) =
 	    nfolds <= TAG_OBJCOUNT_DIRECT_MAX ? (uint8_t)nfolds :
 	    TAG_OBJCOUNT_OVERFLOW;
 	r = cachetag_side_table_insert_locked(idx, &idx->side_primary, oc,
 	    idx->nobjects);
 	if (r != 0) {
+#if CACHE_TAG_SET_INTERNING
+		if (nfolds > 1)
+			cachetag_intern_release_locked(idx, ent->membership.set, &cleanup);
+#endif
 		*cachetag_object_count_at(idx, idx->nobjects) =
 		    TAG_OBJCOUNT_INVALID;
 		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
 		free(detached_side_map);
+	#if CACHE_TAG_SET_INTERNING
+		cachetag_intern_attach_cleanup(idx, &cleanup, candidate,
+		    1);
+	#endif
 		return (r);
 	}
 	idx->nobjects++;
@@ -2276,9 +3109,11 @@ again:
 	PTOK(pthread_mutex_lock(&idx->counter_mtx));
 	idx->counters.volatile_edges += nfolds;
 	idx->counters.volatile_inline_folds += nfolds == 1;
+#if !CACHE_TAG_SET_INTERNING
 	idx->counters.volatile_object_count_overflow_bytes +=
 	    nfolds >= TAG_OBJCOUNT_OVERFLOW ?
 	    sizeof(struct cachetag_fold_storage_header) : 0;
+#endif
 	idx->counters.volatile_attached++;
 	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 	pm = cachetag_purgemap_data(idx);
@@ -2303,6 +3138,9 @@ again:
 	resize_wake = cachetag_resize_needs_work_locked(idx);
 	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
 	free(detached_side_map);
+#if CACHE_TAG_SET_INTERNING
+	cachetag_intern_attach_cleanup(idx, &cleanup, candidate, 0);
+#endif
 	if (resize_wake)
 		cachetag_resize_wake(idx);
 	else if (low_water_wake_at != 0)
@@ -2315,13 +3153,21 @@ cachetag_record_invalidate(struct cachetag_index *idx, struct objcore *oc)
 {
 	struct cachetag_side_location loc;
 	int found;
+#if CACHE_TAG_SET_INTERNING
+	struct cachetag_intern_cleanup cleanup;
+	struct cachetag_interned_set *set;
+#else
 	void *fold_storage;
+#endif
 	unsigned nfolds;
 	struct cachetag_objent *ent;
 
 	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
 	if (oc == NULL)
 		return;
+#if CACHE_TAG_SET_INTERNING
+	memset(&cleanup, 0, sizeof cleanup);
+#endif
 	cachetag_request_obj_lock(idx, TAG_REQUEST_LOCK_INVALIDATE);
 	found = cachetag_side_find_locked(idx, oc, &loc);
 	if (found < 0) {
@@ -2336,22 +3182,39 @@ cachetag_record_invalidate(struct cachetag_index *idx, struct objcore *oc)
 			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
 			return;
 		}
+		/* Capture before swap-remove relocates another entry into this slot. */
+#if CACHE_TAG_SET_INTERNING
+		set = nfolds > 1 ? ent->membership.set : NULL;
+#else
 		fold_storage = nfolds > 1 ? ent->membership.vector : NULL;
+#endif
 		if (cachetag_side_remove_locked(idx, loc.slot) != 0) {
 			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
 			return; /* fail closed on a corrupted side-map invariant */
 		}
+#if CACHE_TAG_SET_INTERNING
+		cachetag_intern_migrate_locked(idx, TAG_INTERN_MIGRATE_STEPS,
+		    &cleanup);
+		if (set != NULL)
+			cachetag_intern_release_locked(idx, set, &cleanup);
+#else
 		cachetag_fold_storage_free(fold_storage, nfolds);
+#endif
 		PTOK(pthread_mutex_lock(&idx->counter_mtx));
 		assert(idx->counters.volatile_edges >= nfolds);
 		idx->counters.volatile_edges -= nfolds;
 		idx->counters.volatile_inline_folds -= nfolds == 1;
+#if !CACHE_TAG_SET_INTERNING
 		idx->counters.volatile_object_count_overflow_bytes -=
 		    nfolds >= TAG_OBJCOUNT_OVERFLOW ?
 		    sizeof(struct cachetag_fold_storage_header) : 0;
+#endif
 		PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 	}
 	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+#if CACHE_TAG_SET_INTERNING
+	cachetag_intern_cleanup_free(idx, &cleanup);
+#endif
 }
 
 void
@@ -2454,12 +3317,18 @@ cachetag_record_sweep_purgemap(struct cachetag_index *idx,
 	uint64_t batch_objects, batch_start, batch_usec, batch_usecs;
 	uint64_t gap_start, lock_start, lock_acquired, lock_released;
 	uint64_t op_start, op_usec, wait_usec, yield_usecs;
+#if CACHE_TAG_SET_INTERNING
+	struct cachetag_intern_cleanup cleanup;
+#endif
 	int done = 0;
 
 	AN(obs);
 	pm = cachetag_purgemap_data(idx);
 	AN(pm);
 	memset(obs, 0, sizeof *obs);
+#if CACHE_TAG_SET_INTERNING
+	memset(&cleanup, 0, sizeof cleanup);
+#endif
 	batch_objects = idx->limits.purgemap_sweep_batch_objects;
 	if (batch_objects == 0)
 		batch_objects = 1;
@@ -2494,7 +3363,11 @@ cachetag_record_sweep_purgemap(struct cachetag_index *idx,
 			enum cachetag_purgemap_probe_result r;
 			struct cachetag_objent *ent;
 			const uint64_t *folds;
+#if CACHE_TAG_SET_INTERNING
+			struct cachetag_interned_set *set;
+#else
 			void *fold_storage;
+#endif
 			struct objcore *oc;
 			unsigned nfolds;
 
@@ -2514,21 +3387,33 @@ cachetag_record_sweep_purgemap(struct cachetag_index *idx,
 			batch_scanned++;
 			if (r == TAG_PM_PROBE_HARD) {
 				oc = ent->oc;
+				/* Capture before swap-remove relocates another entry. */
+#if CACHE_TAG_SET_INTERNING
+				set = nfolds > 1 ? ent->membership.set : NULL;
+#else
 				fold_storage = nfolds > 1 ?
 				    ent->membership.vector : NULL;
+#endif
 				if (cachetag_side_remove_locked(idx, u) != 0) {
 					obs->aborted = 1;
 					break; /* fail closed: keep the object indexed */
 				}
 				HSH_Kill(oc);
+#if CACHE_TAG_SET_INTERNING
+				if (set != NULL)
+					cachetag_intern_release_locked(idx, set, &cleanup);
+#else
 				cachetag_fold_storage_free(fold_storage, nfolds);
+#endif
 				PTOK(pthread_mutex_lock(&idx->counter_mtx));
 				assert(idx->counters.volatile_edges >= nfolds);
 				idx->counters.volatile_edges -= nfolds;
 				idx->counters.volatile_inline_folds -= nfolds == 1;
+#if !CACHE_TAG_SET_INTERNING
 				idx->counters.volatile_object_count_overflow_bytes -=
 				    nfolds >= TAG_OBJCOUNT_OVERFLOW ?
 				    sizeof(struct cachetag_fold_storage_header) : 0;
+#endif
 				PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 				obs->killed++;
 			} else {
@@ -2571,6 +3456,9 @@ cachetag_record_sweep_purgemap(struct cachetag_index *idx,
 		if (done)
 			break;
 		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	#if CACHE_TAG_SET_INTERNING
+		cachetag_intern_cleanup_free(idx, &cleanup);
+	#endif
 		gap_start = cachetag_now_usec();
 		if (yield_usecs != 0)
 			VTIM_sleep((double)yield_usecs / 1000000.0);
@@ -2608,6 +3496,9 @@ out:
 	cachetag_account_objects_locked(idx);
 	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+#if CACHE_TAG_SET_INTERNING
+	cachetag_intern_cleanup_free(idx, &cleanup);
+#endif
 }
 
 struct cachetag_index *
@@ -2661,23 +3552,38 @@ cachetag_index_delete(struct cachetag_index **idxp)
 	struct cachetag_side_bucket *detached_primary, *detached_retiring;
 	struct cachetag_index *idx;
 	unsigned ndetached_segments;
+	#if CACHE_TAG_SET_INTERNING
+	struct cachetag_intern_cleanup cleanup;
+	#endif
+	#if !CACHE_TAG_SET_INTERNING
 	size_t u;
+	#endif
 
 	TAKE_OBJ_NOTNULL(idx, idxp, TAG_INDEX_MAGIC);
 	memset(detached_segments, 0, sizeof detached_segments);
 	detached_primary = NULL;
 	detached_retiring = NULL;
 	ndetached_segments = 0;
+	#if CACHE_TAG_SET_INTERNING
+	memset(&cleanup, 0, sizeof cleanup);
+	#endif
 	cachetag_index_stop(idx);
 	PTOK(pthread_mutex_lock(&idx->obj_mtx));
+	#if CACHE_TAG_SET_INTERNING
+	cachetag_intern_detach_all_locked(idx, &cleanup);
+	#else
 	for (u = 0; u < idx->nobjects; u++)
 		cachetag_objent_dispose(idx, u);
+#endif
 	ndetached_segments = cachetag_object_detach_segments_locked(idx, 0,
 	    detached_segments);
 	cachetag_side_detach_all_locked(idx, &detached_primary,
 	    &detached_retiring);
 	idx->nobjects = idx->capobjects = 0;
 	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	#if CACHE_TAG_SET_INTERNING
+	cachetag_intern_cleanup_free(idx, &cleanup);
+	#endif
 	free(detached_primary);
 	free(detached_retiring);
 	cachetag_object_free_segments(detached_segments, ndetached_segments);
@@ -2738,16 +3644,28 @@ cachetag_index_detach_all(struct cachetag_index *idx)
 	struct cachetag_objent *detached_segments[TAG_OBJECT_SEGMENTS];
 	struct cachetag_side_bucket *detached_primary, *detached_retiring;
 	unsigned ndetached_segments;
+	#if CACHE_TAG_SET_INTERNING
+	struct cachetag_intern_cleanup cleanup;
+	#endif
+	#if !CACHE_TAG_SET_INTERNING
 	size_t u;
+	#endif
 
 	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
 	memset(detached_segments, 0, sizeof detached_segments);
 	detached_primary = NULL;
 	detached_retiring = NULL;
 	ndetached_segments = 0;
+	#if CACHE_TAG_SET_INTERNING
+	memset(&cleanup, 0, sizeof cleanup);
+	#endif
 	PTOK(pthread_mutex_lock(&idx->obj_mtx));
+	#if CACHE_TAG_SET_INTERNING
+	cachetag_intern_detach_all_locked(idx, &cleanup);
+	#else
 	for (u = 0; u < idx->nobjects; u++)
 		cachetag_objent_dispose(idx, u);
+#endif
 	ndetached_segments = cachetag_object_detach_segments_locked(idx, 0,
 	    detached_segments);
 	cachetag_side_detach_all_locked(idx, &detached_primary,
@@ -2760,6 +3678,9 @@ cachetag_index_detach_all(struct cachetag_index *idx)
 	idx->counters.volatile_object_count_overflow_bytes = 0;
 	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	#if CACHE_TAG_SET_INTERNING
+	cachetag_intern_cleanup_free(idx, &cleanup);
+	#endif
 	free(detached_primary);
 	free(detached_retiring);
 	cachetag_object_free_segments(detached_segments, ndetached_segments);
@@ -2944,8 +3865,12 @@ cachetag_test_structural_limits(struct cachetag_index *idx)
 	struct cachetag_side_bucket corrupt_buckets[2];
 	struct cachetag_side_table corrupt_table;
 	struct objcore *probe_oc;
+#if CACHE_TAG_SET_INTERNING
+	struct cachetag_interned_set *direct_set, *overflow_set;
+#else
 	void *direct_storage, *overflow_storage;
 	uint64_t *values;
+#endif
 	uint64_t hash;
 	uint32_t code;
 	unsigned segment;
@@ -3015,6 +3940,59 @@ cachetag_test_structural_limits(struct cachetag_index *idx)
 	    cachetag_objent_folds(&corrupt_idx, 0) == NULL ||
 	    cachetag_objent_folds(&corrupt_idx, 0)[0] != UINT64_C(0x11))
 		return (0);
+#if CACHE_TAG_SET_INTERNING
+	direct_set = malloc(sizeof *direct_set +
+	    (size_t)TAG_OBJCOUNT_DIRECT_MAX * sizeof(uint64_t));
+	if (direct_set == NULL)
+		return (0);
+	direct_set->magic = TAG_INTERNED_SET_MAGIC;
+	direct_set->nfolds = TAG_OBJCOUNT_DIRECT_MAX;
+	direct_set->hash = 0;
+	direct_set->refs = 1;
+	direct_set->next = NULL;
+	direct_set->folds[TAG_OBJCOUNT_DIRECT_MAX - 1] = UINT64_C(0x254);
+	corrupt_segment.entries[0].membership.set = direct_set;
+	corrupt_segment.counts[0] = TAG_OBJCOUNT_DIRECT_MAX;
+	if (cachetag_objent_nfolds(&corrupt_idx, 0) !=
+	    TAG_OBJCOUNT_DIRECT_MAX ||
+	    cachetag_objent_folds(&corrupt_idx, 0)
+	    [TAG_OBJCOUNT_DIRECT_MAX - 1] != UINT64_C(0x254)) {
+		free(direct_set);
+		return (0);
+	}
+	/* A direct count that disagrees with the set must fail closed. */
+	corrupt_segment.counts[0] = TAG_OBJCOUNT_DIRECT_MAX - 1;
+	if (cachetag_objent_nfolds(&corrupt_idx, 0) != 0) {
+		free(direct_set);
+		return (0);
+	}
+	free(direct_set);
+	overflow_set = malloc(sizeof *overflow_set +
+	    (size_t)TAG_OBJCOUNT_OVERFLOW * sizeof(uint64_t));
+	if (overflow_set == NULL)
+		return (0);
+	overflow_set->magic = TAG_INTERNED_SET_MAGIC;
+	overflow_set->nfolds = TAG_OBJCOUNT_OVERFLOW;
+	overflow_set->hash = 0;
+	overflow_set->refs = 1;
+	overflow_set->next = NULL;
+	overflow_set->folds[TAG_OBJCOUNT_OVERFLOW - 1] = UINT64_C(0x255);
+	corrupt_segment.entries[0].membership.set = overflow_set;
+	corrupt_segment.entries[0].reg_seq = UINT64_C(0xfedcba9876543210);
+	corrupt_segment.counts[0] = TAG_OBJCOUNT_OVERFLOW;
+	corrupt_segment.entries[1] = corrupt_segment.entries[0];
+	corrupt_segment.counts[1] = corrupt_segment.counts[0];
+	if (cachetag_objent_nfolds(&corrupt_idx, 1) !=
+	    TAG_OBJCOUNT_OVERFLOW ||
+	    cachetag_objent_folds(&corrupt_idx, 1)
+	    [TAG_OBJCOUNT_OVERFLOW - 1] != UINT64_C(0x255) ||
+	    corrupt_segment.entries[1].reg_seq !=
+	    UINT64_C(0xfedcba9876543210)) {
+		free(overflow_set);
+		return (0);
+	}
+	free(overflow_set);
+#else
 	direct_storage = cachetag_fold_storage_alloc(TAG_OBJCOUNT_DIRECT_MAX);
 	if (direct_storage == NULL)
 		return (0);
@@ -3064,8 +4042,12 @@ cachetag_test_structural_limits(struct cachetag_index *idx)
 		return (0);
 	}
 	cachetag_fold_storage_free(overflow_storage, TAG_OBJCOUNT_OVERFLOW);
+#endif
 	return (sizeof(struct cachetag_objent) == 24 &&
 	    sizeof(struct cachetag_fold_storage_header) == 8 &&
+#if CACHE_TAG_SET_INTERNING
+	    sizeof(struct cachetag_interned_set) == 32 &&
+#endif
 	    sizeof(*corrupt_segment.counts) == 1 &&
 	    sizeof(struct cachetag_side_bucket) == 8 &&
 	    sizeof(((struct cachetag_side_bucket *)0)->fingerprint) ==
@@ -3242,6 +4224,110 @@ cachetag_test_fail_next_side_migration_alloc(struct cachetag_index *idx)
 	    __ATOMIC_RELEASE);
 	return (1);
 }
+
+#if CACHE_TAG_SET_INTERNING
+
+int
+cachetag_test_fail_next_intern_alloc(struct cachetag_index *idx)
+{
+
+	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
+	__atomic_store_n(&idx->test_fail_next_intern_alloc, 1,
+	    __ATOMIC_RELEASE);
+	return (1);
+}
+
+int
+cachetag_test_intern_initial_buckets(struct cachetag_index *idx, uint32_t n)
+{
+	int accepted;
+
+	if (n == 0 || (n & (n - 1U)) != 0)
+		return (0);
+	PTOK(pthread_mutex_lock(&idx->obj_mtx));
+	accepted = idx->intern_buckets == NULL && idx->intern_old_buckets == NULL &&
+	    idx->intern_sets == 0;
+	if (accepted)
+		idx->test_intern_initial_buckets = n;
+	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	return (accepted);
+}
+
+int
+cachetag_test_fail_next_intern_table_alloc(struct cachetag_index *idx)
+{
+
+	__atomic_store_n(&idx->test_fail_next_intern_table_alloc, 1,
+	    __ATOMIC_RELEASE);
+	return (1);
+}
+
+int
+cachetag_test_intern_migration_active(struct cachetag_index *idx)
+{
+	int active;
+
+	PTOK(pthread_mutex_lock(&idx->obj_mtx));
+	active = idx->intern_migration_active != 0;
+	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	return (active);
+}
+
+int
+cachetag_test_intern_worker_hold(struct cachetag_index *idx, int hold)
+{
+
+	PTOK(pthread_mutex_lock(&idx->obj_mtx));
+	idx->test_intern_worker_hold = hold != 0;
+	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	if (!hold)
+		cachetag_resize_wake(idx);
+	return (1);
+}
+
+int
+cachetag_test_intern_migrate_buckets(struct cachetag_index *idx, uint32_t n)
+{
+	struct cachetag_intern_cleanup cleanup;
+	int active;
+
+	if (n == 0)
+		return (0);
+	if (n > TAG_INTERN_MIGRATE_STEPS)
+		n = TAG_INTERN_MIGRATE_STEPS;
+	memset(&cleanup, 0, sizeof cleanup);
+	PTOK(pthread_mutex_lock(&idx->obj_mtx));
+	active = idx->intern_migration_active != 0;
+	if (active)
+		cachetag_intern_migrate_locked(idx, n, &cleanup);
+	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	cachetag_intern_cleanup_free(idx, &cleanup);
+	return (active);
+}
+
+int
+cachetag_test_intern_active_buckets(struct cachetag_index *idx)
+{
+	size_t n;
+
+	PTOK(pthread_mutex_lock(&idx->obj_mtx));
+	n = idx->intern_nbuckets;
+	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	return (n > INT_MAX ? -EOVERFLOW : (int)n);
+}
+
+int
+cachetag_test_intern_old_buckets(struct cachetag_index *idx)
+{
+	size_t n;
+
+	PTOK(pthread_mutex_lock(&idx->obj_mtx));
+	n = idx->intern_old_nbuckets;
+	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	return (n > INT_MAX ? -EOVERFLOW : (int)n);
+}
+
+#endif /* CACHE_TAG_SET_INTERNING */
 
 int
 cachetag_test_resize_low_water_ready(struct cachetag_index *idx)

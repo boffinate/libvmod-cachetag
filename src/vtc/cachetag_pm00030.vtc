@@ -1,0 +1,200 @@
+vtest "resident membership set interning shares multi-fold sets"
+
+server s1 {
+	rxreq
+	expect req.url == "/a"
+	txresp -body "a-old"
+
+	rxreq
+	expect req.url == "/b"
+	txresp -body "b-old"
+
+	rxreq
+	expect req.url == "/c"
+	txresp -body "c-old"
+
+	rxreq
+	expect req.url == "/d"
+	txresp -body "d-old"
+
+	rxreq
+	expect req.url == "/c-hit"
+	txresp -body "c-hit-old"
+
+	rxreq
+	expect req.url == "/e"
+	txresp -body "e-old"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("stream5_intern", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "HARDPURGE") {
+			set req.http.result = tags.purge(req.http.Tag, hard);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT") {
+			set req.http.result = tags.compact();
+			return (synth(200));
+		}
+		if (req.method == "ARM_INTERN_FAIL") {
+			if (!tags.test_fail_next_intern_alloc()) {
+				return (synth(500));
+			}
+			return (synth(200));
+		}
+		if (req.method == "STATS") {
+			set req.http.objects = tags.objects();
+			set req.http.edges = tags.edges();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/a") {
+			tags.add_header("alpha,beta,gamma");
+		} else if (bereq.url == "/b") {
+			tags.add_header("gamma,alpha,beta");
+		} else if (bereq.url == "/c" || bereq.url == "/c-hit") {
+			tags.add_header("alpha,beta");
+		} else if (bereq.url == "/d") {
+			tags.add("solo");
+		} else if (bereq.url == "/e") {
+			tags.add_header("zeta,eta");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		set resp.http.objects = req.http.objects;
+		set resp.http.edges = req.http.edges;
+		return (deliver);
+	}
+} -start
+
+client c_a {
+	txreq -url "/a"
+	rxresp
+	expect resp.body == "a-old"
+
+	txreq -req STATS
+	rxresp
+	expect resp.http.objects == 1
+	expect resp.http.edges == 3
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 56
+
+client c_b {
+	txreq -url "/b"
+	rxresp
+	expect resp.body == "b-old"
+
+	txreq -req STATS
+	rxresp
+	expect resp.http.objects == 2
+	expect resp.http.edges == 6
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 56
+
+client c_c {
+	txreq -url "/c"
+	rxresp
+	expect resp.body == "c-old"
+
+	txreq -req STATS
+	rxresp
+	expect resp.http.objects == 3
+	expect resp.http.edges == 8
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 104
+
+client c_d {
+	txreq -url "/d"
+	rxresp
+	expect resp.body == "d-old"
+
+	txreq -req STATS
+	rxresp
+	expect resp.http.objects == 4
+	expect resp.http.edges == 9
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 104
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_inline_folds == 1
+
+client c_purge_gamma {
+	txreq -req HARDPURGE -hdr "Tag: gamma"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT
+	rxresp
+	expect resp.http.result == 2
+
+	txreq -req STATS
+	rxresp
+	expect resp.http.objects == 2
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 48
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
+
+client c_fail_seam {
+	txreq -req ARM_INTERN_FAIL
+	rxresp
+	expect resp.status == 200
+
+	# A shared hit must leave the miss-only one-shot fault armed.
+	txreq -url "/c-hit"
+	rxresp
+	expect resp.status == 200
+
+	txreq -url "/e"
+	rxresp
+	expect resp.status == 200
+
+	txreq -req STATS
+	rxresp
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_attach_failures == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
+
+server s1 -wait

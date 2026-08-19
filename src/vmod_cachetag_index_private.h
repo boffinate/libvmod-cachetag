@@ -16,10 +16,16 @@
 #define TAG_INDEX_MAGIC 0x74616769
 #define TAG_OBJECT_SEGMENTS 32
 #define TAG_RESIZE_BATCH_YIELD_SEC 0.0001
+#if CACHE_TAG_SET_INTERNING
+#define TAG_INTERN_LOOKUP_FIRST_MAX_FOLDS 8U
+#endif
 
 struct cachetag_objent;
 struct cachetag_side_bucket;
 struct cachetag_purgemap;
+#if CACHE_TAG_SET_INTERNING
+struct cachetag_interned_set;
+#endif
 
 /*
  * Epoch reader gate: a phase bit plus a per-phase reader count.  Readers pin
@@ -105,6 +111,34 @@ struct cachetag_index {
 	 * handles, so a stale slot generation cannot outlive the mutex-protected
 	 * lookup which resolves an objcore to its current dense slot.
 	 */
+#if CACHE_TAG_SET_INTERNING
+	/*
+	 * Hash-consed multi-fold membership sets. The registry is guarded by
+	 * obj_mtx like the dense object table and side map. Hits and misses survive
+	 * detach_all; the live gauges drain with the objects.
+	 */
+	struct cachetag_interned_set **intern_buckets;
+	size_t intern_nbuckets;
+	struct cachetag_interned_set **intern_old_buckets;
+	size_t intern_old_nbuckets;
+	size_t intern_migrate_cursor;
+	uint64_t intern_generation;
+	unsigned intern_migration_active;
+	size_t intern_detached_set_bytes;
+	size_t intern_detached_table_bytes;
+	size_t intern_sets;
+	size_t intern_refs;
+	size_t intern_bytes;
+	size_t intern_overflow_sets;
+	uint64_t intern_hits;
+	uint64_t intern_misses;
+	struct cachetag_timing_counters intern_acquire_timing;
+	struct cachetag_timing_counters intern_table_grow_timing;
+	struct cachetag_timing_counters intern_set_alloc_timing;
+	struct cachetag_timing_counters intern_candidate_alloc_timing;
+	struct cachetag_timing_counters intern_table_alloc_timing;
+#endif
+
 	struct cachetag_side_table side_primary;
 	struct cachetag_side_table side_retiring;
 	size_t side_migrate_cursor;
@@ -145,6 +179,12 @@ struct cachetag_index {
 	unsigned test_force_next_attach_slot_overflow;
 	unsigned test_fail_next_object_segment_alloc;
 	unsigned test_fail_next_side_migration_alloc;
+#if CACHE_TAG_SET_INTERNING
+	unsigned test_fail_next_intern_alloc;
+	unsigned test_fail_next_intern_table_alloc;
+	unsigned test_intern_worker_hold;
+	size_t test_intern_initial_buckets;
+#endif
 	unsigned test_side_fingerprint_bits;
 	unsigned benchmark_obj_mtx_timing;
 };
@@ -180,16 +220,20 @@ void cachetag_counter_add(struct cachetag_index *, uint64_t *, uint64_t);
 void cachetag_note_stale_call(struct cachetag_index *);
 void cachetag_note_stale_detected(struct cachetag_index *);
 /*
- * On success, cachetag_record_attach_purgemap_take() takes ownership of storage
- * when nfolds > 1.  The caller retains ownership on failure and when
- * nfolds == 1.
+ * Without set interning, a successful multi-fold attach takes ownership of
+ * storage; the caller retains it on failure and for one fold. With set
+ * interning, candidate is an optional unpublished complete set consumed on
+ * every return path; folds is borrowed and may be stack-backed.
  */
 int cachetag_record_attach_purgemap_take(struct cachetag_index *,
-    struct objcore *, void *, unsigned, uint64_t,
+    struct objcore *, void *, uint64_t *, unsigned, uint64_t,
     enum cachetag_purge_mode *);
 void *cachetag_fold_storage_alloc(unsigned);
 uint64_t *cachetag_fold_storage_values(void *, unsigned);
 void cachetag_fold_storage_free(void *, unsigned);
+#if CACHE_TAG_SET_INTERNING
+void *cachetag_intern_candidate_alloc(struct cachetag_index *, unsigned);
+#endif
 void cachetag_record_invalidate(struct cachetag_index *, struct objcore *);
 void cachetag_record_shrink(struct cachetag_index *);
 enum cachetag_purgemap_probe_result cachetag_record_probe_purgemap(

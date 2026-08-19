@@ -26,6 +26,8 @@ Environment:
                         (default: ad-hoc)
   BENCH_RESULT_ID       Unique result id for labels/metadata
                         (default: result directory name)
+  BENCH_SET_INTERNING   1 to build cachetag with --enable-set-interning,
+                        0 to build its direct-vector baseline (default: 0)
   XKEY_SRC              varnish-modules checkout for xkey baseline
                         (default: ../varnish-modules when present)
   RUN_XKEY              1 to build and run xkey baseline, 0 to skip,
@@ -38,6 +40,8 @@ Environment:
                         xkey VMODs (default: empty)
   RUN_NOINDEX           1 to run no-index load baseline, 0 to skip
                         (default: 1)
+  BENCHMARK_CONTRACT    development-v1, comparison-v1, or
+                        interning-screen-v1 (default: development-v1)
   OBJECTS               Objects to insert per workload (default: 1000)
   TAGS_PER_OBJECT       Tags attached in cachetag workload (default: 4)
   BENCH_PROFILE         explicit-purge, uniform-tags, zipfian-tags,
@@ -354,6 +358,7 @@ objects=${OBJECTS:-1000}
 tags_per_object=${TAGS_PER_OBJECT:-4}
 bench_profile=${BENCH_PROFILE:-explicit-purge}
 bench_matrix=${BENCH_MATRIX:-ad-hoc}
+bench_set_interning=${BENCH_SET_INTERNING:-0}
 bench_buckets=${BENCH_BUCKETS:-1024}
 bench_clients=${BENCH_CLIENTS:-1}
 bench_warm_seconds=${BENCH_WARM_SECONDS:-5}
@@ -473,9 +478,13 @@ bench_comparison_memory_endpoints=${BENCH_COMPARISON_MEMORY_ENDPOINTS:-0}
 bench_memory_post_load_quiet_seconds=${BENCH_MEMORY_POST_LOAD_QUIET_SECONDS:-30}
 bench_memory_confirmation_quiet_seconds=${BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS:-10}
 case "$benchmark_contract" in
-	comparison-v1) build_provenance_mode=strict ;;
+	comparison-v1|interning-screen-v1) build_provenance_mode=strict ;;
 	development-v1) build_provenance_mode=development ;;
-	*) echo "BENCHMARK_CONTRACT must be comparison-v1 or development-v1" >&2; exit 2 ;;
+	*) echo "BENCHMARK_CONTRACT must be comparison-v1, interning-screen-v1, or development-v1" >&2; exit 2 ;;
+esac
+case "$bench_set_interning" in
+	0|1) ;;
+	*) echo "BENCH_SET_INTERNING must be 0 or 1" >&2; exit 2 ;;
 esac
 for cpu_list in "$bench_cpuset_cpus" "$bench_driver_cpuset_cpus" "$bench_backend_cpuset_cpus" "$bench_vinyl_cpuset_cpus"; do
 	case "$cpu_list" in *[!0-9,-]*) echo "CPU lists may contain only digits, commas and hyphens" >&2; exit 2 ;; esac
@@ -509,26 +518,6 @@ if [ "$bench_driver_headroom_required" = 1 ]; then
 		exit 2
 	fi
 fi
-if [ "$benchmark_contract" = comparison-v1 ]; then
-	[ "$run_xkey" = 1 ] || { echo "comparison-v1 requires RUN_XKEY=1" >&2; exit 2; }
-	[ "$bench_comparison_memory_endpoints" = 1 ] || { echo "comparison-v1 requires BENCH_COMPARISON_MEMORY_ENDPOINTS=1" >&2; exit 2; }
-	[ "$bench_driver_headroom_required" = 1 ] || { echo "comparison-v1 requires executable driver headroom" >&2; exit 2; }
-	case "$bench_concurrent_target_rps:$bench_warm_seconds" in
-		*[!0-9:]*|0:*|*:0) echo "comparison-v1 requires positive offered-rate and warm-duration values" >&2; exit 2 ;;
-	esac
-	[ "$bench_concurrent_target_rps" = "$bench_driver_headroom_target_rps" ] || {
-		echo "comparison-v1 requires BENCH_CONCURRENT_TARGET_RPS to match the headroom target" >&2; exit 2;
-	}
-	[ -n "$bench_vinyl_cpuset_cpus" ] && [ -n "$bench_driver_cpuset_cpus" ] && [ -n "$bench_backend_cpuset_cpus" ] || {
-		echo "comparison-v1 requires explicit Vinyl, driver and backend CPU sets" >&2; exit 2;
-	}
-fi
-churn_cycles_default=3
-case ",$bench_profile," in
-	*,phase6-fill-drain,*) churn_cycles_default=10 ;;
-esac
-churn_cycles=${CHURN_CYCLES:-$churn_cycles_default}
-runs=${RUNS:-3}
 if [ -n "${RUN_NOINDEX+x}" ]; then
 	run_noindex=$RUN_NOINDEX
 else
@@ -537,6 +526,31 @@ else
 		*) run_noindex=1 ;;
 	esac
 fi
+if [ "$benchmark_contract" = comparison-v1 ] || [ "$benchmark_contract" = interning-screen-v1 ]; then
+	[ "$bench_comparison_memory_endpoints" = 1 ] || { echo "$benchmark_contract requires BENCH_COMPARISON_MEMORY_ENDPOINTS=1" >&2; exit 2; }
+	[ "$bench_driver_headroom_required" = 1 ] || { echo "$benchmark_contract requires executable driver headroom" >&2; exit 2; }
+	case "$bench_concurrent_target_rps:$bench_warm_seconds" in
+		*[!0-9:]*|0:*|*:0) echo "$benchmark_contract requires positive offered-rate and warm-duration values" >&2; exit 2 ;;
+	esac
+	[ "$bench_concurrent_target_rps" = "$bench_driver_headroom_target_rps" ] || {
+		echo "$benchmark_contract requires BENCH_CONCURRENT_TARGET_RPS to match the headroom target" >&2; exit 2;
+	}
+	[ -n "$bench_vinyl_cpuset_cpus" ] && [ -n "$bench_driver_cpuset_cpus" ] && [ -n "$bench_backend_cpuset_cpus" ] || {
+		echo "$benchmark_contract requires explicit Vinyl, driver and backend CPU sets" >&2; exit 2;
+	}
+	if [ "$benchmark_contract" = comparison-v1 ]; then
+		[ "$run_xkey" = 1 ] || { echo "comparison-v1 requires RUN_XKEY=1" >&2; exit 2; }
+	else
+		[ "$run_xkey" = 0 ] || { echo "interning-screen-v1 requires RUN_XKEY=0" >&2; exit 2; }
+		[ "$run_noindex" = 0 ] || { echo "interning-screen-v1 requires RUN_NOINDEX=0" >&2; exit 2; }
+	fi
+fi
+churn_cycles_default=3
+case ",$bench_profile," in
+	*,phase6-fill-drain,*) churn_cycles_default=10 ;;
+esac
+churn_cycles=${CHURN_CYCLES:-$churn_cycles_default}
+runs=${RUNS:-3}
 bench_workload_filter=${BENCH_WORKLOAD_FILTER:-}
 skip_build=${SKIP_BUILD:-0}
 vtc_log_bytes=${VTC_LOG_BYTES:-20M}
@@ -773,6 +787,7 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	--label "org.cachetag.benchmark.matrix=$bench_matrix" \
 	--label "org.cachetag.benchmark.result_id=$bench_result_id" \
 	--label "org.cachetag.benchmark.branch=$bench_branch" \
+	--label "org.cachetag.benchmark.set_interning=$bench_set_interning" \
 	-v "$vinyl_src:/vinyl-src:ro" \
 	$slash_mount_args \
 	-v "$repo_dir:/cachetag-host:ro" \
@@ -784,6 +799,7 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "BENCH_PROFILE=$bench_profile" \
 	-e "BENCH_MATRIX=$bench_matrix" \
 	-e "BENCH_RESULT_ID=$bench_result_id" \
+	-e "BENCH_SET_INTERNING=$bench_set_interning" \
 	-e "BENCH_BUCKETS=$bench_buckets" \
 	-e "BENCH_CLIENTS=$bench_clients" \
 	-e "BENCH_WARM_SECONDS=$bench_warm_seconds" \
@@ -930,6 +946,15 @@ build_cflags=${BENCH_BUILD_CFLAGS:?BENCH_BUILD_CFLAGS is required}
 build_cppflags=${BENCH_BUILD_CPPFLAGS-}
 build_ldflags=${BENCH_BUILD_LDFLAGS-}
 
+case "$BENCH_SET_INTERNING" in
+0) cachetag_configure_args=--disable-set-interning ;;
+1) cachetag_configure_args=--enable-set-interning ;;
+*)
+	echo "BENCH_SET_INTERNING must be 0 or 1" >&2
+	exit 2
+	;;
+esac
+
 log_command() {
 	printf "+ " >> "$build_commands"
 	printf "%q " "$@" >> "$build_commands"
@@ -1068,7 +1093,7 @@ M4EOF
 		-cf - . | tar -C "$cachetag_src" -xf -
 
 	cd "$cachetag_src"
-	run_logged env CPPFLAGS="$build_cppflags" CFLAGS="$build_cflags" LDFLAGS="$build_ldflags" ./bootstrap --prefix="$prefix"
+	run_logged env CPPFLAGS="$build_cppflags" CFLAGS="$build_cflags" LDFLAGS="$build_ldflags" ./bootstrap --prefix="$prefix" "$cachetag_configure_args"
 	run_logged make -j"$(nproc)" V=1
 else
 	test -x "$prefix/bin/vinyltest"
@@ -1238,6 +1263,8 @@ provenance_env=(
 	BUILD_PROVENANCE_CFLAGS="$build_cflags"
 	BUILD_PROVENANCE_CPPFLAGS="$build_cppflags"
 	BUILD_PROVENANCE_LDFLAGS="$build_ldflags"
+	BUILD_PROVENANCE_SET_INTERNING="$BENCH_SET_INTERNING"
+	BUILD_PROVENANCE_CACHETAG_CONFIGURE_ARGS="$cachetag_configure_args"
 )
 if [ "${SKIP_BUILD}" = 1 ]; then
 	env "${provenance_env[@]}" sh /cachetag-host/benchmarks/build_provenance.sh verify \
@@ -1353,6 +1380,8 @@ fi
 	printf "bench_profile=%s\n" "$BENCH_PROFILE"
 	printf "bench_matrix=%s\n" "$BENCH_MATRIX"
 	printf "bench_result_id=%s\n" "$BENCH_RESULT_ID"
+	printf "bench_set_interning=%s\n" "$BENCH_SET_INTERNING"
+	printf "cachetag_configure_args=%s\n" "$cachetag_configure_args"
 	printf "bench_buckets=%s\n" "$BENCH_BUCKETS"
 	printf "bench_clients=%s\n" "$BENCH_CLIENTS"
 	printf "bench_warm_seconds=%s\n" "$BENCH_WARM_SECONDS"

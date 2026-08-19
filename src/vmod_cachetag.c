@@ -373,6 +373,8 @@ cachetag_vsc_update(struct vmod_cachetag_namespace *ns)
 	ns->vsc->group##_obj_mtx_##name = c.group.name
 #define CACHETAG_VSC_PUBLISH_RESIZE(group, name) \
 	ns->vsc->group##_##name = c.group.name
+#define CACHETAG_VSC_PUBLISH_TIMING(group, name) \
+	ns->vsc->group##_##name = c.group.name
 	CACHETAG_VSC_PUBLISH(index_memory_bytes);
 	CACHETAG_VSC_PUBLISH(volatile_side_table_bytes);
 	CACHETAG_VSC_PUBLISH(volatile_side_table_buckets);
@@ -381,6 +383,38 @@ cachetag_vsc_update(struct vmod_cachetag_namespace *ns)
 	CACHETAG_VSC_PUBLISH(volatile_object_table_bytes);
 	CACHETAG_VSC_PUBLISH(volatile_object_count_sidecar_bytes);
 	CACHETAG_VSC_PUBLISH(volatile_object_count_overflow_bytes);
+	CACHETAG_VSC_PUBLISH(volatile_interned_sets);
+	CACHETAG_VSC_PUBLISH(volatile_interned_set_refs);
+	CACHETAG_VSC_PUBLISH(volatile_interned_set_hits);
+	CACHETAG_VSC_PUBLISH(volatile_interned_set_misses);
+	CACHETAG_VSC_PUBLISH(volatile_interned_set_bytes);
+	CACHETAG_VSC_PUBLISH(volatile_interned_table_bytes);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_acquire, calls);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_acquire, usec);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_acquire, max_usec);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_acquire, over_50us);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_acquire, over_250us);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_acquire, over_1ms);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_acquire, over_10ms);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_table_grow, calls);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_table_grow, usec);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_table_grow, max_usec);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_set_alloc, calls);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_set_alloc, usec);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_set_alloc, max_usec);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_candidate_alloc, calls);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_candidate_alloc, usec);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_candidate_alloc, max_usec);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_table_alloc, calls);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_table_alloc, usec);
+	CACHETAG_VSC_PUBLISH_TIMING(volatile_interned_table_alloc, max_usec);
+	CACHETAG_VSC_PUBLISH(volatile_interned_migration_active);
+	CACHETAG_VSC_PUBLISH(volatile_interned_old_table_bytes);
+	CACHETAG_VSC_PUBLISH(volatile_interned_detached_set_bytes);
+	CACHETAG_VSC_PUBLISH(volatile_interned_detached_table_bytes);
+	CACHETAG_VSC_PUBLISH(volatile_interned_table_alloc_failures);
+	CACHETAG_VSC_PUBLISH(volatile_interned_table_grow_failures);
+	CACHETAG_VSC_PUBLISH(volatile_interned_candidate_discards);
 	CACHETAG_VSC_PUBLISH(volatile_object_table_slots);
 	CACHETAG_VSC_PUBLISH(volatile_object_table_shrinks);
 	CACHETAG_VSC_PUBLISH(volatile_objects);
@@ -633,6 +667,7 @@ cachetag_vsc_update(struct vmod_cachetag_namespace *ns)
 	CACHETAG_VSC_PUBLISH(fellow_replayed_records);
 #undef CACHETAG_VSC_PUBLISH_RESIZE
 #undef CACHETAG_VSC_PUBLISH_LOCKWAIT
+#undef CACHETAG_VSC_PUBLISH_TIMING
 #undef CACHETAG_VSC_PUBLISH
 }
 
@@ -1940,6 +1975,96 @@ vmod_namespace_test_fail_next_object_segment_alloc(VRT_CTX,
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	return (cachetag_test_fail_next_object_segment_alloc(ns->index));
 }
+
+#if CACHE_TAG_SET_INTERNING
+
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_fail_next_intern_alloc)
+vmod_namespace_test_fail_next_intern_alloc(VRT_CTX,
+    struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_test_fail_next_intern_alloc(ns->index));
+}
+
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_intern_initial_buckets)
+vmod_namespace_test_intern_initial_buckets(VRT_CTX,
+    struct vmod_cachetag_namespace *ns, VCL_INT buckets)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (buckets <= 0 || (uint64_t)buckets > UINT32_MAX)
+		return (0);
+	return (cachetag_test_intern_initial_buckets(ns->index,
+	    (uint32_t)buckets));
+}
+
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_fail_next_intern_table_alloc)
+vmod_namespace_test_fail_next_intern_table_alloc(VRT_CTX,
+    struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_test_fail_next_intern_table_alloc(ns->index));
+}
+
+VCL_INT v_matchproto_(td_cachetag_namespace_test_intern_migration_active)
+vmod_namespace_test_intern_migration_active(VRT_CTX,
+    struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_test_intern_migration_active(ns->index));
+}
+
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_intern_worker_hold)
+vmod_namespace_test_intern_worker_hold(VRT_CTX,
+    struct vmod_cachetag_namespace *ns, VCL_BOOL hold)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_test_intern_worker_hold(ns->index, hold));
+}
+
+VCL_INT v_matchproto_(td_cachetag_namespace_test_intern_migrate_buckets)
+vmod_namespace_test_intern_migrate_buckets(VRT_CTX,
+    struct vmod_cachetag_namespace *ns, VCL_INT buckets)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (buckets <= 0 || (uint64_t)buckets > UINT32_MAX)
+		return (0);
+	return (cachetag_test_intern_migrate_buckets(ns->index,
+	    (uint32_t)buckets));
+}
+
+VCL_INT v_matchproto_(td_cachetag_namespace_test_intern_active_buckets)
+vmod_namespace_test_intern_active_buckets(VRT_CTX,
+    struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_test_intern_active_buckets(ns->index));
+}
+
+VCL_INT v_matchproto_(td_cachetag_namespace_test_intern_old_buckets)
+vmod_namespace_test_intern_old_buckets(VRT_CTX,
+    struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_test_intern_old_buckets(ns->index));
+}
+
+#endif /* CACHE_TAG_SET_INTERNING */
 
 VCL_BOOL v_matchproto_(td_cachetag_namespace_test_structural_limits)
 vmod_namespace_test_structural_limits(VRT_CTX,

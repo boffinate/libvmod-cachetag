@@ -43,6 +43,14 @@ PURGEMAP_FELLOW_DIRECT_COUNTERS = (
     "purgemap_fellow_store_invariant_failures",
     "purgemap_volatile_fallback_attaches",
 )
+SET_INTERNING_COUNTERS = (
+    "volatile_interned_sets",
+    "volatile_interned_set_refs",
+    "volatile_interned_set_hits",
+    "volatile_interned_set_misses",
+    "volatile_interned_set_bytes",
+    "volatile_interned_table_bytes",
+)
 PURGEMAP_RESTART_PHASES = (
     "post_load",
     "post_restart",
@@ -1135,7 +1143,7 @@ def phase6_interpretation_warnings(
 
 
 def comparison_contract_active(result_dir: Path) -> bool:
-    """Whether this artifact opts into the fail-closed comparison contract.
+    """Whether this artifact opts into a fail-closed comparison contract.
 
     Historical research artifacts predate the contract and remain readable as
     historical diagnostics.  New comparative rows must set this marker rather
@@ -1143,10 +1151,9 @@ def comparison_contract_active(result_dir: Path) -> bool:
     """
     metadata = parse_kv(result_dir / "metadata.env")
     remote = parse_kv(result_dir / "remote-run.env")
-    return (
-        metadata.get("benchmark_contract") == "comparison-v1"
-        or remote.get("benchmark_contract") == "comparison-v1"
-    )
+    return metadata.get("benchmark_contract") in {"comparison-v1", "interning-screen-v1"} or remote.get(
+        "benchmark_contract"
+    ) in {"comparison-v1", "interning-screen-v1"}
 
 
 def cache_main_capture_valid(result_dir: Path, workload: str, run: int, endpoint: str) -> tuple[int, str]:
@@ -1342,30 +1349,36 @@ def comparison_contract_validity(
     driver: dict[str, str],
     stats: dict[str, int],
 ) -> tuple[int, str]:
-    """Return scoped, retained rejection reasons for comparison-v1 rows."""
+    """Return scoped, retained rejection reasons for strict comparison rows."""
     if not comparison_contract_active(result_dir):
         return 1, "not_applicable"
     metadata = parse_kv(result_dir / "metadata.env")
     remote = parse_kv(result_dir / "remote-run.env")
     provenance = parse_kv(result_dir / "build-provenance.env")
+    contract = metadata.get("benchmark_contract") or remote.get("benchmark_contract")
+    interning_screen = contract == "interning-screen-v1"
     reasons: list[str] = []
-    required_provenance = (
+    required_provenance = [
         "build_provenance_version",
         "vinyl_build_input_sha256",
         "cachetag_build_input_sha256",
-        "xkey_build_input_sha256",
-        "xkey_compat_artifact_sha256",
-        "xkey_config_sha256",
         "vinyl_binary_sha256",
         "cachetag_binary_sha256",
-        "xkey_binary_sha256",
         "build_commands_sha256",
         "dockerfile_sha256",
         "docker_image_id",
-    )
+    ]
+    if not interning_screen:
+        required_provenance[3:3] = [
+            "xkey_build_input_sha256",
+            "xkey_compat_artifact_sha256",
+            "xkey_config_sha256",
+        ]
+        required_provenance.insert(8, "xkey_binary_sha256")
     for key in required_provenance:
         if key == "build_provenance_version":
-            if provenance.get(key) != "3":
+            accepted_versions = {"4"} if interning_screen else {"3", "4"}
+            if provenance.get(key) not in accepted_versions:
                 reasons.append(f"provenance_missing:{key}")
         elif key == "docker_image_id":
             if not provenance.get(key) or provenance.get(key) == "none":
@@ -1374,9 +1387,29 @@ def comparison_contract_validity(
             _required_hash(reasons, provenance, key)
     if provenance.get("build_provenance_mode") != "strict" or provenance.get("build_provenance_eligible") != "1":
         reasons.append("provenance_not_comparison_eligible")
-    for source in ("cachetag", "vinyl", "xkey"):
+    for source in (("cachetag", "vinyl") if interning_screen else ("cachetag", "vinyl", "xkey")):
         if provenance.get(f"{source}_dirty_state") != "clean":
             reasons.append(f"provenance_{source}_not_clean")
+    if interning_screen:
+        contract_value = lambda key: metadata.get(key) or remote.get(key)
+        if contract_value("run_xkey") != "0":
+            reasons.append("interning_screen_xkey_arm_present")
+        if contract_value("run_noindex") != "0":
+            reasons.append("interning_screen_noindex_arm_present")
+        set_interning = contract_value("bench_set_interning")
+        configure_args = contract_value("cachetag_configure_args")
+        expected_configure_args = {
+            "0": "--disable-set-interning",
+            "1": "--enable-set-interning",
+        }
+        if set_interning not in expected_configure_args:
+            reasons.append("interning_screen_set_interning_invalid")
+        elif configure_args != expected_configure_args[set_interning]:
+            reasons.append("interning_screen_configure_args_invalid")
+        if provenance.get("bench_set_interning") != set_interning:
+            reasons.append("interning_screen_provenance_set_interning_mismatch")
+        if provenance.get("cachetag_configure_args") != configure_args:
+            reasons.append("interning_screen_provenance_configure_args_mismatch")
     fixture_name = metadata.get("fixture_name") or remote.get("fixture_name") or driver.get("driver_fixture_name")
     declared_fixture_fingerprint = metadata.get("fixture_fingerprint") or remote.get("fixture_fingerprint")
     fixture_fingerprint = declared_fixture_fingerprint
@@ -1744,6 +1777,10 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
             "buddy_g_bytes": buddy_counter(stats, "g_bytes"),
             "buddy_g_space": buddy_counter(stats, "g_space"),
             "cachetag_index_memory_bytes": index_memory,
+            **{
+                f"cachetag_{counter}": cachetag_counter(stats, counter)
+                for counter in SET_INTERNING_COUNTERS
+            },
             "cachetag_keys_total": historical_metrics.get("keys_total"),
             "cachetag_mem_keys": historical_metrics.get("mem_keys"),
             "cachetag_mem_index_base_bytes": mem_index_base_bytes,
@@ -2329,6 +2366,7 @@ def aggregate_workload_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "buddy_g_bytes",
             "buddy_g_space",
             "cachetag_index_memory_bytes",
+            *(f"cachetag_{counter}" for counter in SET_INTERNING_COUNTERS),
             "cachetag_volatile_side_table_bytes",
             "cachetag_volatile_side_table_buckets",
             "cachetag_side_table_grows",
@@ -3178,6 +3216,16 @@ def summarize_result(result_dir: Path) -> tuple[str, str]:
                     f"warm_cache_main={fmt_float(scaled(row.get('cache_main_warm_cpu_seconds_per_hit_median'), 1_000_000), 'us/hit')} "
                     f"warm_p99={fmt_float(scaled(row.get('driver_warm_latency_p99_seconds_median'), 1_000), 'ms')} "
                     f"warm_max={fmt_float(scaled(row.get('driver_warm_latency_max_seconds_median'), 1_000), 'ms')}"
+                )
+            if row.get("cachetag_volatile_interned_sets_median") is not None:
+                lines.append(
+                    "    set interning VSC: "
+                    f"sets={fmt_float(row.get('cachetag_volatile_interned_sets_median'))} "
+                    f"refs={fmt_float(row.get('cachetag_volatile_interned_set_refs_median'))} "
+                    f"hits/misses={fmt_float(row.get('cachetag_volatile_interned_set_hits_median'))}/"
+                    f"{fmt_float(row.get('cachetag_volatile_interned_set_misses_median'))} "
+                    f"set_bytes={fmt_bytes(int(row['cachetag_volatile_interned_set_bytes_median']) if row.get('cachetag_volatile_interned_set_bytes_median') is not None else None)} "
+                    f"table_bytes={fmt_bytes(int(row['cachetag_volatile_interned_table_bytes_median']) if row.get('cachetag_volatile_interned_table_bytes_median') is not None else None)}"
                 )
             if row.get("post_restart_tracked_memory_bytes_median") is not None:
                 lines.append(

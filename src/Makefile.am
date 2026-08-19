@@ -33,10 +33,10 @@ nodist_libvmod_cachetag_la_SOURCES = \
 	vcc_cachetag_if.h
 
 # vmod_cachetag.vcc is a build product: the always-on core fragment plus the
-# fragments selected by --enable-demo-diagnostics / --enable-test-hooks are
-# concatenated into the VCC file consumed by vmodtool (VINYL_VMODS_GENERATED
-# in configure.ac makes vmodtool prefer the builddir copy). The Makefile
-# dependency reruns the concatenation when configure flags change.
+# fragments selected by configure options are concatenated into the VCC file
+# consumed by vmodtool (VINYL_VMODS_GENERATED in configure.ac makes vmodtool
+# prefer the builddir copy). The Makefile dependency reruns the concatenation
+# when configure flags change.
 
 vmod_cachetag_vcc_fragments = $(srcdir)/vmod_cachetag_core.vcc
 if CACHE_TAG_DEMO_DIAGNOSTICS
@@ -44,6 +44,11 @@ vmod_cachetag_vcc_fragments += $(srcdir)/vmod_cachetag_demo_diagnostics.vcc
 endif
 if CACHE_TAG_TEST_HOOKS
 vmod_cachetag_vcc_fragments += $(srcdir)/vmod_cachetag_test_hooks.vcc
+endif
+if CACHE_TAG_SET_INTERNING
+if CACHE_TAG_TEST_HOOKS
+vmod_cachetag_vcc_fragments += $(srcdir)/vmod_cachetag_set_interning_test_hooks.vcc
+endif
 endif
 
 vmod_cachetag.vcc: $(vmod_cachetag_vcc_fragments) Makefile
@@ -95,9 +100,9 @@ AM_VTC_LOG_FLAGS = \
 	-p vcl_path="$(abs_top_srcdir)/vcl:$(VINYLAPI_VCLDIR)" \
 	-p vmod_path="$(abs_builddir)/.libs:$(vmoddir):$(VINYLAPI_VMODDIR)"
 
-# VTCs split by required build surface: core VTCs run in every build, the
-# demo-diagnostics and test-hooks lists run only when the matching configure
-# flag built their VCL methods.
+# VTCs split by required build surface and implementation: core VTCs run in
+# every build; the overflow-accounting VTC follows the selected membership
+# representation; VCL-surface tests require their matching configure flags.
 
 VTC_TESTS_CORE = \
 	vtc/cachetag_c00000.vtc \
@@ -135,8 +140,13 @@ VTC_TESTS_CORE = \
 	vtc/cachetag_pm00012.vtc \
 	vtc/cachetag_pm00013.vtc \
 	vtc/cachetag_pm00017.vtc \
-	vtc/cachetag_pm00018.vtc \
+	vtc/cachetag_pm00018.vtc
+
+VTC_TESTS_NO_SET_INTERNING = \
 	vtc/cachetag_pm00027.vtc
+
+VTC_TESTS_SET_INTERNING = \
+	vtc/cachetag_pm00027_interned.vtc
 
 VTC_TESTS_DEMO_DIAGNOSTICS = \
 	vtc/cachetag_c00025.vtc \
@@ -158,12 +168,29 @@ VTC_TESTS_TEST_HOOKS = \
 	vtc/cachetag_pm00026.vtc \
 	vtc/cachetag_pm00028.vtc
 
+VTC_TESTS_SET_INTERNING_TEST_HOOKS = \
+	vtc/cachetag_pm00030.vtc \
+	vtc/cachetag_pm00031.vtc \
+	vtc/cachetag_pm00032.vtc \
+	vtc/cachetag_pm00033.vtc \
+	vtc/cachetag_pm00034.vtc
+
 VTC_TESTS = $(VTC_TESTS_CORE)
+if CACHE_TAG_SET_INTERNING
+VTC_TESTS += $(VTC_TESTS_SET_INTERNING)
+else
+VTC_TESTS += $(VTC_TESTS_NO_SET_INTERNING)
+endif
 if CACHE_TAG_DEMO_DIAGNOSTICS
 VTC_TESTS += $(VTC_TESTS_DEMO_DIAGNOSTICS)
 endif
 if CACHE_TAG_TEST_HOOKS
 VTC_TESTS += $(VTC_TESTS_TEST_HOOKS)
+endif
+if CACHE_TAG_SET_INTERNING
+if CACHE_TAG_TEST_HOOKS
+VTC_TESTS += $(VTC_TESTS_SET_INTERNING_TEST_HOOKS)
+endif
 endif
 
 FELLOW_VTC_TESTS = \
@@ -213,7 +240,11 @@ EXTRA_DIST = \
 	vmod_cachetag_core.vcc \
 	vmod_cachetag_demo_diagnostics.vcc \
 	vmod_cachetag_test_hooks.vcc \
+	vmod_cachetag_set_interning_test_hooks.vcc \
 	$(VTC_TESTS_CORE) \
+	$(VTC_TESTS_NO_SET_INTERNING) \
+	$(VTC_TESTS_SET_INTERNING) \
 	$(VTC_TESTS_DEMO_DIAGNOSTICS) \
 	$(VTC_TESTS_TEST_HOOKS) \
+	$(VTC_TESTS_SET_INTERNING_TEST_HOOKS) \
 	$(FELLOW_VTC_TESTS)

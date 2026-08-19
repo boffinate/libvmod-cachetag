@@ -64,6 +64,8 @@ common_env=(
   BUILD_PROVENANCE_CFLAGS=-O2
   BUILD_PROVENANCE_CPPFLAGS=-DTEST
   BUILD_PROVENANCE_LDFLAGS=-Wl,test
+  BUILD_PROVENANCE_SET_INTERNING=0
+  BUILD_PROVENANCE_CACHETAG_CONFIGURE_ARGS=--disable-set-interning
 )
 if env "${common_env[@]}" sh /cachetag-host/benchmarks/build_provenance.sh record "$work/cachetag" "$work/vinyl" none "$work/wrong-xkey" default "$work/provenance.env"; then
   echo "expected wrong xkey pin to fail" >&2
@@ -77,6 +79,14 @@ env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$work/provenance-gitconfig" \
 : > "$work/provenance-verify-gitconfig"
 env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$work/provenance-verify-gitconfig" "${common_env[@]}" \
   sh /cachetag-host/benchmarks/build_provenance.sh verify "$work/cachetag" "$work/vinyl" none "$work/owned-xkey" default "$work/owned-provenance.env"
+grep -qx "bench_set_interning=0" "$work/owned-provenance.env"
+grep -qx "cachetag_configure_args=--disable-set-interning" "$work/owned-provenance.env"
+if env "${common_env[@]}" BUILD_PROVENANCE_SET_INTERNING=1 \
+  BUILD_PROVENANCE_CACHETAG_CONFIGURE_ARGS=--enable-set-interning \
+  sh /cachetag-host/benchmarks/build_provenance.sh verify "$work/cachetag" "$work/vinyl" none "$work/owned-xkey" default "$work/owned-provenance.env"; then
+  echo "expected set-interning provenance mismatch to fail" >&2
+  exit 1
+fi
 env "${common_env[@]}" sh /cachetag-host/benchmarks/build_provenance.sh record "$work/cachetag" "$work/vinyl" none /xkey-host default "$work/provenance.env"
 printf dirty > "$work/cachetag/untracked"
 if env "${common_env[@]}" sh /cachetag-host/benchmarks/build_provenance.sh verify "$work/cachetag" "$work/vinyl" none /xkey-host default "$work/provenance.env"; then

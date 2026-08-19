@@ -41,6 +41,8 @@ printf '%s\n' "$transport_names" | while IFS= read -r name; do
 done
 
 grep -F 'envs="\$envs BENCHMARK_CONTRACT=\$CACHE_TAG_BENCHMARK_CONTRACT"' "$script" >/dev/null
+grep -F "CACHE_TAG_BENCH_SET_INTERNING=%s" "$script" >/dev/null
+grep -F 'envs="\$envs BENCH_SET_INTERNING=\$CACHE_TAG_BENCH_SET_INTERNING"' "$script" >/dev/null
 grep -F 'envs="\$envs BENCH_CONCURRENT_TARGET_RPS=\$CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS"' "$script" >/dev/null
 grep -F 'envs="\$envs OBJECTS=\$CACHE_TAG_BENCH_OBJECTS"' "$script" >/dev/null
 

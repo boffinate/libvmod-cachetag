@@ -1,0 +1,36 @@
+SET INTERNING TEST HOOKS
+========================
+
+The following fault injector exists only when the VMOD was configured with both ``--enable-set-interning`` and ``--enable-test-hooks``. It verifies the fail-closed allocation path of the experimental implementation and must not be exposed in a production build.
+
+$Method BOOL .test_fail_next_intern_alloc()
+
+One-shot: fail the next interned membership-set allocation; the affected attach fails closed.
+
+$Method BOOL .test_intern_initial_buckets(INT buckets)
+
+Set the lazy set-interning table's initial bucket count for regression tests.
+
+$Method BOOL .test_fail_next_intern_table_alloc()
+
+Make the next set-interning bucket-array allocation fail.
+
+$Method INT .test_intern_migration_active()
+
+Return ``1`` while a retiring set-interning table is retained.
+
+$Method BOOL .test_intern_worker_hold(BOOL hold)
+
+Pause or resume automatic set-interning migration maintenance.
+
+$Method INT .test_intern_migrate_buckets(INT buckets)
+
+Advance a set-interning migration by at most ``buckets`` steps, capped at the normal request-side migration budget.
+
+$Method INT .test_intern_active_buckets()
+
+Return the active set-interning bucket count.
+
+$Method INT .test_intern_old_buckets()
+
+Return the retiring set-interning bucket count.
