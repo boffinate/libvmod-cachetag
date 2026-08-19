@@ -9,6 +9,8 @@ day or more — read this index before designing or interpreting any benchmark.
 rules that constrain that campaign. A rule that is applicable but not complied
 with must say why.
 
+This checklist applies to new campaign plans, reports, and fresh benchmark interpretations. It does not apply to verbatim archival copies, file moves or renames, or reference notes that preserve an interpretation already completed and documented. Those requests should not trigger a new rules review, evidence analysis, or verification run unless the user explicitly asks for one.
+
 **Campaign scope convention:** before remote execution, every campaign plan records its class (`development screen`, `decision round`, or `release acceptance`), the claims being tested, the minimum row-to-claim mapping, the maximum row/repetition budget, the expected wall-clock duration, and the stop condition. Benchmark rules are conditional constraints, not a cumulative checklist. Passing the planned claims ends the campaign; adding a lane, arm, scale, diagnostic rerun, or acceptance phase beyond the frozen budget requires owner approval. One exact replacement for the campaign's only planned repetition that is ineligible for its required judged scope for a BR-018-eligible reason is a slot-for-slot replacement, not a budget expansion. See [BR-018](BR-018-measurement-voids-fail-loud.md) and [BR-026](BR-026-campaign-scope-and-evidence-budget.md).
 
 **Incident policy:** any benchmark misinterpretation that costs more than half a
