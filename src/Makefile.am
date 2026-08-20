@@ -111,7 +111,8 @@ AM_TESTS_ENVIRONMENT = \
 	PATH="$(abs_builddir):$(VINYL_TEST_PATH):$(PATH)" \
 	LD_LIBRARY_PATH="$(VINYL_LIBRARY_PATH)" \
 	CACHETAG_SRCDIR='$(srcdir)' \
-	CACHETAG_COUNTER_DUMP='$(abs_builddir)/cachetag_counter_dump'
+	CACHETAG_COUNTER_DUMP='$(abs_builddir)/cachetag_counter_dump' \
+	CACHE_TAG_TEST_VSC_PUBLISH_SYNC=1
 TEST_EXTENSIONS = .vtc
 VTC_LOG_COMPILER = vinyltest -v
 AM_VTC_LOG_FLAGS = \
@@ -185,7 +186,10 @@ VTC_TESTS_TEST_HOOKS = \
 	vtc/cachetag_pm00024.vtc \
 	vtc/cachetag_pm00025.vtc \
 	vtc/cachetag_pm00026.vtc \
-	vtc/cachetag_pm00028.vtc
+	vtc/cachetag_pm00028.vtc \
+	vtc/cachetag_pm00035.vtc \
+	vtc/cachetag_pm00036.vtc \
+	vtc/cachetag_pm00037.vtc
 
 VTC_TESTS_SET_INTERNING_TEST_HOOKS = \
 	vtc/cachetag_pm00030.vtc \

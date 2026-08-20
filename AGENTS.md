@@ -101,12 +101,12 @@ scripts/test-fellow-with-vinyl-cache.sh ../vinyl-cache
 ```
 
 For `CACHE_TAG_CHECK_TARGET=check` with the default diagnostic-surface build,
-expect the standalone WAL test, the counter-surface parity check, and the 53
-storage-agnostic VTCs in `VTC_TESTS` (16 `c`, 7 `r`, 30 `pm`) to pass:
+expect the standalone WAL test, the counter-surface parity check, and the 56
+storage-agnostic VTCs in `VTC_TESTS` (16 `c`, 7 `r`, 33 `pm`) to pass:
 
 ```text
-# TOTAL: 55
-# PASS:  55
+# TOTAL: 58
+# PASS:  58
 # FAIL:  0
 # ERROR: 0
 ```

@@ -1,0 +1,77 @@
+vtest "read probes publish immediately while a long interval leaves the segment behind"
+
+# Escape the suite-wide synchronous publish policy so the periodic policy is
+# what is under test.
+setenv CACHE_TAG_TEST_VSC_PUBLISH_SYNC 0
+
+server s1 {
+	rxreq
+	expect req.url == "/one"
+	txresp -body "one"
+
+	rxreq
+	expect req.url == "/two"
+	txresp -body "two"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("slow_publish", sweep_interval = 0s,
+		    vsc_publish_interval = 60s);
+	}
+
+	sub vcl_recv {
+		if (req.url == "/probe") {
+			set req.http.objects = tags.objects();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add(bereq.url);
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_synth {
+		set resp.http.objects = req.http.objects;
+		return (deliver);
+	}
+} -start
+
+client c1 {
+	txreq -url "/one"
+	rxresp
+	expect resp.body == "one"
+
+	txreq -url "/probe"
+	rxresp
+	expect resp.http.objects == 1
+} -run
+
+# objects() published synchronously, so the exact value is in the segment at
+# once.  The thread cannot have contributed: its first tick is 60s away.
+vinyl v1 -expect CACHETAG.vcl1_tags_slow_publish.volatile_objects == 1
+
+client c2 {
+	txreq -url "/two"
+	rxresp
+	expect resp.body == "two"
+} -run
+
+# No probe this time.  The index now holds two objects but the segment must
+# still read one.  -expect retries until it matches, so asserting the *old*
+# value is what proves the segment did not move.
+delay 1
+vinyl v1 -expect CACHETAG.vcl1_tags_slow_publish.volatile_objects == 1
+
+client c3 {
+	txreq -url "/probe"
+	rxresp
+	expect resp.http.objects == 2
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_slow_publish.volatile_objects == 2
+
+server s1 -wait

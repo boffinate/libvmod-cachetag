@@ -58,7 +58,7 @@ feature.
 ## Counter and snapshot semantics
 
 - [BR-003](BR-003-final-post-snapshot-for-convergence.md) — judge convergence only from the final `post` snapshot
-- [BR-004](BR-004-vsc-counters-update-on-vmod-calls.md) — VSC counters update only on VMOD calls; gauges are point-in-time
+- [BR-004](BR-004-vsc-counters-update-on-vmod-calls.md) — VSC counters are published on a cadence plus read probes, not on every VMOD call; gauges are point-in-time
 
 ## Latency and CPU judgment
 

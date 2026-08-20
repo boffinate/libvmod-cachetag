@@ -227,6 +227,7 @@ cachetag_fellow_test_fail_next_visit(void)
 }
 
 #define TAG_NAMESPACE_MAGIC	0x7461676e
+#define TAG_VSC_PUBLISH_INTERVAL_MIN	0.1
 #define TAG_PENDING_MAGIC	0x74616770
 #define CACHETAG_FELLOW_ENVELOPE_MAGIC 0x47415443U
 #define CACHETAG_FELLOW_ENVELOPE_VERSION_V1 1U
@@ -264,6 +265,14 @@ struct vmod_cachetag_namespace {
 				test_next_fellow_attr_corruption;
 	struct VSC_cachetag		*vsc;
 	struct vsc_seg		*vsc_seg;
+	pthread_t		vsc_thread;
+	pthread_mutex_t		vsc_mtx;
+	pthread_cond_t		vsc_cond;
+	pthread_mutex_t		vsc_publish_mtx;
+	double			vsc_publish_interval;
+	unsigned		vsc_publish_sync;
+	unsigned		vsc_running;
+	unsigned		vsc_stop;
 	struct vmod_cachetag_namespace *global_next;
 };
 
@@ -358,19 +367,110 @@ cachetag_namespace_global_remove(struct vmod_cachetag_namespace *ns)
 	cachetag_fellow_provider_release_if_idle();
 }
 
+/*
+ * Counters reach the VSC segment through a per-namespace background thread once
+ * per vsc_publish_interval, and synchronously through the read probes, VCL warm
+ * and VCL cold.  A publish is snapshot-then-store, so vsc_publish_mtx serializes
+ * whole publishes: without it an older in-flight snapshot could land on top of a
+ * newer one and leave the segment permanently behind.
+ */
 static void
-cachetag_vsc_update(struct vmod_cachetag_namespace *ns)
+cachetag_vsc_publish(struct vmod_cachetag_namespace *ns)
 {
 	struct cachetag_counters c;
 
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	if (ns->vsc == NULL)
 		return;
+	PTOK(pthread_mutex_lock(&ns->vsc_publish_mtx));
 	cachetag_snapshot_counters(ns->index, &c);
 
 #define CACHETAG_VSC_PUBLISH(n, t, l, o)	ns->vsc->n = c.n;
 	CACHETAG_COUNTERS(CACHETAG_VSC_PUBLISH)
 #undef CACHETAG_VSC_PUBLISH
+	PTOK(pthread_mutex_unlock(&ns->vsc_publish_mtx));
+}
+
+/*
+ * Mutating call sites only note that the counters moved.  Under the periodic
+ * policy that is a no-op and the publisher thread picks the change up; under the
+ * synchronous policy the call site publishes, which is what keeps assertions
+ * made straight after a mutating call exact.  The call sites stay in place
+ * either way, so the two policies differ only in this one branch.
+ */
+static void
+cachetag_vsc_note_change(struct vmod_cachetag_namespace *ns)
+{
+
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (ns->vsc_publish_sync)
+		cachetag_vsc_publish(ns);
+}
+
+static void *
+cachetag_vsc_publisher(struct worker *wrk, void *priv)
+{
+	struct vmod_cachetag_namespace *ns;
+	struct timespec ts;
+	unsigned stop;
+
+	CHECK_OBJ_NOTNULL(wrk, WORKER_MAGIC);
+	CAST_OBJ_NOTNULL(ns, priv, TAG_NAMESPACE_MAGIC);
+	while (1) {
+		PTOK(pthread_mutex_lock(&ns->vsc_mtx));
+		/* Check before waiting as well as after: a stop that lands
+		 * before the first wait, or during a publish, must not cost
+		 * a whole interval. */
+		if (!ns->vsc_stop) {
+			ts = VTIM_timespec(VTIM_real() +
+			    ns->vsc_publish_interval);
+			(void)pthread_cond_timedwait(&ns->vsc_cond,
+			    &ns->vsc_mtx, &ts);
+		}
+		stop = ns->vsc_stop;
+		PTOK(pthread_mutex_unlock(&ns->vsc_mtx));
+		if (stop)
+			break;
+		cachetag_vsc_publish(ns);
+	}
+	return (NULL);
+}
+
+static void
+cachetag_vsc_publisher_start(struct vmod_cachetag_namespace *ns)
+{
+
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (ns->vsc_publish_sync || ns->vsc == NULL)
+		return;
+	PTOK(pthread_mutex_lock(&ns->vsc_mtx));
+	if (!ns->vsc_running) {
+		ns->vsc_running = 1;
+		ns->vsc_stop = 0;
+		WRK_BgThread(&ns->vsc_thread, "cachetag-vsc",
+		    cachetag_vsc_publisher, ns);
+	}
+	PTOK(pthread_mutex_unlock(&ns->vsc_mtx));
+}
+
+static void
+cachetag_vsc_publisher_stop(struct vmod_cachetag_namespace *ns)
+{
+	unsigned running;
+
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	PTOK(pthread_mutex_lock(&ns->vsc_mtx));
+	running = ns->vsc_running;
+	if (running) {
+		ns->vsc_stop = 1;
+		PTOK(pthread_cond_signal(&ns->vsc_cond));
+	}
+	PTOK(pthread_mutex_unlock(&ns->vsc_mtx));
+	if (running)
+		PTOK(pthread_join(ns->vsc_thread, NULL));
+	PTOK(pthread_mutex_lock(&ns->vsc_mtx));
+	ns->vsc_running = 0;
+	PTOK(pthread_mutex_unlock(&ns->vsc_mtx));
 }
 
 static char *
@@ -1233,7 +1333,7 @@ vmod_namespace_add(VRT_CTX, struct vmod_cachetag_namespace *ns, VCL_STRING key)
 	CHECK_OBJ_NOTNULL(ctx, VRT_CTX_MAGIC);
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	(void)cachetag_add_key(ctx, ns, key);
-	cachetag_vsc_update(ns);
+	cachetag_vsc_note_change(ns);
 }
 
 static int
@@ -1388,7 +1488,7 @@ vmod_namespace_add_header(VRT_CTX, struct vmod_cachetag_namespace *ns,
 	r = cachetag_parse_add(ctx, ns, header, sep);
 	if (r != 0)
 		VRT_fail(ctx, "cachetag.add_header(): parse or limit failure");
-	cachetag_vsc_update(ns);
+	cachetag_vsc_note_change(ns);
 }
 
 static enum cachetag_purge_mode
@@ -1434,7 +1534,7 @@ vmod_namespace_purge(VRT_CTX, struct vmod_cachetag_namespace *ns, VCL_STRING key
 	CHECK_OBJ_NOTNULL(ctx, VRT_CTX_MAGIC);
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	r = cachetag_purge(ns->index, key, cachetag_parse_mode(mode_e));
-	cachetag_vsc_update(ns);
+	cachetag_vsc_note_change(ns);
 	return (r);
 }
 
@@ -1447,7 +1547,7 @@ vmod_namespace_purge_header(VRT_CTX, struct vmod_cachetag_namespace *ns,
 	CHECK_OBJ_NOTNULL(ctx, VRT_CTX_MAGIC);
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	r = cachetag_purge_header_tokens(ctx, ns, header, sep, mode_e);
-	cachetag_vsc_update(ns);
+	cachetag_vsc_note_change(ns);
 	return (r);
 }
 
@@ -1558,7 +1658,7 @@ vmod_namespace_stale(VRT_CTX, struct vmod_cachetag_namespace *ns)
 		HSH_Kill(oc);
 		cachetag_death(ns->index, oc);
 	}
-	cachetag_vsc_update(ns);
+	cachetag_vsc_note_change(ns);
 	return (r);
 }
 
@@ -1577,7 +1677,7 @@ vmod_namespace_pending(VRT_CTX, struct vmod_cachetag_namespace *ns)
 			n++;
 	}
 	PTOK(pthread_mutex_unlock(&ns->mtx));
-	cachetag_vsc_update(ns);
+	cachetag_vsc_publish(ns);
 	return (n);
 }
 
@@ -1587,7 +1687,7 @@ vmod_namespace_objects(VRT_CTX, struct vmod_cachetag_namespace *ns)
 
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
-	cachetag_vsc_update(ns);
+	cachetag_vsc_publish(ns);
 	return ((VCL_INT)cachetag_object_count(ns->index));
 }
 
@@ -1597,7 +1697,7 @@ vmod_namespace_edges(VRT_CTX, struct vmod_cachetag_namespace *ns)
 
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
-	cachetag_vsc_update(ns);
+	cachetag_vsc_publish(ns);
 	return ((VCL_INT)cachetag_edge_count(ns->index));
 }
 
@@ -1609,7 +1709,7 @@ vmod_namespace_compact(VRT_CTX, struct vmod_cachetag_namespace *ns)
 	CHECK_OBJ_NOTNULL(ctx, VRT_CTX_MAGIC);
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	r = (VCL_INT)cachetag_compact_all(ns->index);
-	cachetag_vsc_update(ns);
+	cachetag_vsc_publish(ns);
 	return (r);
 }
 
@@ -1802,7 +1902,7 @@ vmod_namespace_test_side_start_migration(VRT_CTX,
 	if (buckets <= 0 || (uint64_t)buckets > UINT32_MAX)
 		return (0);
 	r = cachetag_test_side_start_migration(ns->index, (uint32_t)buckets);
-	cachetag_vsc_update(ns);
+	cachetag_vsc_publish(ns);
 	return (r);
 }
 
@@ -1817,7 +1917,7 @@ vmod_namespace_test_side_migrate_buckets(VRT_CTX,
 	if (buckets <= 0 || (uint64_t)buckets > UINT32_MAX)
 		return (0);
 	r = cachetag_test_side_migrate_buckets(ns->index, (uint32_t)buckets);
-	cachetag_vsc_update(ns);
+	cachetag_vsc_publish(ns);
 	return (r);
 }
 
@@ -1830,7 +1930,7 @@ vmod_namespace_test_side_migration_active(VRT_CTX,
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	r = cachetag_test_side_migration_active(ns->index);
-	cachetag_vsc_update(ns);
+	cachetag_vsc_publish(ns);
 	return (r);
 }
 
@@ -1863,7 +1963,7 @@ vmod_namespace_test_resize_low_water_ready(VRT_CTX,
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	r = cachetag_test_resize_low_water_ready(ns->index);
-	cachetag_vsc_update(ns);
+	cachetag_vsc_publish(ns);
 	return (r);
 }
 
@@ -1878,7 +1978,7 @@ vmod_namespace_test_resize_worker_drain(VRT_CTX,
 	if (timeout_ms < 0 || (uint64_t)timeout_ms > UINT32_MAX)
 		return (0);
 	r = cachetag_test_resize_worker_drain(ns->index, (uint32_t)timeout_ms);
-	cachetag_vsc_update(ns);
+	cachetag_vsc_publish(ns);
 	return (r);
 }
 
@@ -1991,7 +2091,7 @@ cachetag_obj_cb(struct worker *wrk, void *priv, struct objcore *oc, unsigned eve
 		 * before nominal TTL. FDO-direct Fellow objects have no volatile
 		 * record, so this is a cheap no-op for them. */
 		cachetag_death(ns->index, oc);
-		cachetag_vsc_update(ns);
+		cachetag_vsc_note_change(ns);
 		return;
 	}
 	if (event != OEV_INSERT)
@@ -2002,7 +2102,7 @@ cachetag_obj_cb(struct worker *wrk, void *priv, struct objcore *oc, unsigned eve
 		tp->consumed = 1;
 	PTOK(pthread_mutex_unlock(&ns->mtx));
 	if (tp == NULL) {
-		cachetag_vsc_update(ns);
+		cachetag_vsc_note_change(ns);
 		return;
 	}
 	attach_purge = (enum cachetag_purge_mode)-1;
@@ -2052,7 +2152,7 @@ cachetag_obj_cb(struct worker *wrk, void *priv, struct objcore *oc, unsigned eve
 			cachetag_death(ns->index, oc);
 	}
 	cachetag_pending_publication_done(tp);
-	cachetag_vsc_update(ns);
+	cachetag_vsc_note_change(ns);
 }
 
 static void
@@ -2163,7 +2263,8 @@ cachetag_namespace_warm(struct vmod_cachetag_namespace *ns)
 		ns->warm_pid = pid;
 		PTOK(pthread_mutex_unlock(&ns->mtx));
 	}
-	cachetag_vsc_update(ns);
+	cachetag_vsc_publish(ns);
+	cachetag_vsc_publisher_start(ns);
 	return (0);
 }
 
@@ -2173,6 +2274,11 @@ cachetag_namespace_cold(struct vmod_cachetag_namespace *ns)
 	uintptr_t h;
 
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	/* Join the publisher before anything it reads is torn down.  __fini
+	 * reaches VSC_cachetag_Destroy() only through here, so the segment
+	 * outlives the thread.  A second cold, or a cold on the warm failure
+	 * path before the thread ever started, is a no-op. */
+	cachetag_vsc_publisher_stop(ns);
 	PTOK(pthread_mutex_lock(&ns->mtx));
 	ns->warm_pid = 0;
 	ns->fellow_direct_active = 0;
@@ -2189,6 +2295,7 @@ cachetag_namespace_cold(struct vmod_cachetag_namespace *ns)
 		ObjUnsubscribeEvents(&h);
 	cachetag_index_detach_all(ns->index);
 	cachetag_fellow_provider_release_if_idle();
+	cachetag_vsc_publish(ns);
 }
 
 VCL_VOID v_matchproto_(td_cachetag_namespace__init)
@@ -2198,7 +2305,7 @@ vmod_namespace__init(VRT_CTX, struct vmod_cachetag_namespace **nsp,
     VCL_STRING persist_path, VCL_ENUM wal_fsync, VCL_INT wal_segment_bytes,
     VCL_DURATION sweep_interval, VCL_INT purge_history_max_entries,
     VCL_INT sweep_batch_objects, VCL_DURATION sweep_batch_hold,
-    VCL_DURATION sweep_batch_yield)
+    VCL_DURATION sweep_batch_yield, VCL_DURATION vsc_publish_interval)
 {
 	struct vmod_cachetag_namespace *ns;
 	char *vsc_name;
@@ -2209,6 +2316,11 @@ vmod_namespace__init(VRT_CTX, struct vmod_cachetag_namespace **nsp,
 	CHECK_OBJ_NOTNULL(ctx, VRT_CTX_MAGIC);
 	AN(nsp);
 	AZ(*nsp);
+	if (vsc_publish_interval < 0) {
+		VRT_fail(ctx, "cachetag.namespace(): vsc_publish_interval "
+		    "must not be negative");
+		return;
+	}
 	cachetag_limits_default(&limits);
 	if (max_keys_per_object > 0)
 		limits.max_keys_per_object = (unsigned)max_keys_per_object;
@@ -2242,6 +2354,22 @@ vmod_namespace__init(VRT_CTX, struct vmod_cachetag_namespace **nsp,
 	ns->vcl_name = strdup(vcl_name);
 	AN(ns->vcl_name);
 	PTOK(pthread_mutex_init(&ns->mtx, NULL));
+	PTOK(pthread_mutex_init(&ns->vsc_mtx, NULL));
+	PTOK(pthread_mutex_init(&ns->vsc_publish_mtx, NULL));
+	PTOK(pthread_cond_init(&ns->vsc_cond, NULL));
+	/* The effective policy is decided once, here: no request path ever
+	 * calls getenv().  A positive cadence below the vinylstat refresh floor
+	 * buys nothing, so it is clamped up to it. */
+	ns->vsc_publish_interval = vsc_publish_interval;
+	if (ns->vsc_publish_interval > 0 &&
+	    ns->vsc_publish_interval < TAG_VSC_PUBLISH_INTERVAL_MIN)
+		ns->vsc_publish_interval = TAG_VSC_PUBLISH_INTERVAL_MIN;
+	ns->vsc_publish_sync = ns->vsc_publish_interval == 0;
+#if CACHE_TAG_TEST_HOOKS
+	if (getenv("CACHE_TAG_TEST_VSC_PUBLISH_SYNC") != NULL &&
+	    strcmp(getenv("CACHE_TAG_TEST_VSC_PUBLISH_SYNC"), "0") != 0)
+		ns->vsc_publish_sync = 1;
+#endif
 	ns->index = cachetag_index_new(name, &limits, &persist);
 	AN(ns->index);
 	cachetag_namespace_digest(ns->index, &ns->namespace_digest_hi,
@@ -2260,6 +2388,9 @@ vmod_namespace__init(VRT_CTX, struct vmod_cachetag_namespace **nsp,
 		if (ns->vsc != NULL)
 			VSC_cachetag_Destroy(&ns->vsc_seg);
 		cachetag_index_delete(&ns->index);
+		PTOK(pthread_cond_destroy(&ns->vsc_cond));
+		PTOK(pthread_mutex_destroy(&ns->vsc_publish_mtx));
+		PTOK(pthread_mutex_destroy(&ns->vsc_mtx));
 		PTOK(pthread_mutex_destroy(&ns->mtx));
 		free(ns->vcl_name);
 		FREE_OBJ(ns);
@@ -2284,6 +2415,9 @@ vmod_namespace__fini(struct vmod_cachetag_namespace **nsp)
 	if (ns->vsc != NULL)
 		VSC_cachetag_Destroy(&ns->vsc_seg);
 	cachetag_index_delete(&ns->index);
+	PTOK(pthread_cond_destroy(&ns->vsc_cond));
+	PTOK(pthread_mutex_destroy(&ns->vsc_publish_mtx));
+	PTOK(pthread_mutex_destroy(&ns->vsc_mtx));
 	PTOK(pthread_mutex_destroy(&ns->mtx));
 	free(ns->vcl_name);
 	FREE_OBJ(ns);

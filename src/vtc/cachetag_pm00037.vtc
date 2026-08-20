@@ -1,0 +1,150 @@
+vtest "VSC publisher stops and restarts across a VCL reload and discard under traffic"
+
+# Escape the suite-wide synchronous publish policy: the point of this case is
+# that a real publisher thread is started, stopped and joined per namespace.
+setenv CACHE_TAG_TEST_VSC_PUBLISH_SYNC 0
+
+barrier b_slow_tagged sock 2
+barrier b_slow_continue sock 2
+
+server s1 {
+	rxreq
+	expect req.url == "/hot"
+	txresp -body "hot-1"
+
+	rxreq
+	expect req.url == "/slow"
+	txresp -body "slow-1"
+
+	rxreq
+	expect req.url == "/second"
+	txresp -body "second-1"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("first", sweep_interval = 0s,
+		    vsc_publish_interval = 0.1s);
+	}
+
+	sub vcl_recv {
+		if (req.url == "/probe") {
+			set req.http.objects = tags.objects();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add(bereq.url);
+		set beresp.ttl = 1h;
+		if (bereq.url == "/slow") {
+			vtc.barrier_sync("${b_slow_tagged_sock}");
+			vtc.barrier_sync("${b_slow_continue_sock}");
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.objects = req.http.objects;
+		return (deliver);
+	}
+} -start
+
+# This VTC deliberately takes a *populated* namespace cold: vcl1 still holds
+# volatile membership when it is discarded.  Do not simplify the caching away.
+client c_hot {
+	txreq -url "/hot"
+	rxresp
+	expect resp.body == "hot-1"
+} -run
+
+# Published by the thread alone: the insert did not publish and no probe ran.
+vinyl v1 -expect CACHETAG.vcl1_tags_first.volatile_objects == 1
+
+# Park a fetch inside vcl1 so the reload and the discard both happen while that
+# VCL is genuinely busy.
+client c_slow {
+	txreq -url "/slow"
+	rxresp
+	expect resp.body == "slow-1"
+} -start
+
+barrier b_slow_tagged sync
+
+client c_traffic -repeat 20 -keepalive {
+	txreq -url "/hot"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "hot-1"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("second", sweep_interval = 0s,
+		    vsc_publish_interval = 0.1s);
+	}
+
+	sub vcl_recv {
+		if (req.url == "/probe") {
+			set req.http.objects = tags.objects();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add(bereq.url);
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_synth {
+		set resp.http.objects = req.http.objects;
+		return (deliver);
+	}
+}
+
+vinyl v1 -cliok "vcl.use vcl2"
+vinyl v1 -cliok "vcl.discard vcl1"
+
+barrier b_slow_continue sync
+client c_slow -wait
+client c_traffic -wait
+
+# vcl1 can only cool once its last request drains; cooling joins its publisher
+# thread before __fini destroys the VSC segment.  A hung join would stall the
+# CLI and everything below it.
+vinyl v1 -cliok "vcl.list"
+
+client c_second {
+	txreq -url "/second"
+	rxresp
+	expect resp.body == "second-1"
+} -run
+
+# The reloaded VCL's namespace has a publisher of its own.
+vinyl v1 -expect CACHETAG.vcl2_tags_second.volatile_objects == 1
+
+client c_probe {
+	txreq -url "/probe"
+	rxresp
+	expect resp.http.objects == 1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl2_tags_second.volatile_edges == 1
+
+server s1 -wait

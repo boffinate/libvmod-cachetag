@@ -1,0 +1,48 @@
+vtest "background VSC publisher moves counters with no VMOD call in flight"
+
+# Escape the suite-wide synchronous publish policy: this case is about the
+# per-namespace publisher thread, which the synchronous policy never starts.
+setenv CACHE_TAG_TEST_VSC_PUBLISH_SYNC 0
+
+server s1 {
+	rxreq
+	expect req.url == "/idle"
+	txresp -body "idle-1"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("idle_publish", sweep_interval = 0s,
+		    vsc_publish_interval = 0.1s);
+	}
+
+	sub vcl_backend_response {
+		tags.add("idle");
+		set beresp.ttl = 2s;
+		set beresp.grace = 0s;
+		set beresp.keep = 0s;
+	}
+} -start
+
+client c1 {
+	txreq -url "/idle"
+	rxresp
+	expect resp.body == "idle-1"
+} -run
+
+# Registration and insert are mutating sites and no longer publish, and no read
+# probe runs here.  Only the publisher thread can move the segment off the zero
+# that VCL warm published.
+vinyl v1 -expect CACHETAG.vcl1_tags_idle_publish.volatile_objects == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_idle_publish.volatile_edges == 1
+
+# Expiry is a mutating site too, and it happens with no request in flight at
+# all: nothing but the thread is left to publish the accounting.
+delay 3
+vinyl v1 -expect MAIN.n_expired >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_idle_publish.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_idle_publish.volatile_edges == 0
+
+server s1 -wait

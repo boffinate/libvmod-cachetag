@@ -23,7 +23,8 @@ $Object namespace(STRING name = "default",
 		  INT purge_history_max_entries = 1000000,
 		  INT sweep_batch_objects = 8192,
 		  DURATION sweep_batch_hold = 0.00025,
-		  DURATION sweep_batch_yield = 0.0001)
+		  DURATION sweep_batch_yield = 0.0001,
+		  DURATION vsc_publish_interval = 0.1)
 
 Create a cache-tag namespace.
 
@@ -45,6 +46,15 @@ production caps should be generous.
 ``sweep_batch_objects`` and ``sweep_batch_hold`` bound each volatile-membership
 sweep batch by object count and elapsed ``obj_mtx`` hold time. ``sweep_batch_yield``
 optionally adds a cooperative sleep after releasing ``obj_mtx`` between batches.
+
+``vsc_publish_interval`` sets how often a per-namespace background thread
+publishes this namespace's ``CACHETAG.*`` counters, and defaults to ``0.1s`` to
+match ``vinylstat``'s refresh floor. ``objects()``, ``pending()``, ``edges()``
+and ``compact()`` publish immediately, so a read probe always sees an exact
+snapshot; mutating calls do not publish and are picked up on the next tick.
+``0s`` publishes synchronously on every call, which is the legacy behaviour and
+is useful for tests and debugging; a positive value below ``0.1s`` is clamped up
+to it, and a negative value is a VCL initialisation error.
 
 ``persist_path`` enables durable purge history. The WAL is replayed before the
 namespace becomes ready. Fellow objects keep their folded tags and registration
