@@ -30,6 +30,12 @@ Environment:
                         (default: ../varnish-modules when present)
   RUN_XKEY              1 to build and run xkey baseline, 0 to skip,
                         auto to run when XKEY_SRC exists (default: auto)
+  BENCH_BUILD_CFLAGS    Explicit common optimization/debug flags for the
+                        cachetag and xkey VMODs (default: "-O2 -g")
+  BENCH_BUILD_CPPFLAGS  Explicit common preprocessor flags for the cachetag
+                        and xkey VMODs (default: empty)
+  BENCH_BUILD_LDFLAGS   Explicit common linker flags for the cachetag and
+                        xkey VMODs (default: empty)
   RUN_NOINDEX           1 to run no-index load baseline, 0 to skip
                         (default: 1)
   OBJECTS               Objects to insert per workload (default: 1000)
@@ -40,6 +46,10 @@ Environment:
                         single-unique-tag, ten-unique-tags,
                         five-unique-five-shared, cutover-mostly-unique,
                         cutover-mostly-shared, cutover-mixed,
+                        mostly-unique-bound, mostly-shared-bound,
+                        uniform-cyclic, hot-set, ordinary-body-4k,
+                        cms-trace-static-v1, cms-trace-hot-set-v1,
+                        xkey-contract,
                         short-ttl-high-churn,
                         bulk-purge-bursts, concurrent, purge-storm,
                         purged-cold-residency, populated-map-warm,
@@ -261,6 +271,14 @@ Environment:
                         Restrict only the load driver with taskset -c.
   BENCH_BACKEND_CPUSET_CPUS
                         Restrict only the origin backend with taskset -c.
+  BENCH_VINYL_CPUSET_CPUS
+                        Restrict vinyltest and its Vinyl manager/cache children.
+  BENCH_DRIVER_GOMAXPROCS, BENCH_BACKEND_GOMAXPROCS
+                        Pin Go scheduler capacity (default: 1 for each helper).
+  BENCH_DRIVER_GOGC, BENCH_BACKEND_GOGC
+                        Pin Go GC percentage (default: 100).
+  BENCH_DRIVER_GOMEMLIMIT, BENCH_BACKEND_GOMEMLIMIT
+                        Pin Go memory limit (default: off).
   BENCH_DRIVER_HEADROOM_REQUIRED
                         1 requires an assigned driver CPU set and explicit
                         trivial-endpoint headroom declaration below (default: 0).
@@ -277,9 +295,6 @@ Environment:
                         Reuse is provenance-checked: the run fails if the cached
                         build's recorded source hashes no longer match the
                         mounted sources (benchmarks/rules/BR-016)
-  CACHE_TAG_ALLOW_STALE_BUILD
-                        1 to downgrade a SKIP_BUILD provenance mismatch to a
-                        warning for a deliberate stale-build reuse (default: 0)
   VTC_LOG_BYTES         vinyltest internal log buffer size (default: 20M)
   VTC_TIMEOUT           vinyltest timeout in seconds (default: 300)
   VTC_QUIET             1 to pass -q to vinyltest, 0 to pass -v for full VTC logs
@@ -325,6 +340,16 @@ vinyl_src=$(CDPATH= cd -- "$vinyl_src" && pwd)
 image=${VINYL_DOCKER_IMAGE:-vinyl-cache-ubuntu-build}
 docker_cmd=${DOCKER:-docker}
 docker_run_args=${DOCKER_RUN_ARGS:-}
+benchmark_dockerfile="$repo_dir/docker/vinyl-cache-ubuntu-build.Dockerfile"
+test -f "$benchmark_dockerfile" || {
+	echo "benchmark Dockerfile is missing: $benchmark_dockerfile" >&2
+	exit 1
+}
+image_id=$($docker_cmd image inspect --format '{{.Id}}' "$image" 2>/dev/null) || {
+	echo "benchmark image is unavailable locally: $image" >&2
+	echo "Build or load the documented local image before running a benchmark." >&2
+	exit 1
+}
 objects=${OBJECTS:-1000}
 tags_per_object=${TAGS_PER_OBJECT:-4}
 bench_profile=${BENCH_PROFILE:-explicit-purge}
@@ -336,6 +361,7 @@ bench_warm_validate_hit=${BENCH_WARM_VALIDATE_HIT:-1}
 bench_residency_validate_objects=${BENCH_RESIDENCY_VALIDATE_OBJECTS:-0}
 bench_http_timeout=${BENCH_HTTP_TIMEOUT:-30}
 bench_tag_universe=${BENCH_TAG_UNIVERSE:-10000}
+bench_hot_set_objects=${BENCH_HOT_SET_OBJECTS:-0}
 bench_tag_length_class=${BENCH_TAG_LENGTH_CLASS:-default}
 bench_validate_tag_shape=${BENCH_VALIDATE_TAG_SHAPE:-0}
 bench_purge_requests=${BENCH_PURGE_REQUESTS:-100}
@@ -425,9 +451,42 @@ bench_vinyl_thread_pools=${BENCH_VINYL_THREAD_POOLS:-2}
 bench_cpuset_cpus=${BENCH_CPUSET_CPUS:-}
 bench_driver_cpuset_cpus=${BENCH_DRIVER_CPUSET_CPUS:-}
 bench_backend_cpuset_cpus=${BENCH_BACKEND_CPUSET_CPUS:-}
+bench_vinyl_cpuset_cpus=${BENCH_VINYL_CPUSET_CPUS:-}
+bench_driver_gomaxprocs=${BENCH_DRIVER_GOMAXPROCS:-1}
+bench_backend_gomaxprocs=${BENCH_BACKEND_GOMAXPROCS:-1}
+bench_driver_gogc=${BENCH_DRIVER_GOGC:-100}
+bench_backend_gogc=${BENCH_BACKEND_GOGC:-100}
+bench_driver_gomemlimit=${BENCH_DRIVER_GOMEMLIMIT:-off}
+bench_backend_gomemlimit=${BENCH_BACKEND_GOMEMLIMIT:-off}
+benchmark_contract=${BENCHMARK_CONTRACT:-development-v1}
+xkey_src=${XKEY_SRC:-"$repo_dir/../varnish-modules"}
+run_xkey=${RUN_XKEY:-auto}
+if [ "$run_xkey" = auto ]; then
+	if [ -d "$xkey_src/src" ]; then
+		run_xkey=1
+	else
+		run_xkey=0
+	fi
+fi
+bench_fixture_manifest=${BENCH_FIXTURE_MANIFEST:-/cachetag-host/benchmarks/fixtures/cms-trace-static-v1.manifest.json}
+bench_comparison_memory_endpoints=${BENCH_COMPARISON_MEMORY_ENDPOINTS:-0}
+bench_memory_post_load_quiet_seconds=${BENCH_MEMORY_POST_LOAD_QUIET_SECONDS:-30}
+bench_memory_confirmation_quiet_seconds=${BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS:-10}
+case "$benchmark_contract" in
+	comparison-v1) build_provenance_mode=strict ;;
+	development-v1) build_provenance_mode=development ;;
+	*) echo "BENCHMARK_CONTRACT must be comparison-v1 or development-v1" >&2; exit 2 ;;
+esac
+for cpu_list in "$bench_cpuset_cpus" "$bench_driver_cpuset_cpus" "$bench_backend_cpuset_cpus" "$bench_vinyl_cpuset_cpus"; do
+	case "$cpu_list" in *[!0-9,-]*) echo "CPU lists may contain only digits, commas and hyphens" >&2; exit 2 ;; esac
+done
+case "$bench_driver_gomaxprocs:$bench_backend_gomaxprocs:$bench_driver_gogc:$bench_backend_gogc" in
+	*[!0-9:]*) echo "GOMAXPROCS and GOGC controls must be non-negative integers" >&2; exit 2 ;;
+esac
 bench_driver_headroom_required=${BENCH_DRIVER_HEADROOM_REQUIRED:-0}
 bench_driver_headroom_target_rps=${BENCH_DRIVER_HEADROOM_TARGET_RPS:-}
 bench_driver_headroom_proven_rps=${BENCH_DRIVER_HEADROOM_PROVEN_RPS:-}
+bench_driver_headroom_seconds=${BENCH_DRIVER_HEADROOM_SECONDS:-3}
 case "$bench_vinyl_thread_pool_max:$bench_vinyl_thread_pools" in
 	*[!0-9:]*|0:*|*:0)
 		echo "BENCH_VINYL_THREAD_POOL_MAX and BENCH_VINYL_THREAD_POOLS must be positive integers" >&2
@@ -439,9 +498,9 @@ case "$bench_driver_headroom_required" in
 	*) echo "BENCH_DRIVER_HEADROOM_REQUIRED must be 0 or 1" >&2; exit 2 ;;
 esac
 if [ "$bench_driver_headroom_required" = 1 ]; then
-	case "$bench_driver_headroom_target_rps:$bench_driver_headroom_proven_rps" in
+	case "$bench_driver_headroom_target_rps:$bench_driver_headroom_seconds" in
 		*[!0-9:]*|0:*|*:0)
-			echo "driver headroom gate requires positive integer TARGET_RPS and PROVEN_RPS" >&2
+			echo "driver headroom gate requires positive integer TARGET_RPS and duration" >&2
 			exit 2
 			;;
 	esac
@@ -449,10 +508,20 @@ if [ "$bench_driver_headroom_required" = 1 ]; then
 		echo "driver headroom gate requires BENCH_DRIVER_CPUSET_CPUS" >&2
 		exit 2
 	fi
-	if [ "$bench_driver_headroom_proven_rps" -lt "$((bench_driver_headroom_target_rps * 120 / 100))" ]; then
-		echo "driver headroom gate requires PROVEN_RPS >= 120% of TARGET_RPS" >&2
-		exit 2
-	fi
+fi
+if [ "$benchmark_contract" = comparison-v1 ]; then
+	[ "$run_xkey" = 1 ] || { echo "comparison-v1 requires RUN_XKEY=1" >&2; exit 2; }
+	[ "$bench_comparison_memory_endpoints" = 1 ] || { echo "comparison-v1 requires BENCH_COMPARISON_MEMORY_ENDPOINTS=1" >&2; exit 2; }
+	[ "$bench_driver_headroom_required" = 1 ] || { echo "comparison-v1 requires executable driver headroom" >&2; exit 2; }
+	case "$bench_concurrent_target_rps:$bench_warm_seconds" in
+		*[!0-9:]*|0:*|*:0) echo "comparison-v1 requires positive offered-rate and warm-duration values" >&2; exit 2 ;;
+	esac
+	[ "$bench_concurrent_target_rps" = "$bench_driver_headroom_target_rps" ] || {
+		echo "comparison-v1 requires BENCH_CONCURRENT_TARGET_RPS to match the headroom target" >&2; exit 2;
+	}
+	[ -n "$bench_vinyl_cpuset_cpus" ] && [ -n "$bench_driver_cpuset_cpus" ] && [ -n "$bench_backend_cpuset_cpus" ] || {
+		echo "comparison-v1 requires explicit Vinyl, driver and backend CPU sets" >&2; exit 2;
+	}
 fi
 churn_cycles_default=3
 case ",$bench_profile," in
@@ -470,7 +539,6 @@ else
 fi
 bench_workload_filter=${BENCH_WORKLOAD_FILTER:-}
 skip_build=${SKIP_BUILD:-0}
-allow_stale_build=${CACHE_TAG_ALLOW_STALE_BUILD:-0}
 vtc_log_bytes=${VTC_LOG_BYTES:-20M}
 vtc_timeout=${VTC_TIMEOUT:-300}
 vtc_quiet=${VTC_QUIET:-1}
@@ -482,15 +550,9 @@ bench_perf_record_target=${BENCH_PERF_RECORD_TARGET:-vinyld}
 bench_perf_record_runs=${BENCH_PERF_RECORD_RUNS:-1}
 bench_perf_record_workload=${BENCH_PERF_RECORD_WORKLOAD:-}
 bench_perf_freq=${BENCH_PERF_FREQ:-99}
-xkey_src=${XKEY_SRC:-"$repo_dir/../varnish-modules"}
-run_xkey=${RUN_XKEY:-auto}
-if [ "$run_xkey" = auto ]; then
-	if [ -d "$xkey_src/src" ]; then
-		run_xkey=1
-	else
-		run_xkey=0
-	fi
-fi
+bench_build_cflags=${BENCH_BUILD_CFLAGS:--O2 -g}
+bench_build_cppflags=${BENCH_BUILD_CPPFLAGS:-}
+bench_build_ldflags=${BENCH_BUILD_LDFLAGS:-}
 if [ "$run_xkey" = 1 ]; then
 	xkey_src=$(CDPATH= cd -- "$xkey_src" && pwd)
 else
@@ -552,6 +614,9 @@ case "$bench_buddy_reserve_chunks" in
 		echo "BENCH_BUDDY_RESERVE_CHUNKS must be a non-negative integer" >&2
 		exit 2
 		;;
+esac
+case "$bench_hot_set_objects" in
+	''|*[!0-9]*) echo "BENCH_HOT_SET_OBJECTS must be a non-negative integer" >&2; exit 2 ;;
 esac
 case "$vtc_quiet" in
 	0|1) ;;
@@ -726,6 +791,7 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "BENCH_RESIDENCY_VALIDATE_OBJECTS=$bench_residency_validate_objects" \
 	-e "BENCH_HTTP_TIMEOUT=$bench_http_timeout" \
 	-e "BENCH_TAG_UNIVERSE=$bench_tag_universe" \
+	-e "BENCH_HOT_SET_OBJECTS=$bench_hot_set_objects" \
 	-e "BENCH_TAG_LENGTH_CLASS=$bench_tag_length_class" \
 	-e "BENCH_VALIDATE_TAG_SHAPE=$bench_validate_tag_shape" \
 	-e "BENCH_PURGE_REQUESTS=$bench_purge_requests" \
@@ -808,14 +874,27 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "BENCH_CPUSET_CPUS=$bench_cpuset_cpus" \
 	-e "BENCH_DRIVER_CPUSET_CPUS=$bench_driver_cpuset_cpus" \
 	-e "BENCH_BACKEND_CPUSET_CPUS=$bench_backend_cpuset_cpus" \
+	-e "BENCH_VINYL_CPUSET_CPUS=$bench_vinyl_cpuset_cpus" \
+	-e "BENCH_DRIVER_GOMAXPROCS=$bench_driver_gomaxprocs" \
+	-e "BENCH_BACKEND_GOMAXPROCS=$bench_backend_gomaxprocs" \
+	-e "BENCH_DRIVER_GOGC=$bench_driver_gogc" \
+	-e "BENCH_BACKEND_GOGC=$bench_backend_gogc" \
+	-e "BENCH_DRIVER_GOMEMLIMIT=$bench_driver_gomemlimit" \
+	-e "BENCH_BACKEND_GOMEMLIMIT=$bench_backend_gomemlimit" \
+	-e "BENCHMARK_CONTRACT=$benchmark_contract" \
+	-e "BENCH_FIXTURE_MANIFEST=$bench_fixture_manifest" \
+	-e "BENCH_COMPARISON_MEMORY_ENDPOINTS=$bench_comparison_memory_endpoints" \
+	-e "BENCH_MEMORY_POST_LOAD_QUIET_SECONDS=$bench_memory_post_load_quiet_seconds" \
+	-e "BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS=$bench_memory_confirmation_quiet_seconds" \
+	-e "BUILD_PROVENANCE_MODE=$build_provenance_mode" \
 	-e "BENCH_DRIVER_HEADROOM_REQUIRED=$bench_driver_headroom_required" \
 	-e "BENCH_DRIVER_HEADROOM_TARGET_RPS=$bench_driver_headroom_target_rps" \
 	-e "BENCH_DRIVER_HEADROOM_PROVEN_RPS=$bench_driver_headroom_proven_rps" \
+	-e "BENCH_DRIVER_HEADROOM_SECONDS=$bench_driver_headroom_seconds" \
 	-e "CHURN_CYCLES=$churn_cycles" \
 	-e "RUNS=$runs" \
 	-e "BENCH_WORKLOAD_FILTER=$bench_workload_filter" \
 	-e "SKIP_BUILD=$skip_build" \
-	-e "CACHE_TAG_ALLOW_STALE_BUILD=$allow_stale_build" \
 	-e "RUN_XKEY=$run_xkey" \
 	-e "RUN_NOINDEX=$run_noindex" \
 	-e "VTC_LOG_BYTES=$vtc_log_bytes" \
@@ -829,6 +908,11 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "BENCH_PERF_RECORD_RUNS=$bench_perf_record_runs" \
 	-e "BENCH_PERF_RECORD_WORKLOAD=$bench_perf_record_workload" \
 	-e "BENCH_PERF_FREQ=$bench_perf_freq" \
+	-e "BENCH_BUILD_CFLAGS=$bench_build_cflags" \
+	-e "BENCH_BUILD_CPPFLAGS=$bench_build_cppflags" \
+	-e "BENCH_BUILD_LDFLAGS=$bench_build_ldflags" \
+	-e "BENCH_DOCKER_IMAGE_REF=$image" \
+	-e "BENCH_DOCKER_IMAGE_ID=$image_id" \
 	"$image" \
 bash -lc '
 set -euo pipefail
@@ -839,10 +923,40 @@ vinyl_build=/work/vinyl-build
 vinyl_src_copy=/work/vinyl-src-copy
 slash_src=/work/slash-src
 cachetag_src=/work/cachetag-src
+cachetag_build_commands=/work/cachetag-build-commands.log
+xkey_build_commands=/work/xkey-build-commands.log
+build_commands=$cachetag_build_commands
+build_cflags=${BENCH_BUILD_CFLAGS:?BENCH_BUILD_CFLAGS is required}
+build_cppflags=${BENCH_BUILD_CPPFLAGS-}
+build_ldflags=${BENCH_BUILD_LDFLAGS-}
+
+log_command() {
+	printf "+ " >> "$build_commands"
+	printf "%q " "$@" >> "$build_commands"
+	printf "\n" >> "$build_commands"
+}
+
+run_logged() {
+	log_command "$@"
+	"$@" 2>&1 | tee -a "$build_commands"
+}
+
+preflight_slash_src=none
+if [ "${BENCH_STORAGE_KIND}" = fellow ] || [ "${BENCH_STORAGE_KIND}" = buddy ]; then
+	preflight_slash_src=/slash-host
+fi
+preflight_xkey_src=none
+if [ "${RUN_XKEY}" = 1 ]; then
+	preflight_xkey_src=/xkey-src
+fi
+sh /cachetag-host/benchmarks/build_provenance.sh identity \
+	/cachetag-host /vinyl-src "$preflight_slash_src" "$preflight_xkey_src" \
+	"$BENCH_STORAGE_KIND" ignored
 
 if [ "${SKIP_BUILD}" != 1 ]; then
 	rm -rf "$prefix" "$vinyl_build" "$vinyl_src_copy" "$slash_src" "$cachetag_src"
 	mkdir -p "$prefix" "$vinyl_build" "$vinyl_src_copy" "$slash_src" "$cachetag_src"
+	: > "$cachetag_build_commands"
 
 	tar -C /vinyl-src -cf - . | tar -C "$vinyl_src_copy" -xf -
 
@@ -851,11 +965,11 @@ if [ "${SKIP_BUILD}" != 1 ]; then
 		cd "$vinyl_src_copy"
 		sh ./autogen.sh
 	)
-	"$vinyl_src_copy"/configure --prefix="$prefix" --with-unwind \
+	run_logged "$vinyl_src_copy"/configure --prefix="$prefix" --with-unwind \
 		--enable-developer-warnings --enable-debugging-symbols \
 		--disable-stack-protector --with-persistent-storage
-	make -j"$(nproc)"
-	make install
+	run_logged make -j"$(nproc)" V=1
+	run_logged make install V=1
 
 	export PKG_CONFIG_PATH="$prefix/lib/pkgconfig:$prefix/lib/aarch64-linux-gnu/pkgconfig:$prefix/lib/x86_64-linux-gnu/pkgconfig"
 	export PATH="$prefix/sbin:$prefix/bin:$PATH"
@@ -921,10 +1035,8 @@ AC_DEFUN([AX_EXECINFO], [
 ])
 M4EOF
 		slash_build_cflags="-I$vinyl_build/include -I$vinyl_build/lib/libvsc"
-		CPPFLAGS="${CPPFLAGS:-} $slash_build_cflags" \
-		CFLAGS="${CFLAGS:-} $slash_build_cflags" \
-		VINYLSRC="$vinyl_src_copy" ./bootstrap --prefix="$prefix"
-		make -j"$(nproc)"
+		run_logged env CPPFLAGS="${CPPFLAGS:-} $slash_build_cflags" CFLAGS="${CFLAGS:-} $slash_build_cflags" VINYLSRC="$vinyl_src_copy" ./bootstrap --prefix="$prefix"
+		run_logged make -j"$(nproc)" V=1
 	fi
 
 	tar -C /cachetag-host \
@@ -956,16 +1068,8 @@ M4EOF
 		-cf - . | tar -C "$cachetag_src" -xf -
 
 	cd "$cachetag_src"
-	./bootstrap --prefix="$prefix"
-	make -j"$(nproc)"
-
-	provenance_slash=none
-	if [ "${BENCH_STORAGE_KIND}" = fellow ] || [ "${BENCH_STORAGE_KIND}" = buddy ]; then
-		provenance_slash=/slash-host
-	fi
-	sh /cachetag-host/benchmarks/build_provenance.sh record \
-		/cachetag-host /vinyl-src "$provenance_slash" "$BENCH_STORAGE_KIND" \
-		/work/build-provenance.env
+	run_logged env CPPFLAGS="$build_cppflags" CFLAGS="$build_cflags" LDFLAGS="$build_ldflags" ./bootstrap --prefix="$prefix"
+	run_logged make -j"$(nproc)" V=1
 else
 	test -x "$prefix/bin/vinyltest"
 	test -x "$prefix/sbin/vinyld"
@@ -973,17 +1077,7 @@ else
 	if [ "${BENCH_STORAGE_KIND}" = fellow ] || [ "${BENCH_STORAGE_KIND}" = buddy ]; then
 		test -f "$slash_src/src/.libs/libvmod_slash.so"
 	fi
-	provenance_slash=none
-	if [ "${BENCH_STORAGE_KIND}" = fellow ] || [ "${BENCH_STORAGE_KIND}" = buddy ]; then
-		provenance_slash=/slash-host
-	fi
-	ALLOW_STALE_BUILD="${CACHE_TAG_ALLOW_STALE_BUILD:-0}" \
-		sh /cachetag-host/benchmarks/build_provenance.sh verify \
-		/cachetag-host /vinyl-src "$provenance_slash" "$BENCH_STORAGE_KIND" \
-		/work/build-provenance.env
-fi
-if [ -f /work/build-provenance.env ]; then
-	cp /work/build-provenance.env /results/build-provenance.env
+	test -f "$cachetag_build_commands"
 fi
 
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig:$prefix/lib/aarch64-linux-gnu/pkgconfig:$prefix/lib/x86_64-linux-gnu/pkgconfig"
@@ -991,6 +1085,16 @@ export PATH="$prefix/sbin:$prefix/bin:$PATH"
 export LD_LIBRARY_PATH="$prefix/lib:$prefix/lib/vinyl-cache:${LD_LIBRARY_PATH:-}"
 
 mkdir -p /results/workloads
+mkdir -p /results/fixtures
+for scenario in mostly-unique-bound mostly-shared-bound uniform-cyclic hot-set ordinary-body-4k; do
+	case ",$BENCH_PROFILE," in
+		*,$scenario,*)
+			python3 /cachetag-host/benchmarks/generate_benchmark_fixture.py \
+				--scenario "$scenario" --objects "$OBJECTS" \
+				--tags-per-object "$TAGS_PER_OBJECT" --out-dir /results/fixtures
+			;;
+	esac
+done
 
 if ! command -v go >/dev/null 2>&1; then
 	echo "the benchmark harness requires Go inside the benchmark container; run scripts/remote-benchmark.sh setup to build the current image" >&2
@@ -1002,8 +1106,8 @@ go build -o /work/cachetag-http-workload-driver \
 	/cachetag-host/benchmarks/http_workload_driver.go
 go build -o /work/cachetag-benchmark-backend \
 	/cachetag-host/benchmarks/http_backend.go
-driver_command=/work/cachetag-http-workload-driver
-backend_command=/work/cachetag-benchmark-backend
+driver_command="env GOMAXPROCS=${BENCH_DRIVER_GOMAXPROCS} GOGC=${BENCH_DRIVER_GOGC} GOMEMLIMIT=${BENCH_DRIVER_GOMEMLIMIT} /work/cachetag-http-workload-driver"
+backend_command="env GOMAXPROCS=${BENCH_BACKEND_GOMAXPROCS} GOGC=${BENCH_BACKEND_GOGC} GOMEMLIMIT=${BENCH_BACKEND_GOMEMLIMIT} /work/cachetag-benchmark-backend"
 if [ -n "${BENCH_DRIVER_CPUSET_CPUS}" ]; then
 	driver_command="taskset -c ${BENCH_DRIVER_CPUSET_CPUS} ${driver_command}"
 fi
@@ -1011,25 +1115,78 @@ if [ -n "${BENCH_BACKEND_CPUSET_CPUS}" ]; then
 	backend_command="taskset -c ${BENCH_BACKEND_CPUSET_CPUS} ${backend_command}"
 fi
 
+if [ "${BENCH_DRIVER_HEADROOM_REQUIRED}" = 1 ]; then
+	headroom_required_rps=$(( (BENCH_DRIVER_HEADROOM_TARGET_RPS * 120 + 99) / 100 ))
+	# Probe above the admission boundary. A finite slot schedule at exactly the
+	# required rate reports fractionally less once start/stop overhead is part
+	# of the measured elapsed time.
+	headroom_probe_rps=$(( (headroom_required_rps * 105 + 99) / 100 ))
+	if [ "$headroom_probe_rps" -le "$headroom_required_rps" ]; then
+		headroom_probe_rps=$((headroom_required_rps + 1))
+	fi
+	$backend_command 127.0.0.1 18081 0 > /results/driver-headroom.backend.log 2>&1 &
+	headroom_backend_pid=$!
+	for attempt in $(seq 1 100); do
+		grep -q "^ready " /results/driver-headroom.backend.log 2>/dev/null && break
+		sleep 0.05
+	done
+	grep -q "^ready " /results/driver-headroom.backend.log || { kill "$headroom_backend_pid" 2>/dev/null || true; echo "headroom backend failed to start" >&2; exit 1; }
+	if ! BENCH_CONCURRENT_TARGET_RPS="$headroom_probe_rps" \
+		BENCH_CONCURRENT_SECONDS="$BENCH_DRIVER_HEADROOM_SECONDS" \
+		BENCH_CONCURRENT_READERS="$BENCH_CLIENTS" BENCH_HEADROOM_PATH=/__bench_trivial \
+		$driver_command 127.0.0.1 18081 1 driver-headroom explicit-purge 1 none /results/driver-headroom.driver; then
+		kill "$headroom_backend_pid" 2>/dev/null || true
+		echo "driver headroom workload failed" >&2
+		exit 1
+	fi
+	kill "$headroom_backend_pid" 2>/dev/null || true
+	wait "$headroom_backend_pid" 2>/dev/null || true
+	headroom_errors=$(sed -n "s/^driver_headroom_errors=//p" /results/driver-headroom.driver)
+	headroom_achieved=$(sed -n "s/^driver_headroom_achieved_rps=//p" /results/driver-headroom.driver)
+	[ "$headroom_errors" = 0 ] || { echo "driver headroom recorded errors=$headroom_errors" >&2; exit 1; }
+	awk -v actual="$headroom_achieved" -v required="$headroom_required_rps" "BEGIN { exit !(actual >= required) }" || {
+		echo "driver headroom achieved $headroom_achieved RPS, requires $headroom_required_rps" >&2
+		exit 1
+	}
+	BENCH_DRIVER_HEADROOM_PROVEN_RPS=$headroom_achieved
+	export BENCH_DRIVER_HEADROOM_PROVEN_RPS
+fi
+
 if [ "${RUN_XKEY}" = 1 ]; then
+	build_commands=$xkey_build_commands
+	: > "$build_commands"
 	rm -rf /results/xkey-build
-	mkdir -p /results/xkey-build/cache
+	mkdir -p /results/xkey-build
 	cd /results/xkey-build
-	# Vinyl renamed cache/cache_vinyld.h to cache/cache_int.h upstream
-	# (6d36364cc1); accept either so the shim works on 9.0.1 and trunk.
-	printf "%s\n" \
-		"#if defined(__has_include) && __has_include(<cache/cache_int.h>)" \
-		"#  include <cache/cache_int.h>" \
-		"#else" \
-		"#  include <cache/cache_vinyld.h>" \
-		"#endif" > cache/cache_varnishd.h
-	python3 /vinyl-src/lib/libvcc/vmodtool.py --strict --boilerplate \
+	/cachetag-host/benchmarks/xkey/verify-source.sh /xkey-src > xkey-source.env
+	expected_compat_sha=$(awk "NR == 1 { print \$1 }" /cachetag-host/benchmarks/xkey/compat/cache_varnishd.h.sha256)
+	actual_compat_sha=$(sha256sum /cachetag-host/benchmarks/xkey/compat/cache/cache_varnishd.h | awk "{print \$1}")
+	test -n "$expected_compat_sha" && test "$expected_compat_sha" = "$actual_compat_sha" || {
+		echo "xkey compatibility artifact hash mismatch" >&2
+		exit 1
+	}
+	cp -a /cachetag-host/benchmarks/xkey/compat compat
+	mkdir -p config
+	cp /cachetag-host/benchmarks/xkey/config/xkey-benchmark-config-v1.h \
+		config/config.h
+	cmp -s /cachetag-host/benchmarks/xkey/config/xkey-benchmark-config-v1.h \
+		config/config.h || {
+		echo "xkey configuration staging changed config.h" >&2
+		exit 1
+	}
+	cp /xkey-src/src/vmod_xkey.c vmod_xkey.c
+	cmp -s vmod_xkey.c /xkey-src/src/vmod_xkey.c || {
+		echo "xkey source staging changed vmod_xkey.c" >&2
+		exit 1
+	}
+	run_logged python3 /vinyl-src/lib/libvcc/vmodtool.py --strict --boilerplate \
 		-o vcc_xkey_if /xkey-src/src/vmod_xkey.vcc
-	python3 /vinyl-src/lib/libvsc/vsctool.py -c /xkey-src/src/xkey.vsc
-	python3 /vinyl-src/lib/libvsc/vsctool.py -h /xkey-src/src/xkey.vsc
-	xkey_cflags="-fPIC -DPIC -DHAVE_CONFIG_H"
-	xkey_cflags="$xkey_cflags -I. -I/xkey-src/src -I$vinyl_build"
-	xkey_cflags="$xkey_cflags -I$vinyl_build/include -I/vinyl-src/include"
+	run_logged python3 /vinyl-src/lib/libvsc/vsctool.py -c /xkey-src/src/xkey.vsc
+	run_logged python3 /vinyl-src/lib/libvsc/vsctool.py -h /xkey-src/src/xkey.vsc
+	xkey_cflags="$build_cflags -fPIC -DPIC"
+	xkey_cflags="$xkey_cflags -Iconfig -Icompat -I. -I/xkey-src/src -I$vinyl_build"
+	xkey_cflags="$xkey_cflags -I$vinyl_build/include -I$prefix/include/vinyl-cache"
+	xkey_cflags="$xkey_cflags -I/vinyl-src/include"
 	xkey_cflags="$xkey_cflags -I/vinyl-src/bin/vinyld -I/vinyl-src/lib/libvgz"
 	xkey_cflags="$xkey_cflags -I/vinyl-src/lib/libvsc -I/vinyl-src/lib/libvinyl"
 	xkey_cflags="$xkey_cflags -I/vinyl-src/lib/libvinylapi"
@@ -1041,14 +1198,56 @@ if [ "${RUN_XKEY}" = 1 ]; then
 	xkey_cflags="$xkey_cflags -Wunused-parameter -Wcast-align"
 	xkey_cflags="$xkey_cflags -Wchar-subscripts -Wnested-externs"
 	xkey_cflags="$xkey_cflags -Wextra -Wno-sign-compare"
-	cc $xkey_cflags -c /xkey-src/src/vmod_xkey.c -o vmod_xkey.o
-	cc $xkey_cflags -c VSC_xkey.c -o VSC_xkey.o
-	cc $xkey_cflags -c vcc_xkey_if.c -o vcc_xkey_if.o
-	cc -shared -o libvmod_xkey.so vmod_xkey.o VSC_xkey.o vcc_xkey_if.o
+	run_logged cc $build_cppflags $xkey_cflags -c vmod_xkey.c -o vmod_xkey.o
+	run_logged cc $build_cppflags $xkey_cflags -c VSC_xkey.c -o VSC_xkey.o
+	run_logged cc $build_cppflags $xkey_cflags -c vcc_xkey_if.c -o vcc_xkey_if.o
+	run_logged cc $build_cflags $build_ldflags -shared -o libvmod_xkey.so vmod_xkey.o VSC_xkey.o vcc_xkey_if.o
 	xkey_flag=--include-xkey
+	provenance_xkey_src=/xkey-src
 else
+	build_commands=$xkey_build_commands
+	: > "$build_commands"
+	printf "+ xkey disabled\n" >> "$build_commands"
+	printf "xkey disabled\n" > /work/no-xkey-binary
 	xkey_flag=
+	provenance_xkey_src=none
 fi
+
+build_commands=/work/benchmark-build-commands.log
+cat "$cachetag_build_commands" "$xkey_build_commands" > "$build_commands"
+
+provenance_slash=none
+if [ "${BENCH_STORAGE_KIND}" = fellow ] || [ "${BENCH_STORAGE_KIND}" = buddy ]; then
+	provenance_slash=/slash-host
+fi
+if [ "${RUN_XKEY}" = 1 ]; then
+	provenance_xkey_binary=/results/xkey-build/libvmod_xkey.so
+else
+	provenance_xkey_binary=/work/no-xkey-binary
+fi
+provenance_env=(
+	BUILD_PROVENANCE_XKEY_COMPAT_ARTIFACT=/cachetag-host/benchmarks/xkey/compat/cache/cache_varnishd.h
+	BUILD_PROVENANCE_XKEY_CONFIG_ARTIFACT=/cachetag-host/benchmarks/xkey/config/xkey-benchmark-config-v1.h
+	BUILD_PROVENANCE_CACHETAG_BINARY="$cachetag_src/src/.libs/libvmod_cachetag.so"
+	BUILD_PROVENANCE_VINYL_BINARY="$prefix/sbin/vinyld"
+	BUILD_PROVENANCE_XKEY_BINARY="$provenance_xkey_binary"
+	BUILD_PROVENANCE_BUILD_COMMANDS_FILE="$build_commands"
+	BUILD_PROVENANCE_DOCKERFILE=/cachetag-host/docker/vinyl-cache-ubuntu-build.Dockerfile
+	BUILD_PROVENANCE_IMAGE_REF="$BENCH_DOCKER_IMAGE_REF"
+	BUILD_PROVENANCE_IMAGE_ID="$BENCH_DOCKER_IMAGE_ID"
+	BUILD_PROVENANCE_CFLAGS="$build_cflags"
+	BUILD_PROVENANCE_CPPFLAGS="$build_cppflags"
+	BUILD_PROVENANCE_LDFLAGS="$build_ldflags"
+)
+if [ "${SKIP_BUILD}" = 1 ]; then
+	env "${provenance_env[@]}" sh /cachetag-host/benchmarks/build_provenance.sh verify \
+		/cachetag-host /vinyl-src "$provenance_slash" "$provenance_xkey_src" "$BENCH_STORAGE_KIND" \
+		/work/build-provenance.env
+fi
+env "${provenance_env[@]}" sh /cachetag-host/benchmarks/build_provenance.sh record \
+	/cachetag-host /vinyl-src "$provenance_slash" "$provenance_xkey_src" "$BENCH_STORAGE_KIND" \
+	/work/build-provenance.env
+cp /work/build-provenance.env /results/build-provenance.env
 
 noindex_flag=
 if [ "${RUN_NOINDEX}" = 0 ]; then
@@ -1063,6 +1262,10 @@ cachetag_persist_flag=
 if [ "$BENCH_CACHE_TAG_PERSIST" = 1 ]; then
 	cachetag_persist_flag=--cachetag-persist
 fi
+fixture_flag=
+case ",$BENCH_PROFILE," in
+	*,cms-trace-static-v1,*|*,cms-trace-hot-set-v1,*) fixture_flag="--fixture-manifest $BENCH_FIXTURE_MANIFEST" ;;
+esac
 
 python3 /cachetag-host/benchmarks/generate_cachetag_benchmark_vtc.py \
 	--out-dir /results/workloads \
@@ -1092,9 +1295,38 @@ python3 /cachetag-host/benchmarks/generate_cachetag_benchmark_vtc.py \
 	--profile "$BENCH_PROFILE" \
 	$cachetag_persist_flag \
 	$noindex_flag \
-	$xkey_flag
+	$xkey_flag \
+	$fixture_flag
 
 /cachetag-host/benchmarks/capture_system_metadata.sh /results/system.env
+cohort_system_env=/results/system.env
+if [ -s /results/host-system.env ]; then
+	cohort_system_env=/results/host-system.env
+fi
+benchmark_cohort_fingerprint=$(
+	{
+		sh /cachetag-host/benchmarks/comparison_cohort_material.sh \
+			"$cohort_system_env" /results/build-provenance.env
+		printf "%s\n" "$BENCH_VINYL_CPUSET_CPUS" "$BENCH_DRIVER_CPUSET_CPUS" "$BENCH_BACKEND_CPUSET_CPUS"
+		printf "%s\n" "$BENCH_DRIVER_GOMAXPROCS" "$BENCH_BACKEND_GOMAXPROCS" "$BENCH_DRIVER_GOGC" "$BENCH_BACKEND_GOGC" "$BENCH_DRIVER_GOMEMLIMIT" "$BENCH_BACKEND_GOMEMLIMIT"
+		printf "%s\n" "$BENCH_VINYL_THREAD_POOL_MAX" "$BENCH_VINYL_THREAD_POOLS"
+	} | sha256sum | awk "{print \$1}"
+)
+metadata_fixture_manifest=none
+metadata_fixture_name=
+metadata_fixture_fingerprint=
+generated_fixture_manifest="/results/fixtures/${BENCH_PROFILE}.manifest.json"
+if [ -f "$generated_fixture_manifest" ]; then
+	metadata_fixture_manifest=$generated_fixture_manifest
+elif [ -f "$BENCH_FIXTURE_MANIFEST" ]; then
+	case ",$BENCH_PROFILE," in
+		*,cms-trace-static-v1,*|*,cms-trace-hot-set-v1,*) metadata_fixture_manifest=$BENCH_FIXTURE_MANIFEST ;;
+	esac
+fi
+if [ "$metadata_fixture_manifest" != none ]; then
+	metadata_fixture_name=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1], encoding=\"utf-8\"))[\"fixture\"])" "$metadata_fixture_manifest")
+	metadata_fixture_fingerprint=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1], encoding=\"utf-8\"))[\"expected\"][\"fixture_fingerprint\"])" "$metadata_fixture_manifest")
+fi
 {
 	printf "vinyld=%s\n" "$prefix/sbin/vinyld"
 	ldd "$prefix/sbin/vinyld" 2>&1 || true
@@ -1110,9 +1342,11 @@ python3 /cachetag-host/benchmarks/generate_cachetag_benchmark_vtc.py \
 		printf "slash_revision=\n"
 	fi
 	if [ "$RUN_XKEY" = 1 ]; then
-		printf "xkey_revision=%s\n" "$(git -C /xkey-src rev-parse --short HEAD 2>/dev/null || true)"
+		printf "xkey_revision=%s\n" "$(git -C /xkey-src rev-parse HEAD)"
+		printf "xkey_source_verified=0.28.0@7abe0e2a59a685b4ea8626ff1a3fe9c60a037368\n"
 	else
 		printf "xkey_revision=\n"
+		printf "xkey_source_verified=not-run\n"
 	fi
 	printf "objects=%s\n" "$OBJECTS"
 	printf "tags_per_object=%s\n" "$TAGS_PER_OBJECT"
@@ -1126,6 +1360,7 @@ python3 /cachetag-host/benchmarks/generate_cachetag_benchmark_vtc.py \
 	printf "bench_residency_validate_objects=%s\n" "$BENCH_RESIDENCY_VALIDATE_OBJECTS"
 	printf "bench_http_timeout=%s\n" "$BENCH_HTTP_TIMEOUT"
 	printf "bench_tag_universe=%s\n" "$BENCH_TAG_UNIVERSE"
+	printf "bench_hot_set_objects=%s\n" "$BENCH_HOT_SET_OBJECTS"
 	printf "bench_tag_length_class=%s\n" "$BENCH_TAG_LENGTH_CLASS"
 	printf "bench_validate_tag_shape=%s\n" "$BENCH_VALIDATE_TAG_SHAPE"
 	printf "bench_purge_requests=%s\n" "$BENCH_PURGE_REQUESTS"
@@ -1204,6 +1439,19 @@ python3 /cachetag-host/benchmarks/generate_cachetag_benchmark_vtc.py \
 	printf "bench_cpuset_cpus=%s\n" "$BENCH_CPUSET_CPUS"
 	printf "bench_driver_cpuset_cpus=%s\n" "$BENCH_DRIVER_CPUSET_CPUS"
 	printf "bench_backend_cpuset_cpus=%s\n" "$BENCH_BACKEND_CPUSET_CPUS"
+	printf "bench_vinyl_cpuset_cpus=%s\n" "$BENCH_VINYL_CPUSET_CPUS"
+	printf "bench_driver_gomaxprocs=%s\n" "$BENCH_DRIVER_GOMAXPROCS"
+	printf "bench_backend_gomaxprocs=%s\n" "$BENCH_BACKEND_GOMAXPROCS"
+	printf "bench_driver_gogc=%s\n" "$BENCH_DRIVER_GOGC"
+	printf "bench_backend_gogc=%s\n" "$BENCH_BACKEND_GOGC"
+	printf "bench_driver_gomemlimit=%s\n" "$BENCH_DRIVER_GOMEMLIMIT"
+	printf "bench_backend_gomemlimit=%s\n" "$BENCH_BACKEND_GOMEMLIMIT"
+	printf "benchmark_contract=%s\n" "$BENCHMARK_CONTRACT"
+	printf "benchmark_cohort_fingerprint=%s\n" "$benchmark_cohort_fingerprint"
+	printf "bench_fixture_manifest=%s\n" "$metadata_fixture_manifest"
+	printf "fixture_name=%s\n" "$metadata_fixture_name"
+	printf "fixture_fingerprint=%s\n" "$metadata_fixture_fingerprint"
+	printf "required_cache_main_endpoints=%s\n" "post_load,post_load_confirmation,post_warm_diagnostic,post_invalidation,lifecycle"
 	printf "bench_driver_headroom_required=%s\n" "$BENCH_DRIVER_HEADROOM_REQUIRED"
 	printf "bench_driver_headroom_target_rps=%s\n" "$BENCH_DRIVER_HEADROOM_TARGET_RPS"
 	printf "bench_driver_headroom_proven_rps=%s\n" "$BENCH_DRIVER_HEADROOM_PROVEN_RPS"
@@ -1223,7 +1471,11 @@ python3 /cachetag-host/benchmarks/generate_cachetag_benchmark_vtc.py \
 	printf "bench_perf_record_runs=%s\n" "$BENCH_PERF_RECORD_RUNS"
 	printf "bench_perf_record_workload=%s\n" "$BENCH_PERF_RECORD_WORKLOAD"
 	printf "bench_perf_freq=%s\n" "$BENCH_PERF_FREQ"
+	printf "bench_build_cflags=%s\n" "$BENCH_BUILD_CFLAGS"
+	printf "bench_build_cppflags=%s\n" "$BENCH_BUILD_CPPFLAGS"
+	printf "bench_build_ldflags=%s\n" "$BENCH_BUILD_LDFLAGS"
 	printf "image=%s\n" "'"$image"'"
+	printf "image_id=%s\n" "$BENCH_DOCKER_IMAGE_ID"
 	printf "docker_command=%s\n" "'"$docker_cmd"'"
 	printf "docker_run_args=%s\n" "'"$docker_run_args"'"
 } > /results/metadata.env
@@ -1241,6 +1493,7 @@ save_symbol_artifacts() {
 		/results/symbols/cachetag-src/src/.libs/ 2>/dev/null || true
 	cp -a /work/cachetag-http-workload-driver /work/cachetag-benchmark-backend \
 		/results/symbols/work/ 2>/dev/null || true
+	cp -a "$build_commands" /results/build-commands.log 2>/dev/null || true
 	find /tmp -path "*/vgc.so" -type f -exec cp -a {} /results/symbols/tmp/ \; \
 		2>/dev/null || true
 	find /tmp -path "*/vmod_cache/_vmod_cachetag*" -type f \
@@ -1335,6 +1588,10 @@ if [ "$VTC_QUIET" = 1 ]; then
 else
 	vtc_quiet_flag=-v
 fi
+vinyltest_command="$prefix/bin/vinyltest"
+if [ -n "$BENCH_VINYL_CPUSET_CPUS" ]; then
+	vinyltest_command="taskset -c $BENCH_VINYL_CPUSET_CPUS $vinyltest_command"
+fi
 
 matched_workloads=0
 for workload in /results/workloads/*.vtc; do
@@ -1372,7 +1629,7 @@ for workload in /results/workloads/*.vtc; do
 				python3 /cachetag-host/benchmarks/run_with_metrics.py \
 					--metrics "$timing" --phase-marker-dir /results/phase-markers \
 					--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
-					"$prefix/bin/vinyltest" -t "$VTC_TIMEOUT" \
+					$vinyltest_command -t "$VTC_TIMEOUT" \
 					-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
 			else
 				perf_data="/results/${name}.run-${run}.perf.data"
@@ -1401,7 +1658,7 @@ for workload in /results/workloads/*.vtc; do
 							--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
 							perf record -F "$BENCH_PERF_FREQ" -g $perf_scope \
 							-o "$perf_data" -- \
-							"$prefix/bin/vinyltest" -t "$VTC_TIMEOUT" \
+							$vinyltest_command -t "$VTC_TIMEOUT" \
 							-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
 						;;
 					load|warm|concurrent)
@@ -1416,7 +1673,7 @@ for workload in /results/workloads/*.vtc; do
 							--freq "$BENCH_PERF_FREQ" \
 							--scope "$BENCH_PERF_RECORD_SCOPE" \
 							--target "$BENCH_PERF_RECORD_TARGET" -- \
-							"$prefix/bin/vinyltest" -t "$VTC_TIMEOUT" \
+							$vinyltest_command -t "$VTC_TIMEOUT" \
 							-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
 						;;
 					*)
@@ -1431,7 +1688,7 @@ for workload in /results/workloads/*.vtc; do
 			python3 /cachetag-host/benchmarks/run_with_metrics.py \
 				--metrics "$timing" --phase-marker-dir /results/phase-markers \
 				--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
-				"$prefix/bin/vinyltest" -t "$VTC_TIMEOUT" \
+				$vinyltest_command -t "$VTC_TIMEOUT" \
 				-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
 		fi
 		if grep -qx "swap_activity=1" "$timing"; then
@@ -1449,6 +1706,10 @@ for workload in /results/workloads/*.vtc; do
 		    /results/${artifact_prefix}*.phase4_boundaries.tsv \
 		    /results/${artifact_prefix}*.phase6_memory \
 		    /results/${artifact_prefix}*.phase6_memory.smaps \
+		    /results/${artifact_prefix}*.cache-main.identity \
+		    /results/${artifact_prefix}*.cache-main.smaps_rollup \
+		    /results/${artifact_prefix}*.cache-main.maps \
+		    /results/${artifact_prefix}*.cache-main.smaps \
 		    /results/${artifact_prefix}*.persistence \
 		    /results/${artifact_prefix}*.stats; do
 			if [ ! -f "$artifact" ]; then

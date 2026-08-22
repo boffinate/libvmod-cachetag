@@ -37,6 +37,7 @@ selected_rss=0
 selected_ppid=
 selected_comm=
 selected_exe=
+selected_starttime=
 fault_state_path=$(dirname "$snapshot_path")/phase6_faults.previous
 {
 	echo "cycle=$cycle"
@@ -48,7 +49,10 @@ fault_state_path=$(dirname "$snapshot_path")/phase6_faults.previous
 		comm=$(cat "$proc/comm")
 		exe=$(readlink "$proc/exe" 2>/dev/null || true)
 		exe_base=$(basename "$exe")
-		if test "$comm" != vinyld && test "$exe_base" != vinyld; then
+		# The manager also has a vinyld executable.  Phase 6 is about the
+		# cache-main child, so a generic "largest vinyld" selection is not
+		# provenance.  Do not silently fall back to the manager.
+		if test "$comm" != cache-main || test "$exe_base" != vinyld; then
 			continue
 		fi
 		test -r "$proc/status" || continue
@@ -86,6 +90,7 @@ fault_state_path=$(dirname "$snapshot_path")/phase6_faults.previous
 			selected_ppid=$ppid
 			selected_comm=$comm
 			selected_exe=$exe
+			selected_starttime=$(awk '{print $22; exit}' "$proc/stat" 2>/dev/null || true)
 		fi
 	done
 
@@ -93,8 +98,13 @@ fault_state_path=$(dirname "$snapshot_path")/phase6_faults.previous
 		echo "missing vinyld descendant" >&2
 		exit 1
 	fi
-	printf 'selected_pid=%s\nselected_ppid=%s\nselected_comm=%s\nselected_exe=%s\nselected_vmrss_kb=%s\n' \
-		"$selected_pid" "$selected_ppid" "$selected_comm" "$selected_exe" "$selected_rss"
+	case "$selected_starttime" in
+		''|*[!0-9]*) echo "invalid cache-main start time" >&2; exit 1;;
+	esac
+	boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+	test -n "$boot_id" || { echo "missing boot id" >&2; exit 1; }
+	printf 'selected_pid=%s\nselected_ppid=%s\nselected_comm=%s\nselected_exe=%s\nselected_starttime_ticks=%s\nselected_vmrss_kb=%s\nselected_in_vinyltest_tree=1\nboot_id=%s\nidentity_valid=1\n' \
+		"$selected_pid" "$selected_ppid" "$selected_comm" "$selected_exe" "$selected_starttime" "$selected_rss" "$boot_id"
 	printf 'allocator_environment='
 	tr '\000' '\n' < "/proc/$selected_pid/environ" 2>/dev/null |
 		awk -F= '$1 == "MALLOC_CONF" || $1 == "MALLOC_ARENA_MAX" || $1 == "MALLOC_TRIM_THRESHOLD_" {printf "%s%s=%s", sep, $1, substr($0, length($1) + 2); sep=","}'
@@ -113,6 +123,7 @@ fault_state_path=$(dirname "$snapshot_path")/phase6_faults.previous
 
 	awk '/^VmRSS:/ {print}' "/proc/$selected_pid/status"
 	cat "/proc/$selected_pid/smaps_rollup"
+	printf 'smaps_rollup_present=1\n'
 
 	set -- $(awk '{print $10, $12}' "/proc/$selected_pid/stat")
 	proc_minflt=$1

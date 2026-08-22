@@ -1,0 +1,16 @@
+{
+  "fixture": "cms-trace-static-v1",
+  "kind": "trace-derived-static-population",
+  "payload_status": "unavailable",
+  "payload_blocker": "The public anonymised ordered payload and its redistribution basis have not been supplied. The source CMS trace records regeneration, not access or purge history; it must not be fabricated or inferred.",
+  "schema": "benchmark-fixture-v1",
+  "source_claims": {
+    "objects": 3126975,
+    "relationships": 12677878,
+    "tag_universe": 309207,
+    "max_fanout": 138342,
+    "max_serialized_tag_value_bytes": 2702,
+    "max_tag_bytes": 64,
+    "max_tags_per_object": 333
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "expected": {
+    "fixture_fingerprint": "sha256:be2e24b7225130168cc198f696b3b06983c9f3050b22bac6faed2c01954242d8",
+    "header_value_bytes": 58,
+    "exact_set_reuse_histogram": {"1": 3},
+    "exact_tag_sets": 3,
+    "fanout_histogram": {"1": 4, "2": 1},
+    "max_fanout": 2,
+    "max_serialized_tag_value_bytes": 22,
+    "max_tag_bytes": 13,
+    "max_tags_per_object": 2,
+    "objects": 3,
+    "ordered_value_fingerprint": "sha256:be2e24b7225130168cc198f696b3b06983c9f3050b22bac6faed2c01954242d8",
+    "relationships": 6,
+    "tag_universe": 5,
+    "tags_per_object_histogram": {"2": 3}
+  },
+  "fixture": "cms-trace-static-v1-test",
+  "kind": "test-fixture",
+  "payload": "cms-trace-static-v1-test.jsonl",
+  "payload_status": "available",
+  "schema": "benchmark-fixture-v1"
+}

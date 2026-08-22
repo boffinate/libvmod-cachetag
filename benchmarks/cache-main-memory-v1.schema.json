@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "cache-main benchmark memory endpoint",
+  "type": "object",
+  "required": ["schema", "endpoint", "selected_pid", "selected_starttime_ticks", "selected_comm", "selected_exe", "boot_id", "identity_valid", "identity_post_capture_valid"],
+  "properties": {
+    "schema": {"const": "cache-main-memory-v1"},
+    "endpoint": {"enum": ["post_load", "post_load_confirmation", "post_warm_diagnostic", "post_invalidation", "lifecycle"]},
+    "selected_pid": {"type": "string", "pattern": "^[0-9]+$"},
+    "selected_starttime_ticks": {"type": "string", "pattern": "^[0-9]+$"},
+    "selected_comm": {"const": "cache-main"},
+    "identity_valid": {"const": "1"},
+    "identity_post_capture_valid": {"const": "1"}
+  }
+}

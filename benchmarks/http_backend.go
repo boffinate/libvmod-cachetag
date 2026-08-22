@@ -40,6 +40,11 @@ func main() {
 
 	server := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/__bench_trivial" {
+				w.Header().Set("Content-Length", "0")
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			generation := uint64(1)
 			if raw := r.Header.Get("X-Bench-Origin-Epoch"); raw != "" {
 				parsed, parseErr := strconv.ParseUint(raw, 10, 64)

@@ -21,6 +21,12 @@ from dataclasses import dataclass, field
 
 TRACKED_PROCESS_LABELS = ("vinyltest", "vinyld", "cache_process", "driver", "backend")
 STATUS_MEMORY_FIELDS = {"VmRSS", "RssAnon", "RssFile", "VmData", "VmSwap"}
+
+
+def phase_metric_name(value: str) -> str:
+    return value.replace("-", "_")
+
+
 def usage_delta(before: resource.struct_rusage, after: resource.struct_rusage):
     return {
         "user_seconds": after.ru_utime - before.ru_utime,
@@ -316,6 +322,7 @@ class ThreadCpuSample:
     cpu_ticks: int
     rss_kb: int
     memory_kb: dict[str, int]
+    cpus_allowed_list: str
 
 
 @dataclass
@@ -330,10 +337,21 @@ class TrackedProcessState:
     cmd: str = ""
     exe: str = ""
     start_time_ticks: int | None = None
+    ppid: int | None = None
+    cpus_allowed_list: str = ""
     cpu_max_percent: float = 0.0
     rss_max_kb: int = 0
     memory_max_kb: dict[str, int] = field(default_factory=dict)
     detail_values: dict[str, int | str] = field(default_factory=dict)
+
+
+@dataclass
+class PhaseCpuAccumulator:
+    wall_seconds: float = 0.0
+    samples: int = 0
+    cpu_seconds: dict[str, float] = field(default_factory=dict)
+    cpu_ticks: dict[str, float] = field(default_factory=dict)
+    cpu_percent_max: dict[str, float] = field(default_factory=dict)
 
 
 def read_exe(pid: int) -> str:
@@ -352,6 +370,17 @@ def read_process_memory_kb(pid: int) -> dict[str, int]:
     except OSError:
         pass
     return values
+
+
+def read_process_cpus_allowed_list(pid: int) -> str:
+    try:
+        with Path(f"/proc/{pid}/status").open(encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("Cpus_allowed_list:"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
 
 
 def parse_proc_stat(raw: str) -> tuple[int, str, int, int, int] | None:
@@ -419,6 +448,7 @@ def process_thread_snapshot(root_pid: int | None) -> dict[tuple[int, int], Threa
             continue
         exe = read_exe(pid)
         memory_kb = read_process_memory_kb(pid)
+        cpus_allowed_list = read_process_cpus_allowed_list(pid)
         rss_kb = memory_kb.get("status_VmRSS_kb", 0)
         try:
             tasks = list(task_dir.iterdir())
@@ -445,6 +475,7 @@ def process_thread_snapshot(root_pid: int | None) -> dict[tuple[int, int], Threa
                 cpu_ticks,
                 rss_kb,
                 memory_kb,
+                cpus_allowed_list,
             )
     return samples
 
@@ -732,6 +763,11 @@ class SystemSampler:
         self.phase_marker_prefix = phase_marker_prefix
         self.seen_phase_markers: set[str] = set()
         self.active_phases: set[str] = set()
+        self.phase_marker_starts: dict[str, int] = {}
+        self.phase_intervals: dict[str, list[tuple[int, int]]] = {}
+        self.phase_cpu: dict[str, PhaseCpuAccumulator] = {}
+        self.start_wall_unix_nano = 0
+        self.prev_sample_wall_unix_nano = 0
         self.start_monotonic = 0.0
         self.stop_monotonic: float | None = None
         self.stop_event = threading.Event()
@@ -796,6 +832,8 @@ class SystemSampler:
 
     def start(self) -> None:
         self.start_monotonic = time.monotonic()
+        self.start_wall_unix_nano = time.time_ns()
+        self.prev_sample_wall_unix_nano = self.start_wall_unix_nano
         mem = system_memory_snapshot()
         cgroup = cgroup_memory_snapshot()
         load = load_snapshot()
@@ -823,6 +861,11 @@ class SystemSampler:
             self.thread.join(timeout=max(1.0, self.interval * 2))
             self.thread_stalled = self.thread.is_alive()
         self.detailed_collector.stop()
+        # Consume markers once more after the cadence thread exits so the
+        # final boundary is retained. Do not attribute the unsampled tail:
+        # latest_tracked_cpu describes the preceding sampled interval and
+        # reusing it here would fabricate process CPU after the last sample.
+        self._read_phase_markers()
         with self.lock:
             self._drain_detailed_results_locked()
         self.disk_after = disk_snapshot()
@@ -845,6 +888,7 @@ class SystemSampler:
 
     def _sample(self) -> None:
         sample_started = time.monotonic()
+        sample_wall_unix_nano = time.time_ns()
         interval_values: dict[str, float] = {}
         with self.lock:
             root_pid = self.process_root_pid
@@ -882,6 +926,7 @@ class SystemSampler:
             for key, value in self._sample_disk_locked(curr_disk, sample_started).items():
                 interval_values[f"system_disk_{key}"] = value
             self._sample_process_cpu_locked(curr_threads, current_processes, sample_started)
+            self._record_phase_cpu_locked(sample_wall_unix_nano)
             self._update_non_cpu_locked(mem, cgroup, load)
             self._drain_detailed_results_locked()
             monotonic_seconds = max(0.0, sample_started - self.start_monotonic)
@@ -896,6 +941,7 @@ class SystemSampler:
                 phase_events,
                 interval_values,
             )
+            self.prev_sample_wall_unix_nano = sample_wall_unix_nano
 
         if self.sample_path is not None:
             try:
@@ -903,6 +949,33 @@ class SystemSampler:
                     handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
             except OSError:
                 pass
+
+    def _record_phase_cpu_locked(self, sample_wall_unix_nano: int) -> None:
+        previous = self.prev_sample_wall_unix_nano or self.start_wall_unix_nano
+        if sample_wall_unix_nano <= previous or not self.latest_tracked_cpu:
+            return
+        window = sample_wall_unix_nano - previous
+        phases = set(self.phase_intervals) | set(self.phase_marker_starts)
+        for phase in phases:
+            intervals = self.phase_intervals.get(phase, [])
+            overlap = 0
+            for start, end in intervals:
+                overlap += max(0, min(end, sample_wall_unix_nano) - max(start, previous))
+            start = self.phase_marker_starts.get(phase)
+            if start is not None:
+                overlap += max(0, sample_wall_unix_nano - max(start, previous))
+            if overlap <= 0:
+                continue
+            fraction = min(1.0, overlap / window)
+            accumulator = self.phase_cpu.setdefault(phase, PhaseCpuAccumulator())
+            accumulator.samples += 1
+            accumulator.wall_seconds += overlap / 1_000_000_000.0
+            for label, (ticks, seconds, percent) in self.latest_tracked_cpu.items():
+                accumulator.cpu_ticks[label] = accumulator.cpu_ticks.get(label, 0.0) + ticks * fraction
+                accumulator.cpu_seconds[label] = accumulator.cpu_seconds.get(label, 0.0) + seconds * fraction
+                accumulator.cpu_percent_max[label] = max(
+                    accumulator.cpu_percent_max.get(label, 0.0), percent
+                )
 
     def _update_non_cpu_locked(
         self,
@@ -1061,6 +1134,8 @@ class SystemSampler:
                 tracked.cmd = ""
                 tracked.exe = ""
                 tracked.start_time_ticks = None
+                tracked.ppid = None
+                tracked.cpus_allowed_list = ""
                 continue
             match = matches[0]
             tracked.status = "ok"
@@ -1068,6 +1143,8 @@ class SystemSampler:
             tracked.comm = match.comm
             tracked.exe = match.exe
             tracked.start_time_ticks = match.start_time_ticks
+            tracked.ppid = match.ppid
+            tracked.cpus_allowed_list = match.cpus_allowed_list
 
         for label, tracked in self.tracked_processes.items():
             matches = matches_by_label[label]
@@ -1185,6 +1262,15 @@ class SystemSampler:
                 row[f"{prefix}_comm"] = matches[0].comm
                 row[f"{prefix}_exe"] = matches[0].exe
                 row[f"{prefix}_start_time_ticks"] = matches[0].start_time_ticks
+                row[f"{prefix}_ppid"] = matches[0].ppid
+                if matches[0].cpus_allowed_list:
+                    row[f"{prefix}_cpus_allowed_list"] = matches[0].cpus_allowed_list
+            else:
+                allowed_lists = sorted(
+                    {sample.cpus_allowed_list for sample in matches if sample.cpus_allowed_list}
+                )
+                if allowed_lists:
+                    row[f"{prefix}_cpus_allowed_lists"] = "|".join(allowed_lists)
             memory_totals: dict[str, int] = {}
             for match in matches:
                 for key, value in match.memory_kb.items():
@@ -1246,8 +1332,13 @@ class SystemSampler:
             event = str(marker["event"])
             if event == "start":
                 self.active_phases.add(phase)
+                self.phase_marker_starts[phase] = int(marker["time_unix_nano"])
             elif event == "end":
                 self.active_phases.discard(phase)
+                start = self.phase_marker_starts.pop(phase, None)
+                end = int(marker["time_unix_nano"])
+                if start is not None and end >= start:
+                    self.phase_intervals.setdefault(phase, []).append((start, end))
             ordered_events.append(marker)
         return ordered_events
 
@@ -1455,6 +1546,10 @@ class SystemSampler:
                     metrics[f"{prefix}_exe"] = metric_safe_text(tracked.exe)
                 if tracked.start_time_ticks is not None:
                     metrics[f"{prefix}_start_time_ticks"] = tracked.start_time_ticks
+                if tracked.ppid is not None:
+                    metrics[f"{prefix}_ppid"] = tracked.ppid
+                if tracked.cpus_allowed_list:
+                    metrics[f"{prefix}_cpus_allowed_list"] = tracked.cpus_allowed_list
                 if tracked.cpu_max_percent > 0:
                     metrics[f"{prefix}_cpu_max_percent"] = tracked.cpu_max_percent
                 if tracked.rss_max_kb > 0:
@@ -1463,6 +1558,34 @@ class SystemSampler:
                     metrics[f"{prefix}_{key}_max"] = value
                 for key, value in sorted(tracked.detail_values.items()):
                     metrics[f"{prefix}_{key}"] = value
+            metrics["system_phase_cpu_telemetry_schema"] = "phase-aligned-process-cpu-v1"
+            for phase, accumulator in sorted(self.phase_cpu.items()):
+                phase_key = phase_metric_name(phase)
+                metrics[f"system_phase_{phase_key}_samples"] = accumulator.samples
+                metrics[f"system_phase_{phase_key}_wall_seconds"] = accumulator.wall_seconds
+                for label in TRACKED_PROCESS_LABELS:
+                    seconds = accumulator.cpu_seconds.get(label, 0.0)
+                    ticks = accumulator.cpu_ticks.get(label, 0.0)
+                    max_percent = accumulator.cpu_percent_max.get(label, 0.0)
+                    prefix = f"system_phase_{phase_key}_tracked_{label}"
+                    metrics[f"{prefix}_cpu_seconds"] = seconds
+                    metrics[f"{prefix}_cpu_ticks"] = ticks
+                    metrics[f"{prefix}_cpu_max_percent"] = max_percent
+                    metrics[f"{prefix}_cpu_avg_percent"] = (
+                        100.0 * seconds / accumulator.wall_seconds
+                        if accumulator.wall_seconds > 0
+                        else 0.0
+                    )
+                    alias_label = "cache_main" if label == "cache_process" else label
+                    alias = f"system_phase_{phase_key}_{alias_label}"
+                    metrics[f"{alias}_cpu_seconds"] = seconds
+                    metrics[f"{alias}_cpu_ticks"] = ticks
+                    metrics[f"{alias}_cpu_max_percent"] = max_percent
+                    metrics[f"{alias}_cpu_avg_percent"] = (
+                        100.0 * seconds / accumulator.wall_seconds
+                        if accumulator.wall_seconds > 0
+                        else 0.0
+                    )
             return metrics
 
 

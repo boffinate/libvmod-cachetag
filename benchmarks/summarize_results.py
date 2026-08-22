@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import tarfile
 import tempfile
 from pathlib import Path
@@ -21,6 +22,16 @@ SWEEP_NOISE_MULTIPLIER = 3.0
 SAMPLER_MIN_CADENCE_RATIO = 0.80
 SAMPLER_MAX_GAP_INTERVALS = 5.0
 SAMPLER_MAX_GAP_FLOOR_SECONDS = 1.0
+SHA256_VALUE_RE = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{64}$")
+COMPARISON_PACING_FIELDS = (
+    "scheduled_slots", "executed_slots", "skipped_slots", "late_starts",
+    "scheduling_lag_seconds", "scheduling_lag_max_seconds", "offered_rps",
+    "achieved_rps", "errors",
+)
+COMPARISON_COHORT_FIELDS = (
+    "cpu_model", "cpu_topology", "cpu_smt_siblings", "cpu_scaling_governors",
+    "cpu_frequency_state", "cpu_boost_state", "kernel", "nproc", "mem_total_kb",
+)
 PURGEMAP_FELLOW_DIRECT_COUNTERS = (
     "purgemap_fellow_attr_objects_written",
     "purgemap_fellow_attr_bytes_written",
@@ -709,7 +720,12 @@ def hardware_fingerprint(result_dir: Path) -> str:
     nproc = system.get("nproc", "unknown-nproc")
     mem = system.get("mem_total_kb", "unknown-mem")
     kernel = system.get("kernel", "unknown-kernel")
-    return f"{cpu} | nproc={nproc} | mem_kb={mem} | kernel={kernel}"
+    metadata = parse_kv(result_dir / "metadata.env")
+    remote = parse_kv(result_dir / "remote-run.env")
+    cohort = metadata.get("benchmark_cohort_fingerprint") or remote.get(
+        "benchmark_cohort_fingerprint", "unknown-cohort"
+    )
+    return f"{cpu} | nproc={nproc} | mem_kb={mem} | kernel={kernel} | cohort={cohort}"
 
 
 def workload_from_time(path: Path) -> tuple[str, int] | None:
@@ -813,6 +829,7 @@ def workload_stats_files(result_dir: Path, workload: str, run: int) -> list[Path
 def workload_driver_values(result_dir: Path, workload: str, run: int) -> dict[str, str]:
     values: dict[str, str] = {}
     error_count = 0
+    saw_error_count = False
     error_messages: list[str] = []
     paths = sorted(result_dir.glob(f"{workload}*.run-{run}.driver"))
     if not paths and run == 1:
@@ -829,13 +846,14 @@ def workload_driver_values(result_dir: Path, workload: str, run: int) -> dict[st
             if key == "driver_errors":
                 try:
                     error_count += int(float(value))
+                    saw_error_count = True
                 except ValueError:
                     pass
             elif key == "driver_error":
                 error_messages.append(f"{path.name}: {value}")
             else:
                 values[key] = value
-    if error_count:
+    if saw_error_count:
         values["driver_errors"] = str(error_count)
     if error_messages:
         values["driver_error"] = " | ".join(error_messages)
@@ -1106,6 +1124,340 @@ def phase6_interpretation_warnings(
     return warnings
 
 
+def comparison_contract_active(result_dir: Path) -> bool:
+    """Whether this artifact opts into the fail-closed comparison contract.
+
+    Historical research artifacts predate the contract and remain readable as
+    historical diagnostics.  New comparative rows must set this marker rather
+    than quietly inheriting the permissive historical parser.
+    """
+    metadata = parse_kv(result_dir / "metadata.env")
+    remote = parse_kv(result_dir / "remote-run.env")
+    return (
+        metadata.get("benchmark_contract") == "comparison-v1"
+        or remote.get("benchmark_contract") == "comparison-v1"
+    )
+
+
+def cache_main_capture_valid(result_dir: Path, workload: str, run: int, endpoint: str) -> tuple[int, str]:
+    # Endpoint captures are named independently of .run-N because they are
+    # written within one VTC run.  Keep the run in the error reason so rejected
+    # ledgers remain unambiguous when a result directory has several repeats.
+    prefix = result_dir / f"{workload}.run-{run}.{endpoint}.cache-main"
+    identity = parse_kv(Path(str(prefix) + ".identity"))
+    rollup = Path(str(prefix) + ".smaps_rollup")
+    required = {
+        "schema": "cache-main-memory-v1",
+        "endpoint": endpoint,
+        "selected_comm": "cache-main",
+        "identity_valid": "1",
+        "identity_post_capture_valid": "1",
+    }
+    for key, expected in required.items():
+        if identity.get(key) != expected:
+            return 0, f"capture_{endpoint}_{key}_invalid:run-{run}"
+    if (
+        not identity.get("selected_pid", "").isdigit()
+        or int(identity["selected_pid"]) <= 0
+        or not identity.get("selected_starttime_ticks", "").isdigit()
+        or int(identity["selected_starttime_ticks"]) <= 0
+    ):
+        return 0, f"capture_{endpoint}_pid_identity_missing:run-{run}"
+    if Path(identity.get("selected_exe", "")).name != "vinyld" or not identity.get("boot_id"):
+        return 0, f"capture_{endpoint}_process_identity_missing:run-{run}"
+    if not rollup.is_file() or not rollup.read_text(encoding="utf-8", errors="replace").strip():
+        return 0, f"capture_{endpoint}_smaps_rollup_missing:run-{run}"
+    if not re.search(r"^Pss:\s+[1-9][0-9]*\s+kB$", rollup.read_text(encoding="utf-8", errors="replace"), re.MULTILINE):
+        return 0, f"capture_{endpoint}_pss_invalid:run-{run}"
+    return 1, "ok"
+
+
+def _capture_identity(result_dir: Path, workload: str, run: int, endpoint: str) -> dict[str, str]:
+    prefix = result_dir / f"{workload}.run-{run}.{endpoint}.cache-main"
+    return parse_kv(Path(str(prefix) + ".identity"))
+
+
+def _valid_sha256(value: str | None) -> bool:
+    return bool(value and SHA256_VALUE_RE.fullmatch(value))
+
+
+def _required_hash(reasons: list[str], values: dict[str, str], key: str, *, allow_none: bool = False) -> None:
+    value = values.get(key)
+    if allow_none and value == "none":
+        return
+    if not _valid_sha256(value):
+        reasons.append(f"provenance_missing:{key}")
+
+
+def _comparison_latency_sampling_validity(
+    result_dir: Path, run: int, driver: dict[str, str], reasons: list[str]
+) -> None:
+    prefixes = sorted(
+        key.removesuffix("_latency_sampling_method")
+        for key in driver
+        if key.endswith("_latency_sampling_method")
+    )
+    if not prefixes:
+        reasons.append("latency_sampling_telemetry_missing")
+        return
+    for prefix in prefixes:
+        required = (
+            "latency_sampling_limit", "latency_sampling_seen", "latency_sampling_dropped",
+            "latency_samples", "latency_samples_path",
+        )
+        if driver.get(f"{prefix}_latency_sampling_method") != "deterministic-reservoir-v1":
+            reasons.append(f"latency_sampling_method_invalid:{prefix}")
+        for suffix in required:
+            if f"{prefix}_{suffix}" not in driver or not driver[f"{prefix}_{suffix}"].strip():
+                reasons.append(f"latency_sampling_metric_missing:{prefix}_{suffix}")
+        limit = as_int(driver, f"{prefix}_latency_sampling_limit")
+        seen = as_int(driver, f"{prefix}_latency_sampling_seen")
+        dropped = as_int(driver, f"{prefix}_latency_sampling_dropped")
+        samples = as_int(driver, f"{prefix}_latency_samples")
+        if limit is None or limit <= 0:
+            reasons.append(f"latency_sampling_limit_invalid:{prefix}")
+        if seen is None or seen < 0 or dropped is None or dropped < 0 or samples is None or samples < 0:
+            reasons.append(f"latency_sampling_counts_invalid:{prefix}")
+        elif samples > seen or dropped < seen - samples:
+            reasons.append(f"latency_sampling_counts_inconsistent:{prefix}")
+        raw_path = driver.get(f"{prefix}_latency_samples_path", "")
+        if raw_path:
+            raw_name = Path(raw_path).name
+            if "." in raw_name:
+                stem, extension = raw_name.split(".", 1)
+                captured = result_dir / f"{stem}.run-{run}.{extension}"
+            else:
+                captured = result_dir / raw_name
+            if not captured.is_file():
+                reasons.append(f"latency_samples_artifact_missing:{prefix}")
+            else:
+                raw_lines = captured.read_text(encoding="utf-8", errors="replace").splitlines()
+                if not raw_lines or raw_lines[0] != "seconds" or samples is None or len(raw_lines) - 1 != samples:
+                    reasons.append(f"latency_samples_artifact_invalid:{prefix}")
+        for suffix in ("latency_p50_seconds", "latency_p95_seconds", "latency_p99_seconds", "latency_max_seconds"):
+            value = as_float(driver, f"{prefix}_{suffix}")
+            if samples is not None and samples > 0 and (value is None or not math.isfinite(value) or value < 0):
+                reasons.append(f"latency_sampling_value_invalid:{prefix}_{suffix}")
+
+
+def _comparison_pacing_validity(driver: dict[str, str], reasons: list[str]) -> None:
+    prefixes = sorted(
+        key.removesuffix("_scheduled_slots")
+        for key in driver
+        if key.endswith("_scheduled_slots")
+    )
+    if not prefixes:
+        reasons.append("pacing_telemetry_missing")
+        return
+    for prefix in prefixes:
+        missing = [f"{prefix}_{suffix}" for suffix in COMPARISON_PACING_FIELDS if f"{prefix}_{suffix}" not in driver]
+        reasons.extend(f"pacing_metric_missing:{field}" for field in missing)
+        if missing:
+            continue
+        values = {suffix: as_float(driver, f"{prefix}_{suffix}") for suffix in COMPARISON_PACING_FIELDS}
+        if any(value is None or not math.isfinite(value) or value < 0 for value in values.values()):
+            reasons.append(f"pacing_metric_invalid:{prefix}")
+            continue
+        scheduled = int(values["scheduled_slots"] or 0)
+        executed = int(values["executed_slots"] or 0)
+        skipped = int(values["skipped_slots"] or 0)
+        errors = int(values["errors"] or 0)
+        if scheduled <= 0 or scheduled != executed + skipped:
+            reasons.append(f"pacing_slot_accounting_invalid:{prefix}")
+        if errors > executed:
+            reasons.append(f"pacing_error_count_invalid:{prefix}")
+
+
+def _comparison_phase_cpu_validity(time_values: dict[str, str], reasons: list[str]) -> None:
+    """Require complete phase-aligned process CPU attribution for comparisons."""
+    schema = time_values.get("system_phase_cpu_telemetry_schema")
+    if schema is None:
+        reasons.append("phase_cpu_telemetry_schema_missing")
+    elif schema != "phase-aligned-process-cpu-v1":
+        reasons.append("phase_cpu_telemetry_schema_invalid")
+    for phase in ("load", "warm"):
+        samples = as_int(time_values, f"system_phase_{phase}_samples")
+        wall_seconds = as_float(time_values, f"system_phase_{phase}_wall_seconds")
+        if samples is None:
+            reasons.append(f"phase_cpu_metric_missing:{phase}_samples")
+        elif samples <= 0:
+            reasons.append(f"phase_cpu_metric_invalid:{phase}_samples")
+        if wall_seconds is None:
+            reasons.append(f"phase_cpu_metric_missing:{phase}_wall_seconds")
+        elif not math.isfinite(wall_seconds) or wall_seconds <= 0:
+            reasons.append(f"phase_cpu_metric_invalid:{phase}_wall_seconds")
+        for process in ("cache_main", "driver", "backend"):
+            key = f"system_phase_{phase}_{process}_cpu_seconds"
+            value = as_float(time_values, key)
+            if value is None:
+                reasons.append(f"phase_cpu_metric_missing:{phase}_{process}_cpu_seconds")
+            elif not math.isfinite(value) or value < 0:
+                reasons.append(f"phase_cpu_metric_invalid:{phase}_{process}_cpu_seconds")
+
+
+def comparison_contract_validity(
+    result_dir: Path,
+    workload: str,
+    run: int,
+    time_values: dict[str, str],
+    driver: dict[str, str],
+    stats: dict[str, int],
+) -> tuple[int, str]:
+    """Return scoped, retained rejection reasons for comparison-v1 rows."""
+    if not comparison_contract_active(result_dir):
+        return 1, "not_applicable"
+    metadata = parse_kv(result_dir / "metadata.env")
+    remote = parse_kv(result_dir / "remote-run.env")
+    provenance = parse_kv(result_dir / "build-provenance.env")
+    reasons: list[str] = []
+    required_provenance = (
+        "build_provenance_version",
+        "vinyl_build_input_sha256",
+        "cachetag_build_input_sha256",
+        "xkey_build_input_sha256",
+        "xkey_compat_artifact_sha256",
+        "xkey_config_sha256",
+        "vinyl_binary_sha256",
+        "cachetag_binary_sha256",
+        "xkey_binary_sha256",
+        "build_commands_sha256",
+        "dockerfile_sha256",
+        "docker_image_id",
+    )
+    for key in required_provenance:
+        if key == "build_provenance_version":
+            if provenance.get(key) != "3":
+                reasons.append(f"provenance_missing:{key}")
+        elif key == "docker_image_id":
+            if not provenance.get(key) or provenance.get(key) == "none":
+                reasons.append(f"provenance_missing:{key}")
+        else:
+            _required_hash(reasons, provenance, key)
+    if provenance.get("build_provenance_mode") != "strict" or provenance.get("build_provenance_eligible") != "1":
+        reasons.append("provenance_not_comparison_eligible")
+    for source in ("cachetag", "vinyl", "xkey"):
+        if provenance.get(f"{source}_dirty_state") != "clean":
+            reasons.append(f"provenance_{source}_not_clean")
+    fixture_name = metadata.get("fixture_name") or remote.get("fixture_name") or driver.get("driver_fixture_name")
+    declared_fixture_fingerprint = metadata.get("fixture_fingerprint") or remote.get("fixture_fingerprint")
+    fixture_fingerprint = declared_fixture_fingerprint
+    manifest_path = result_dir / "fixtures" / f"{fixture_name}.manifest.json" if fixture_name else None
+    if manifest_path and manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            expected = manifest.get("expected", {})
+            manifest_fingerprint = expected.get("fixture_fingerprint")
+            if declared_fixture_fingerprint and declared_fixture_fingerprint != manifest_fingerprint:
+                reasons.append("fixture_fingerprint_declaration_mismatch")
+            fixture_fingerprint = manifest_fingerprint
+            for field, driver_key in (("objects", "driver_fixture_expected_objects"), ("relationships", "driver_fixture_expected_relationships")):
+                expected_value = expected.get(field)
+                actual_value = as_int(driver, driver_key)
+                if expected_value is not None and actual_value != expected_value:
+                    reasons.append(f"fixture_{field}_mismatch")
+        except (OSError, json.JSONDecodeError):
+            reasons.append("fixture_manifest_invalid")
+    elif fixture_name:
+        reasons.append("fixture_manifest_missing")
+    if not fixture_name:
+        reasons.append("fixture_name_missing")
+    if not fixture_fingerprint:
+        reasons.append("fixture_fingerprint_missing")
+    elif driver.get("driver_fixture_fingerprint") != fixture_fingerprint:
+        reasons.append("fixture_fingerprint_mismatch")
+    if driver.get("driver_fixture_name") != fixture_name:
+        reasons.append("fixture_name_mismatch")
+    expected_objects = as_int(driver, "driver_fixture_expected_objects")
+    loaded_objects = as_int(driver, "driver_load_requests")
+    if expected_objects is None or expected_objects <= 0 or loaded_objects is None or loaded_objects != expected_objects:
+        reasons.append("work_volume_invalid")
+    expected_relationships = as_int(driver, "driver_fixture_expected_relationships")
+    if expected_relationships is None or expected_relationships <= 0:
+        reasons.append("work_relationship_volume_invalid")
+    backend_objects = as_int(driver, "driver_load_backend_objects")
+    backend_expected = as_int(driver, "driver_load_backend_objects_expected")
+    backend_validation = as_bool_int(driver, "driver_load_backend_objects_validation")
+    if backend_objects is None or backend_expected is None or backend_validation != 1 or expected_objects is None:
+        reasons.append("backend_work_volume_telemetry_missing")
+    elif backend_objects != expected_objects or backend_expected != expected_objects:
+        reasons.append("backend_work_volume_invalid")
+    if as_int(driver, "driver_errors") is None:
+        reasons.append("driver_telemetry_missing")
+    elif as_int(driver, "driver_errors") != 0:
+        reasons.append("driver_errors")
+    if driver.get("driver_phase_telemetry_schema") != "phase-aligned-v1":
+        reasons.append("phase_telemetry_incomplete")
+    if driver.get("driver_pacing_schema") != "slot-skipping-v1":
+        reasons.append("pacing_telemetry_incomplete")
+    _comparison_pacing_validity(driver, reasons)
+    _comparison_latency_sampling_validity(result_dir, run, driver, reasons)
+    for key, configured in (
+        ("driver_runtime_gomaxprocs", metadata.get("bench_driver_gomaxprocs")),
+        ("driver_runtime_gogc", metadata.get("bench_driver_gogc")),
+        ("driver_runtime_gomemlimit", metadata.get("bench_driver_gomemlimit")),
+    ):
+        if not configured or driver.get(key) != configured:
+            reasons.append(f"runtime_control_mismatch:{key}")
+    for process in ("cache_process", "driver", "backend"):
+        if not time_values.get(f"system_tracked_{process}_cpus_allowed_list"):
+            reasons.append(f"cpu_placement_missing:{process}")
+    if "swap_activity" not in time_values:
+        reasons.append("swap_telemetry_missing")
+    elif as_int(time_values, "swap_activity") is None:
+        reasons.append("swap_telemetry_invalid")
+    elif as_int(time_values, "swap_activity") != 0:
+        reasons.append("swap_activity")
+    if stat_suffix(stats, "n_lru_nuked") is None:
+        reasons.append("eviction_telemetry_missing")
+    elif stat_suffix(stats, "n_lru_nuked") != 0:
+        reasons.append("unexpected_eviction")
+    if stat_suffix(stats, "n_expired") is None:
+        reasons.append("expiry_telemetry_missing")
+    elif stat_suffix(stats, "n_expired") != 0:
+        reasons.append("unexpected_expiry")
+    for counter in ("threads", "thread_queue_len", "threads_limited", "threads_failed"):
+        if stat_suffix(stats, counter) is None:
+            reasons.append(f"worker_telemetry_missing:{counter}")
+    if stat_suffix(stats, "threads_failed") not in (None, 0):
+        reasons.append("worker_failures")
+    _comparison_phase_cpu_validity(time_values, reasons)
+    system = parse_kv(result_dir / "system.env")
+    if not system:
+        system = parse_kv(result_dir / "host-system.env")
+    for key in COMPARISON_COHORT_FIELDS:
+        if not system.get(key):
+            reasons.append(f"cohort_field_missing:{key}")
+    cohort = metadata.get("benchmark_cohort_fingerprint") or remote.get("benchmark_cohort_fingerprint")
+    if not cohort:
+        reasons.append("cohort_fingerprint_missing")
+    required_endpoints = set((metadata.get("required_cache_main_endpoints") or "post_load,post_load_confirmation").split(","))
+    required_endpoints.update(("post_load", "post_load_confirmation"))
+    identities: list[tuple[str, str, str]] = []
+    for endpoint in sorted(item.strip() for item in required_endpoints if item.strip()):
+        valid, reason = cache_main_capture_valid(result_dir, workload, run, endpoint)
+        if not valid:
+            reasons.append(reason)
+            continue
+        identity = _capture_identity(result_dir, workload, run, endpoint)
+        identities.append((identity.get("boot_id", ""), identity.get("selected_pid", ""), identity.get("selected_starttime_ticks", "")))
+    if identities and len(set(identities)) != 1:
+        reasons.append("capture_process_identity_changed")
+    def captured_pss(endpoint: str) -> int | None:
+        path = result_dir / f"{workload}.run-{run}.{endpoint}.cache-main.smaps_rollup"
+        if not path.is_file():
+            return None
+        match = re.search(r"^Pss:\s+(\d+)\s+kB$", path.read_text(encoding="utf-8", errors="replace"), re.MULTILINE)
+        return int(match.group(1)) if match else None
+
+    first_pss = captured_pss("post_load")
+    confirm_pss = captured_pss("post_load_confirmation")
+    if first_pss is None or confirm_pss is None:
+        reasons.append("post_load_confirmation_missing")
+    elif max(first_pss, confirm_pss) and abs(first_pss - confirm_pss) / max(first_pss, confirm_pss) > 0.005:
+        reasons.append("post_load_confirmation_drift")
+    return int(not reasons), "ok" if not reasons else ",".join(reasons)
+
+
 def linear_slope(points: list[tuple[float, float]]) -> float | None:
     if len(points) < 2:
         return None
@@ -1219,6 +1571,10 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
         if stats_files:
             stats_file = stats_files[0].name
             stats = parse_vsc_stats(stats_files[0])
+        comparison_valid, comparison_reason = comparison_contract_validity(
+            result_dir, workload, run, time_values, driver_values, stats
+        )
+        overall_valid = int(overall_valid == 1 and comparison_valid == 1)
         phase_stats = {
             phase: parse_vsc_stats(path)
             for phase, path in phase_stats_files(result_dir, workload, run).items()
@@ -1289,6 +1645,8 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
             "system_memory_validity_reason": system_memory_reason,
             "raw_latency_valid": raw_latency_valid,
             "raw_latency_validity_reason": raw_latency_reason,
+            "comparison_contract_valid": comparison_valid,
+            "comparison_contract_validity_reason": comparison_reason,
             "overall_valid": overall_valid,
             "overall_validity_reason": "ok" if overall_valid else ",".join(
                 reason
@@ -1297,6 +1655,7 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
                     (int(sampling_validity["valid"]), "system_sampling_invalid"),
                     (system_memory_valid, "system_memory_invalid"),
                     (int(raw_latency_valid != 0), "raw_latency_invalid"),
+                    (comparison_valid, comparison_reason),
                 )
                 if valid != 1
             ),
@@ -2171,6 +2530,8 @@ def result_data(result_dir: Path) -> dict[str, Any]:
         "matrix": matrix,
         "path": str(result_dir),
         "hardware": hardware_fingerprint(result_dir),
+        "comparison_cohort_fingerprint": metadata.get("benchmark_cohort_fingerprint")
+        or remote.get("benchmark_cohort_fingerprint"),
         "runs": {
             "pass": valid_count,
             "fail": invalid_count,
@@ -3081,6 +3442,36 @@ def load_arm_results(arm_specs: list[str]) -> tuple[dict[str, list[dict[str, Any
     return arms, tempdirs
 
 
+def comparison_arm_cohort_validity(arms: dict[str, list[dict[str, Any]]]) -> tuple[int, str]:
+    """Reject an arm comparison when its comparison-v1 cohorts differ.
+
+    The coarse hardware label is useful for historical artifacts but is not a
+    sufficient BR-014 identity.  A comparison cohort is carried per result
+    directory and must be identical across all active comparison arms.
+    """
+    active_results = [
+        result
+        for results in arms.values()
+        for result in results
+        if comparison_contract_active(Path(result["path"]))
+    ]
+    fingerprints = {
+        str(result.get("comparison_cohort_fingerprint"))
+        for results in arms.values()
+        for result in results
+        if result.get("comparison_cohort_fingerprint")
+    }
+    if not active_results:
+        return 1, "not_applicable"
+    if any(not result.get("comparison_cohort_fingerprint") for result in active_results):
+        return 0, "cohort_fingerprint_missing"
+    if not fingerprints:
+        return 0, "cohort_fingerprint_missing"
+    if len(fingerprints) != 1:
+        return 0, "cohort_fingerprint_changed_across_arms"
+    return 1, "ok"
+
+
 def render_arm_comparison(arms: dict[str, list[dict[str, Any]]]) -> str:
     arm_names = list(arms)
     hardware = {
@@ -3108,6 +3499,8 @@ def render_arm_comparison(arms: dict[str, list[dict[str, Any]]]) -> str:
                     workloads.add(workload)
         rows_by_arm[arm] = grouped
 
+    cohort_valid, cohort_reason = comparison_arm_cohort_validity(arms)
+
     lines = ["Arm comparison:"]
     for arm in arm_names:
         run_count = sum(len(result["workloads"]) for result in arms[arm])
@@ -3118,6 +3511,12 @@ def render_arm_comparison(arms: dict[str, list[dict[str, Any]]]) -> str:
         lines.append("WARNING: hardware fingerprint changed across arms:")
         for fingerprint in sorted(hardware):
             lines.append(f"  {fingerprint}")
+    if cohort_valid != 1:
+        lines.append(
+            "WARNING: comparison rejected: "
+            f"{cohort_reason}; comparative metrics are withheld."
+        )
+        return "\n".join(lines)
 
     for workload in sorted(workloads):
         lines.append("")

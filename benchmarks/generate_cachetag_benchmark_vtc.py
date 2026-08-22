@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
+
+from fixture_loader import FixtureError, load_jsonl, validate_fixture
 
 
 PHASED_PURGE_PROFILES = (
@@ -22,6 +25,16 @@ PHASED_PURGE_PROFILES = (
     "cutover-mostly-unique",
     "cutover-mostly-shared",
     "cutover-mixed",
+    # Versioned declared scenarios.  Their driver aliases preserve the
+    # existing deterministic wire format until the fixture-aware driver lands.
+    "mostly-unique-bound",
+    "mostly-shared-bound",
+    "uniform-cyclic",
+    "hot-set",
+    "ordinary-body-4k",
+    "cms-trace-static-v1",
+    "cms-trace-hot-set-v1",
+    "xkey-contract",
 )
 SPECIAL_PROFILES = (
     "untagged-fellow-load",
@@ -54,6 +67,17 @@ RESTART_PROFILES = (
     "fellow-restart-hot-purge",
 )
 ALL_PROFILES = (*PHASED_PURGE_PROFILES, *SPECIAL_PROFILES)
+DRIVER_PROFILE_ALIASES = {
+    "mostly-unique-bound": "cutover-mostly-unique",
+    "mostly-shared-bound": "cutover-mostly-shared",
+    "uniform-cyclic": "uniform-tags",
+    "hot-set": "zipfian-tags",
+    "ordinary-body-4k": "cms-entity-list",
+    "cms-trace-static-v1": "cms-entity-list",
+    "cms-trace-hot-set-v1": "cms-entity-list",
+    "xkey-contract": "explicit-purge",
+}
+ACTIVE_FIXTURE_CONTRACTS: dict[str, dict[str, object]] = {}
 FIXED_TAGS_PER_OBJECT = {
     "single-shared-tag": 1,
     "single-unique-tag": 1,
@@ -240,6 +264,7 @@ def write_allocator_environment(f) -> None:
 
 
 def default_purge_key(profile: str) -> str:
+    profile = DRIVER_PROFILE_ALIASES.get(profile, profile)
     return {
         "uniform-tags": "u:0",
         "zipfian-tags": "z:1",
@@ -284,8 +309,34 @@ def write_driver(
     env: str = "",
     wait: bool = True,
 ) -> None:
-    key = purge_key if purge_key is not None else default_purge_key(profile)
+    contract = ACTIVE_FIXTURE_CONTRACTS.get(profile)
+    key = purge_key if purge_key is not None else (
+        str(contract["purge_key"]) if contract else default_purge_key(profile)
+    )
+    driver_profile = DRIVER_PROFILE_ALIASES.get(profile, profile)
     env_parts = []
+
+    if contract:
+        env_parts.extend(
+            (
+                f"BENCH_FIXTURE_NAME={contract['name']}",
+                f"BENCH_FIXTURE_FINGERPRINT={contract['fixture_fingerprint']}",
+                f"BENCH_FIXTURE_EXPECTED_OBJECTS={contract['objects']}",
+                f"BENCH_FIXTURE_EXPECTED_RELATIONSHIPS={contract['relationships']}",
+                f"BENCH_FIXTURE_PAYLOAD={contract['payload']}",
+            )
+        )
+    if profile in {"uniform-cyclic", "ordinary-body-4k", "cms-trace-static-v1"}:
+        env_parts.append("BENCH_ACCESS_PATTERN=uniform-cyclic")
+    elif profile in {"hot-set", "cms-trace-hot-set-v1"}:
+        env_parts.extend(
+            (
+                "BENCH_ACCESS_PATTERN=hot-set",
+                f"BENCH_HOT_SET_OBJECTS={os.getenv('BENCH_HOT_SET_OBJECTS', '0')}",
+            )
+        )
+    elif profile == "xkey-contract":
+        env_parts.append("BENCH_XKEY_CONTRACT=1")
     length_class = os.getenv("BENCH_TAG_LENGTH_CLASS", "")
     if length_class:
         env_parts.append(f"BENCH_TAG_LENGTH_CLASS={length_class}")
@@ -309,7 +360,7 @@ def write_driver(
     f.write(
         "process p1 -log "
         f"\"{command_prefix}{driver_command} ${{v1_addr}} ${{v1_port}} {objects} {mode} "
-        f"{profile} {tags_per_object} {key} /results/{name}.driver\" -{action}\n\n"
+        f"{driver_profile} {tags_per_object} {key} /results/{name}.driver\" -{action}\n\n"
     )
 
 
@@ -358,6 +409,15 @@ def write_phase6_cycle_snapshot(
     return
 
 
+def write_cache_main_endpoint(f, prefix: str, endpoint: str, quiet_seconds: int = 0) -> None:
+    if quiet_seconds:
+        f.write(f"delay {quiet_seconds}\n")
+    f.write(
+        f'shell "sh /cachetag-host/benchmarks/capture_cache_main_memory.sh '
+        f'{endpoint} /results/{prefix}"\n'
+    )
+
+
 def write_client_purge(
     f,
     name: str,
@@ -366,7 +426,12 @@ def write_client_purge(
 ) -> None:
     key = purge_key if purge_key is not None else default_purge_key(profile)
     f.write(f"client {name} {{\n")
-    f.write(f'\ttxreq -req PURGE -hdr "Key: {key}"\n')
+    # Keep hard mode explicit even though it is the VCL default.  Contract
+    # lanes must not acquire soft-purge semantics through a future default.
+    f.write(
+        f'\ttxreq -req PURGE -hdr "Key: {key}" '
+        '-hdr "X-Bench-Purge-Mode: hard"\n'
+    )
     f.write("\trxresp\n")
     f.write("\texpect resp.status == 200\n")
     f.write("\texpect resp.http.Purged == -1\n")
@@ -404,7 +469,7 @@ def write_benchmark_teardown(
 def write_stats_capture(f, instance: str, stats_filter: str, path: str) -> None:
     f.write(
         f'shell "vinylstat -1 -n ${{{instance}_name}} -f {stats_filter} '
-        f'-f MAIN.n_object -f MAIN.n_lru_nuked > {path}"\n'
+        f'-f MAIN.n_object -f MAIN.n_lru_nuked -f MAIN.n_expired > {path}"\n'
     )
 
 
@@ -540,12 +605,14 @@ def write_cachetag_vcl(
     f.write("\t}\n\n")
     f.write("\tsub vcl_backend_response {\n")
     f.write(f"\t\tset beresp.ttl = {ttl};\n")
+    # These are common arm semantics.  A hard purge lane must not be
+    # accidentally judged against an arm that can serve a grace/keep object.
+    f.write("\t\tset beresp.grace = 0s;\n")
+    f.write("\t\tset beresp.keep = 0s;\n")
     if is_phase6_profile(profile):
         f.write('\t\tif (bereq.http.X-Bench-Phase6-TTL == "short") {\n')
         f.write("\t\t\tset beresp.ttl = 1s;\n")
         f.write("\t\t}\n")
-        f.write("\t\tset beresp.grace = 0s;\n")
-        f.write("\t\tset beresp.keep = 0s;\n")
     if is_phase5_held_profile(profile):
         f.write('\t\tif (bereq.url == "/__bench_phase5_hold") {\n')
         f.write('\t\t\ttags.add("phase5:held");\n')
@@ -610,12 +677,18 @@ def write_xkey_vcl(
         f.write("\t}\n\n")
     f.write("\tsub vcl_recv {\n")
     f.write('\t\tif (req.method == "PURGE") {\n')
-    f.write("\t\t\tset req.http.purged = xkey.purge(req.http.Key);\n")
+    f.write('\t\t\tif (req.http.X-Bench-Purge-Mode == "soft") {\n')
+    f.write("\t\t\t\tset req.http.purged = xkey.softpurge(req.http.Key);\n")
+    f.write("\t\t\t} else {\n")
+    f.write("\t\t\t\tset req.http.purged = xkey.purge(req.http.Key);\n")
+    f.write("\t\t\t}\n")
     f.write("\t\t\treturn (synth(200));\n")
     f.write("\t\t}\n")
     f.write("\t}\n\n")
     f.write("\tsub vcl_backend_response {\n")
     f.write(f"\t\tset beresp.ttl = {ttl};\n")
+    f.write("\t\tset beresp.grace = 0s;\n")
+    f.write("\t\tset beresp.keep = 0s;\n")
     f.write("\t\tset beresp.http.xkey = bereq.http.X-Cache-Tags;\n")
     f.write("\t}\n\n")
     f.write("\tsub vcl_hit {\n")
@@ -627,6 +700,12 @@ def write_xkey_vcl(
     f.write("\t\t} else {\n")
     f.write('\t\t\tset resp.http.X-Bench-Cache = "miss";\n')
     f.write("\t\t}\n")
+    # xkey needs this stored object header to attach tags.  It is not part of
+    # the public response contract on either a miss or a hit.
+    f.write('\t\tif (req.http.X-Bench-Contract == "stored-tags") {\n')
+    f.write("\t\t\tset resp.http.X-Bench-Stored-Tags = resp.http.xkey;\n")
+    f.write("\t\t}\n")
+    f.write("\t\tunset resp.http.xkey;\n")
     f.write("\t\tunset req.http.X-Bench-Cache;\n")
     f.write("\t}\n\n")
     f.write("\tsub vcl_synth {\n")
@@ -688,6 +767,10 @@ def write_workload(
             f.write("barrier b_phase5_continue sock 2\n\n")
         if profile == "eviction":
             body_bytes = eviction_body_bytes
+        elif profile == "ordinary-body-4k":
+            # This is a declared sensitivity, not a claim about the trace's
+            # body distribution.  Keep it separate from 2-byte index lanes.
+            body_bytes = 4096
         elif profile == "purged-cold-residency" and cold_residency_body_bytes > 0:
             body_bytes = cold_residency_body_bytes
         else:
@@ -782,6 +865,9 @@ def write_workload(
             return
 
         if profile in PHASED_PURGE_PROFILES:
+            comparison_memory = os.getenv("BENCH_COMPARISON_MEMORY_ENDPOINTS", "0").lower() in {
+                "1", "true", "yes", "on"
+            }
             write_driver(
                 f,
                 objects,
@@ -790,6 +876,7 @@ def write_workload(
                 effective_tags,
                 f"{prefix}_load",
                 driver_command,
+                env="BENCH_WARM_SECONDS=0" if comparison_memory else "",
             )
             expected_attr_bytes_raw = os.getenv(
                 "BENCH_EXPECT_FELLOW_ATTR_BYTES_PER_OBJECT", ""
@@ -804,6 +891,21 @@ def write_workload(
                     "} -run\n"
                 )
             write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_pre_purge.stats")
+            if comparison_memory:
+                post_load_quiet = int(os.getenv("BENCH_MEMORY_POST_LOAD_QUIET_SECONDS", "30"))
+                confirmation_quiet = int(os.getenv("BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS", "10"))
+                write_cache_main_endpoint(f, prefix, "post_load", post_load_quiet)
+                write_cache_main_endpoint(f, prefix, "post_load_confirmation", confirmation_quiet)
+                write_driver(
+                    f,
+                    objects,
+                    f"{driver_impl}-warm-only",
+                    profile,
+                    effective_tags,
+                    f"{prefix}_warm",
+                    driver_command,
+                )
+                write_cache_main_endpoint(f, prefix, "post_warm_diagnostic")
             if expected_attr_bytes_raw:
                 f.write(
                     "vinyl v1 -expect CACHETAG.vcl1_tags_bench."
@@ -841,6 +943,9 @@ def write_workload(
                 driver_command,
             )
             write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_purge.stats")
+            if comparison_memory:
+                write_cache_main_endpoint(f, prefix, "post_invalidation")
+                write_cache_main_endpoint(f, prefix, "lifecycle")
             if unload_fellow_cachetag:
                 write_fellow_cachetag_vcl_unload(f)
             write_shutdown_drain(f, shutdown_drain_seconds)
@@ -1093,9 +1198,9 @@ def write_noindex_vcl(
         f.write("\t}\n")
     f.write("\tsub vcl_backend_response {\n")
     f.write("\t\tset beresp.ttl = 1h;\n")
+    f.write("\t\tset beresp.grace = 0s;\n")
+    f.write("\t\tset beresp.keep = 0s;\n")
     if phase6_bans:
-        f.write("\t\tset beresp.grace = 0s;\n")
-        f.write("\t\tset beresp.keep = 0s;\n")
         f.write("\t\tset beresp.http.X-Bench-Phase6-Generation = bereq.http.X-Bench-Phase6-Generation;\n")
     f.write("\t}\n")
     f.write("\tsub vcl_hit {\n")
@@ -1488,6 +1593,11 @@ def main() -> None:
     parser.add_argument("--backend-idle-timeout", default="")
     parser.add_argument("--cachetag-persist", action="store_true")
     parser.add_argument("--cachetag-wal-fsync", choices=("strict", "grouped"), default="strict")
+    parser.add_argument(
+        "--fixture-manifest",
+        type=Path,
+        help="validate a versioned fixture and emit its driver integration contract",
+    )
     parser.add_argument("--shutdown-drain-seconds", type=float, default=0)
     parser.add_argument("--include-xkey", action="store_true")
     parser.add_argument("--skip-noindex", action="store_true")
@@ -1553,6 +1663,50 @@ def main() -> None:
         raise SystemExit("CACHE_TAG_BENCH_TTL must not contain whitespace")
     args.out_dir.mkdir(parents=True, exist_ok=True)
     profiles = selected_profiles(args.profile)
+    fixture_dir = Path(os.getenv("BENCH_FIXTURE_DIR", "/results/fixtures"))
+    for profile in profiles:
+        manifest_path: Path | None = None
+        if profile in {"mostly-unique-bound", "mostly-shared-bound", "uniform-cyclic", "hot-set", "ordinary-body-4k"}:
+            manifest_path = fixture_dir / f"{profile}.manifest.json"
+        elif profile in {"cms-trace-static-v1", "cms-trace-hot-set-v1"}:
+            manifest_path = args.fixture_manifest
+            if manifest_path is None:
+                raise SystemExit(f"{profile} requires --fixture-manifest")
+        if manifest_path is None:
+            continue
+        try:
+            fixture_metrics = validate_fixture(manifest_path)
+        except FixtureError as exc:
+            raise SystemExit(f"fixture preflight failed: {exc}") from exc
+        if fixture_metrics["objects"] != args.objects:
+            raise SystemExit(
+                f"fixture {profile} objects={fixture_metrics['objects']} does not match --objects={args.objects}"
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload = manifest_path.parent / str(manifest["payload"])
+        records = load_jsonl(payload)
+        ACTIVE_FIXTURE_CONTRACTS[profile] = {
+            "name": manifest["fixture"],
+            "fixture_fingerprint": fixture_metrics["fixture_fingerprint"],
+            "objects": fixture_metrics["objects"],
+            "relationships": fixture_metrics["relationships"],
+            "payload": payload,
+            "purge_key": records[0].tags[0],
+        }
+    if args.fixture_manifest:
+        try:
+            fixture_metrics = validate_fixture(args.fixture_manifest)
+        except FixtureError as exc:
+            raise SystemExit(f"fixture preflight failed: {exc}") from exc
+        fixture_name = args.fixture_manifest.stem.removesuffix(".manifest")
+        contract = args.out_dir / "fixture.contract.env"
+        contract.write_text(
+            "".join(
+                f"fixture_{key}={json.dumps(value, sort_keys=True) if isinstance(value, dict) else value}\n"
+                for key, value in (("name", fixture_name), *sorted(fixture_metrics.items()))
+            ),
+            encoding="utf-8",
+        )
     expected_attr_bytes_raw = os.getenv(
         "BENCH_EXPECT_FELLOW_ATTR_BYTES_PER_OBJECT", ""
     )

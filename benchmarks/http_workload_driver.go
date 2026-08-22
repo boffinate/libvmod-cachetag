@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -8,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,70 +21,77 @@ import (
 )
 
 type config struct {
-	host                  string
-	port                  int
-	objects               int
-	mode                  string
-	profile               string
-	tagsPerObject         int
-	purgeKey              string
-	metricsPath           string
-	buckets               int
-	clients               int
-	warmSeconds           int
-	warmValidateHit       bool
-	residencyValidate     int
-	churnCycles           int
-	httpTimeout           int
-	tagUniverse           int
-	purgeRequests         int
-	purgeKeysPerRequest   int
-	purgeValidate         int
-	purgeSettleDelay      int
-	purgeHitRecheckDelay  int
-	allowStaleAfterPurge  bool
-	purgeWindowTimeoutMS  int
-	purgeWindowWorkers    int
-	concurrentSeconds     int
-	concurrentReaders     int
-	concurrentWriters     int
-	concurrentPurgers     int
-	concurrentTargetRPS   int
-	concurrentPurgeRate   int
-	concurrentInsertEvery int
-	purgeStormRate        int
-	purgeStormDistinct    int
-	purgeStormUnknownPct  int
-	purgeStormSoftPct     int
-	populatedMapEntries   int
-	stream1OverlapPreseed int
-	stream1OverlapReads   int
-	residencySweepSeconds int
-	residencySampleMS     int
-	phase4PreSeconds      int
-	phase4SweepSeconds    int
-	phase4PostSeconds     int
-	phase4GuardMS         int
-	phase5HoldMS          int
-	phase5CapPurges       int
-	phase5HoldPublication bool
-	phase5Shutdown        bool
-	phase6PressureBody    int
-	phase6QuietSeconds    int
-	phase6TTL             string
-	phase6BodyBytes       int
-	validateResidency     bool
-	evictionValidate      int
-	disableKeepAlives     bool
-	phaseMarkerDir        string
-	phaseMarkerPrefix     string
-	churnCompactEachCycle bool
-	churnGeneration       int
-	storageKind           string
-	cacheTagPersist       bool
-	tagLengthClass        string
-	validateTagShape      bool
-	originEpoch           *originEpochController
+	host                         string
+	port                         int
+	objects                      int
+	mode                         string
+	profile                      string
+	tagsPerObject                int
+	purgeKey                     string
+	metricsPath                  string
+	buckets                      int
+	clients                      int
+	warmSeconds                  int
+	warmValidateHit              bool
+	residencyValidate            int
+	churnCycles                  int
+	httpTimeout                  int
+	tagUniverse                  int
+	purgeRequests                int
+	purgeKeysPerRequest          int
+	purgeValidate                int
+	purgeSettleDelay             int
+	purgeHitRecheckDelay         int
+	allowStaleAfterPurge         bool
+	purgeWindowTimeoutMS         int
+	purgeWindowWorkers           int
+	concurrentSeconds            int
+	concurrentReaders            int
+	concurrentWriters            int
+	concurrentPurgers            int
+	concurrentTargetRPS          int
+	concurrentPurgeRate          int
+	concurrentInsertEvery        int
+	purgeStormRate               int
+	purgeStormDistinct           int
+	purgeStormUnknownPct         int
+	purgeStormSoftPct            int
+	populatedMapEntries          int
+	stream1OverlapPreseed        int
+	stream1OverlapReads          int
+	residencySweepSeconds        int
+	residencySampleMS            int
+	phase4PreSeconds             int
+	phase4SweepSeconds           int
+	phase4PostSeconds            int
+	phase4GuardMS                int
+	phase5HoldMS                 int
+	phase5CapPurges              int
+	phase5HoldPublication        bool
+	phase5Shutdown               bool
+	phase6PressureBody           int
+	phase6QuietSeconds           int
+	phase6TTL                    string
+	phase6BodyBytes              int
+	validateResidency            bool
+	evictionValidate             int
+	disableKeepAlives            bool
+	phaseMarkerDir               string
+	phaseMarkerPrefix            string
+	churnCompactEachCycle        bool
+	churnGeneration              int
+	storageKind                  string
+	cacheTagPersist              bool
+	tagLengthClass               string
+	validateTagShape             bool
+	accessPattern                string
+	hotSetObjects                int
+	fixtureName                  string
+	fixtureFingerprint           string
+	fixtureExpectedObjects       int
+	fixtureExpectedRelationships int
+	fixtureRecords               [][]string
+	originEpoch                  *originEpochController
 }
 
 type originEpochController struct {
@@ -131,21 +141,58 @@ func phaseName(name string) string {
 
 func beginPhase(lines *metrics, name string) time.Time {
 	lines.add("driver_phase", name)
-	return time.Now()
+	start := time.Now()
+	lines.add("driver_"+phaseName(name)+"_start_unix_nano", start.UnixNano())
+	return start
 }
 
 func recordPhaseSeconds(lines *metrics, name string, start time.Time) {
 	lines.add("driver_"+phaseName(name)+"_wall_seconds", time.Since(start).Seconds())
+	lines.add("driver_"+phaseName(name)+"_end_unix_nano", time.Now().UnixNano())
 }
 
 type latencyRecorder struct {
-	mu      sync.Mutex
-	samples []float64
-	limit   int
+	limit        int
+	seen         atomic.Uint64
+	droppedExtra atomic.Uint64
+	slots        []atomic.Int64
+}
+
+var latencyArtifacts struct {
+	sync.Mutex
+	metricsPath string
+	err         error
+}
+
+func setLatencyArtifactMetricsPath(path string) {
+	latencyArtifacts.Lock()
+	defer latencyArtifacts.Unlock()
+	latencyArtifacts.metricsPath = path
+	latencyArtifacts.err = nil
+}
+
+func recordLatencyArtifactError(err error) {
+	if err == nil {
+		return
+	}
+	latencyArtifacts.Lock()
+	defer latencyArtifacts.Unlock()
+	if latencyArtifacts.err == nil {
+		latencyArtifacts.err = err
+	}
+}
+
+func latencyArtifactError() error {
+	latencyArtifacts.Lock()
+	defer latencyArtifacts.Unlock()
+	return latencyArtifacts.err
 }
 
 func newLatencyRecorder(limit int) *latencyRecorder {
-	return &latencyRecorder{limit: limit}
+	if limit < 0 {
+		limit = 0
+	}
+	return &latencyRecorder{limit: limit, slots: make([]atomic.Int64, limit)}
 }
 
 // workerLatencyLimit bounds the amount of sample storage allocated to each
@@ -158,36 +205,63 @@ func workerLatencyLimit(limit int, workers int) int {
 	return (limit + workers - 1) / workers
 }
 
+// reservoirIndex returns a deterministic Algorithm-R replacement candidate.
+// The splitmix64 finalizer gives stable, well-distributed choices without a
+// global PRNG or lock on the request path.
+func reservoirIndex(sequence uint64) uint64 {
+	x := sequence + 0x9e3779b97f4a7c15
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+	return x ^ (x >> 31)
+}
+
 func (r *latencyRecorder) add(d time.Duration) {
-	r.mu.Lock()
-	if len(r.samples) < r.limit {
-		r.samples = append(r.samples, d.Seconds())
+	sequence := r.seen.Add(1) - 1
+	if r.limit > 0 {
+		slot := sequence
+		if sequence >= uint64(r.limit) {
+			slot = reservoirIndex(sequence) % (sequence + 1)
+			if slot >= uint64(r.limit) {
+				return
+			}
+		}
+		r.slots[slot].Store(d.Nanoseconds())
 	}
-	r.mu.Unlock()
 }
 
 func (r *latencyRecorder) mergeSamples(samples []float64) {
-	if len(samples) == 0 {
+	for _, sample := range samples {
+		r.add(time.Duration(sample * float64(time.Second)))
+	}
+}
+
+func (r *latencyRecorder) mergeRecorder(other *latencyRecorder) {
+	if other == nil {
 		return
 	}
-	r.mu.Lock()
-	remaining := r.limit - len(r.samples)
-	if remaining > 0 {
-		if remaining > len(samples) {
-			remaining = len(samples)
-		}
-		r.samples = append(r.samples, samples[:remaining]...)
-	}
-	r.mu.Unlock()
+	r.droppedExtra.Add(other.dropped())
+	r.mergeSamples(other.snapshot())
 }
 
 func (r *latencyRecorder) emit(prefix string, lines *metrics) {
 	samples := r.snapshot()
+	lines.add(prefix+"_latency_sampling_method", "deterministic-reservoir-v1")
+	lines.add(prefix+"_latency_sampling_limit", r.limit)
+	lines.add(prefix+"_latency_sampling_seen", r.observed())
+	lines.add(prefix+"_latency_sampling_dropped", r.dropped())
+	latencyArtifacts.Lock()
+	metricsPath := latencyArtifacts.metricsPath
+	latencyArtifacts.Unlock()
+	path := latencySamplePath(metricsPath, prefix)
+	lines.add(prefix+"_latency_samples_path", path)
+	if err := writeLatencySamples(path, samples); err != nil {
+		recordLatencyArtifactError(fmt.Errorf("write %s latency samples: %w", prefix, err))
+	}
+	lines.add(prefix+"_latency_samples", len(samples))
 	if len(samples) == 0 {
 		return
 	}
 	sort.Float64s(samples)
-	lines.add(prefix+"_latency_samples", len(samples))
 	lines.add(prefix+"_latency_p50_seconds", percentile(samples, 0.50))
 	lines.add(prefix+"_latency_p95_seconds", percentile(samples, 0.95))
 	lines.add(prefix+"_latency_p99_seconds", percentile(samples, 0.99))
@@ -195,10 +269,33 @@ func (r *latencyRecorder) emit(prefix string, lines *metrics) {
 	lines.add(prefix+"_latency_max_seconds", samples[len(samples)-1])
 }
 
+func (r *latencyRecorder) observed() uint64 {
+	return r.seen.Load() + r.droppedExtra.Load()
+}
+
 func (r *latencyRecorder) snapshot() []float64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]float64(nil), r.samples...)
+	seen := r.seen.Load()
+	count := seen
+	if count > uint64(r.limit) {
+		count = uint64(r.limit)
+	}
+	result := make([]float64, 0, count)
+	for sequence := uint64(0); sequence < count; sequence++ {
+		if r.limit == 0 {
+			break
+		}
+		nanoseconds := r.slots[sequence].Load()
+		result = append(result, float64(nanoseconds)/float64(time.Second))
+	}
+	return result
+}
+
+func (r *latencyRecorder) dropped() uint64 {
+	seen := r.seen.Load()
+	if seen <= uint64(r.limit) {
+		return r.droppedExtra.Load()
+	}
+	return r.droppedExtra.Load() + seen - uint64(r.limit)
 }
 
 func percentile(sorted []float64, p float64) float64 {
@@ -796,69 +893,153 @@ func parseConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	accessPattern := os.Getenv("BENCH_ACCESS_PATTERN")
+	if accessPattern != "" && accessPattern != "uniform-cyclic" && accessPattern != "hot-set" {
+		return config{}, fmt.Errorf("BENCH_ACCESS_PATTERN must be uniform-cyclic or hot-set")
+	}
+	hotSetObjects, err := envIntAllowZero("BENCH_HOT_SET_OBJECTS", 0)
+	if err != nil {
+		return config{}, err
+	}
+	if hotSetObjects > objects {
+		hotSetObjects = objects
+	}
+	if accessPattern == "hot-set" && hotSetObjects == 0 {
+		hotSetObjects = minInt(objects, 1024)
+	}
+	fixtureName := os.Getenv("BENCH_FIXTURE_NAME")
+	if fixtureName == "" {
+		fixtureName = os.Getenv("BENCH_FIXTURE")
+	}
+	fixtureFingerprint := os.Getenv("BENCH_FIXTURE_FINGERPRINT")
+	if fixtureFingerprint == "" {
+		fixtureFingerprint = os.Getenv("BENCH_FIXTURE_SHA256")
+	}
+	fixtureExpectedObjects, err := envIntAllowZero("BENCH_FIXTURE_EXPECTED_OBJECTS", 0)
+	if err != nil {
+		return config{}, err
+	}
+	fixtureExpectedRelationships, err := envIntAllowZero("BENCH_FIXTURE_EXPECTED_RELATIONSHIPS", 0)
+	if err != nil {
+		return config{}, err
+	}
+	fixtureRecords, err := loadFixtureRecords(os.Getenv("BENCH_FIXTURE_PAYLOAD"))
+	if err != nil {
+		return config{}, err
+	}
+	if len(fixtureRecords) > 0 && len(fixtureRecords) != objects {
+		return config{}, fmt.Errorf("fixture contains %d objects, command declares %d", len(fixtureRecords), objects)
+	}
+	if fixtureExpectedObjects != 0 && fixtureExpectedObjects != objects {
+		return config{}, fmt.Errorf("fixture expected objects=%d, command declares %d", fixtureExpectedObjects, objects)
+	}
 	purgeKey := os.Args[7]
 	return config{
-		host:                  os.Args[1],
-		port:                  port,
-		objects:               objects,
-		mode:                  os.Args[4],
-		profile:               os.Args[5],
-		tagsPerObject:         tagsPerObject,
-		purgeKey:              purgeKey,
-		metricsPath:           os.Args[8],
-		buckets:               buckets,
-		clients:               clients,
-		warmSeconds:           warmSeconds,
-		warmValidateHit:       warmValidateHit,
-		residencyValidate:     residencyValidate,
-		churnCycles:           churnCycles,
-		httpTimeout:           httpTimeout,
-		tagUniverse:           tagUniverse,
-		purgeRequests:         purgeRequests,
-		purgeKeysPerRequest:   purgeKeysPerRequest,
-		purgeValidate:         purgeValidate,
-		purgeSettleDelay:      purgeSettleDelay,
-		purgeHitRecheckDelay:  purgeHitRecheckDelay,
-		allowStaleAfterPurge:  allowStaleAfterPurge,
-		purgeWindowTimeoutMS:  purgeWindowTimeoutMS,
-		purgeWindowWorkers:    purgeWindowWorkers,
-		concurrentSeconds:     concurrentSeconds,
-		concurrentReaders:     concurrentReaders,
-		concurrentWriters:     concurrentWriters,
-		concurrentPurgers:     concurrentPurgers,
-		concurrentTargetRPS:   concurrentTargetRPS,
-		concurrentPurgeRate:   concurrentPurgeRate,
-		concurrentInsertEvery: concurrentInsertEvery,
-		purgeStormRate:        purgeStormRate,
-		purgeStormDistinct:    purgeStormDistinct,
-		purgeStormUnknownPct:  purgeStormUnknownPct,
-		purgeStormSoftPct:     purgeStormSoftPct,
-		populatedMapEntries:   populatedMapEntries,
-		stream1OverlapPreseed: stream1OverlapPreseed,
-		stream1OverlapReads:   stream1OverlapReads,
-		residencySweepSeconds: residencySweepSeconds,
-		residencySampleMS:     residencySampleMS,
-		phase4PreSeconds:      phase4PreSeconds,
-		phase4SweepSeconds:    phase4SweepSeconds,
-		phase4PostSeconds:     phase4PostSeconds,
-		phase4GuardMS:         phase4GuardMS,
-		phase5HoldMS:          phase5HoldMS,
-		phase5CapPurges:       phase5CapPurges,
-		phase5HoldPublication: strings.HasPrefix(profile, "phase5-held-"),
-		phase5Shutdown:        profile == "phase5-held-shutdown",
-		phase6PressureBody:    phase6PressureBody,
-		phase6QuietSeconds:    phase6QuietSeconds,
-		validateResidency:     validateResidency,
-		evictionValidate:      evictionValidate,
-		disableKeepAlives:     disableKeepAlives,
-		phaseMarkerDir:        os.Getenv("BENCH_PHASE_MARKER_DIR"),
-		phaseMarkerPrefix:     os.Getenv("BENCH_PHASE_MARKER_PREFIX"),
-		churnCompactEachCycle: churnCompactEachCycle,
-		storageKind:           storageKind,
-		cacheTagPersist:       cacheTagPersist,
-		tagLengthClass:        tagLengthClass,
-		validateTagShape:      validateTagShape,
+		host:                         os.Args[1],
+		port:                         port,
+		objects:                      objects,
+		mode:                         os.Args[4],
+		profile:                      os.Args[5],
+		tagsPerObject:                tagsPerObject,
+		purgeKey:                     purgeKey,
+		metricsPath:                  os.Args[8],
+		buckets:                      buckets,
+		clients:                      clients,
+		warmSeconds:                  warmSeconds,
+		warmValidateHit:              warmValidateHit,
+		residencyValidate:            residencyValidate,
+		churnCycles:                  churnCycles,
+		httpTimeout:                  httpTimeout,
+		tagUniverse:                  tagUniverse,
+		purgeRequests:                purgeRequests,
+		purgeKeysPerRequest:          purgeKeysPerRequest,
+		purgeValidate:                purgeValidate,
+		purgeSettleDelay:             purgeSettleDelay,
+		purgeHitRecheckDelay:         purgeHitRecheckDelay,
+		allowStaleAfterPurge:         allowStaleAfterPurge,
+		purgeWindowTimeoutMS:         purgeWindowTimeoutMS,
+		purgeWindowWorkers:           purgeWindowWorkers,
+		concurrentSeconds:            concurrentSeconds,
+		concurrentReaders:            concurrentReaders,
+		concurrentWriters:            concurrentWriters,
+		concurrentPurgers:            concurrentPurgers,
+		concurrentTargetRPS:          concurrentTargetRPS,
+		concurrentPurgeRate:          concurrentPurgeRate,
+		concurrentInsertEvery:        concurrentInsertEvery,
+		purgeStormRate:               purgeStormRate,
+		purgeStormDistinct:           purgeStormDistinct,
+		purgeStormUnknownPct:         purgeStormUnknownPct,
+		purgeStormSoftPct:            purgeStormSoftPct,
+		populatedMapEntries:          populatedMapEntries,
+		stream1OverlapPreseed:        stream1OverlapPreseed,
+		stream1OverlapReads:          stream1OverlapReads,
+		residencySweepSeconds:        residencySweepSeconds,
+		residencySampleMS:            residencySampleMS,
+		phase4PreSeconds:             phase4PreSeconds,
+		phase4SweepSeconds:           phase4SweepSeconds,
+		phase4PostSeconds:            phase4PostSeconds,
+		phase4GuardMS:                phase4GuardMS,
+		phase5HoldMS:                 phase5HoldMS,
+		phase5CapPurges:              phase5CapPurges,
+		phase5HoldPublication:        strings.HasPrefix(profile, "phase5-held-"),
+		phase5Shutdown:               profile == "phase5-held-shutdown",
+		phase6PressureBody:           phase6PressureBody,
+		phase6QuietSeconds:           phase6QuietSeconds,
+		validateResidency:            validateResidency,
+		evictionValidate:             evictionValidate,
+		disableKeepAlives:            disableKeepAlives,
+		phaseMarkerDir:               os.Getenv("BENCH_PHASE_MARKER_DIR"),
+		phaseMarkerPrefix:            os.Getenv("BENCH_PHASE_MARKER_PREFIX"),
+		churnCompactEachCycle:        churnCompactEachCycle,
+		storageKind:                  storageKind,
+		cacheTagPersist:              cacheTagPersist,
+		tagLengthClass:               tagLengthClass,
+		validateTagShape:             validateTagShape,
+		accessPattern:                accessPattern,
+		hotSetObjects:                hotSetObjects,
+		fixtureName:                  fixtureName,
+		fixtureFingerprint:           fixtureFingerprint,
+		fixtureExpectedObjects:       fixtureExpectedObjects,
+		fixtureExpectedRelationships: fixtureExpectedRelationships,
+		fixtureRecords:               fixtureRecords,
 	}, nil
+}
+
+func loadFixtureRecords(path string) ([][]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open fixture payload: %w", err)
+	}
+	defer file.Close()
+	type record struct {
+		ID   string   `json:"id"`
+		Tags []string `json:"tags"`
+	}
+	var records [][]string
+	seen := make(map[string]struct{})
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var row record
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+			return nil, fmt.Errorf("decode fixture row %d: %w", len(records)+1, err)
+		}
+		if row.ID == "" || len(row.Tags) == 0 {
+			return nil, fmt.Errorf("fixture row %d has empty id or tags", len(records)+1)
+		}
+		if _, exists := seen[row.ID]; exists {
+			return nil, fmt.Errorf("fixture duplicate id %q", row.ID)
+		}
+		seen[row.ID] = struct{}{}
+		records = append(records, append([]string(nil), row.Tags...))
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read fixture: %w", err)
+	}
+	return records, nil
 }
 
 func writePhaseMarker(cfg config, phase string, event string) error {
@@ -886,6 +1067,9 @@ func writePhaseMarker(cfg config, phase string, event string) error {
 }
 
 func tagsFor(cfg config, obj int) []string {
+	if len(cfg.fixtureRecords) > 0 {
+		return append([]string(nil), cfg.fixtureRecords[obj%len(cfg.fixtureRecords)]...)
+	}
 	limit := cfg.tagsPerObject
 	if limit <= 0 {
 		return nil
@@ -1075,6 +1259,15 @@ func uniformMatchingObjectForSample(cfg config, keyIndex int, sample int, sample
 }
 
 func expectedCount(cfg config, key string) int {
+	if len(cfg.fixtureRecords) > 0 {
+		count := 0
+		for obj := 0; obj < len(cfg.fixtureRecords); obj++ {
+			if objectHasKey(cfg, obj, key) {
+				count++
+			}
+		}
+		return count
+	}
 	if isUniformTagKeyCandidate(cfg, key) {
 		keyIndex, ok := uniformTagKeyIndex(cfg, key)
 		if !ok {
@@ -1254,6 +1447,10 @@ func objectRequestAtEpoch(client *http.Client, baseURL string, cfg config, obj i
 		return objectResponse{}, err
 	}
 	req.Header.Set("X-Cache-Tags", strings.Join(tagsFor(cfg, obj), " "))
+	expectedTags := req.Header.Get("X-Cache-Tags")
+	if os.Getenv("BENCH_XKEY_CONTRACT") == "1" {
+		req.Header.Set("X-Bench-Contract", "stored-tags")
+	}
 	req.Header.Set("X-Bucket", strconv.Itoa(obj%cfg.buckets))
 	req.Header.Set("X-Bench-Origin-Epoch", strconv.FormatUint(requestedEpoch, 10))
 	if profileIsPhase6(cfg.profile) {
@@ -1276,6 +1473,12 @@ func objectRequestAtEpoch(client *http.Client, baseURL string, cfg config, obj i
 	}
 	if resp.StatusCode != http.StatusOK {
 		return objectResponse{}, fmt.Errorf("request failed object=%d status=%d body=%q", obj, resp.StatusCode, string(body))
+	}
+	if strings.Contains(cfg.mode, "xkey") && resp.Header.Get("xkey") != "" {
+		return objectResponse{}, fmt.Errorf("xkey stored tag header leaked to client object=%d value=%q", obj, resp.Header.Get("xkey"))
+	}
+	if os.Getenv("BENCH_XKEY_CONTRACT") == "1" && resp.Header.Get("X-Bench-Stored-Tags") != expectedTags {
+		return objectResponse{}, fmt.Errorf("xkey stored tag bytes changed object=%d got=%q want=%q", obj, resp.Header.Get("X-Bench-Stored-Tags"), expectedTags)
 	}
 	rawGeneration := resp.Header.Get("X-Origin-Generation")
 	if rawGeneration == "" {
@@ -1378,20 +1581,26 @@ func compactRequest(client *http.Client, baseURL string) (int, error) {
 }
 
 func waitForPendingZero(client *http.Client, baseURL string, cfg config) error {
+	_, err := waitForPendingZeroTimed(client, baseURL, cfg)
+	return err
+}
+
+func waitForPendingZeroTimed(client *http.Client, baseURL string, cfg config) (float64, error) {
 	if !modeIsCachetag(cfg.mode) {
-		return nil
+		return 0, nil
 	}
+	start := time.Now()
 	deadline := time.Now().Add(time.Duration(cfg.httpTimeout) * time.Second)
 	for {
 		pending, err := pendingRequest(client, baseURL)
 		if err != nil {
-			return err
+			return time.Since(start).Seconds(), err
 		}
 		if pending == 0 {
-			return nil
+			return time.Since(start).Seconds(), nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("cachetag pending attaches did not drain before timeout; pending=%d", pending)
+			return time.Since(start).Seconds(), fmt.Errorf("cachetag pending attaches did not drain before timeout; pending=%d", pending)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1432,6 +1641,21 @@ func waitForObjectCount(client *http.Client, baseURL string, cfg config, target 
 	}
 }
 
+func warmAccessObject(cfg config, worker, iteration int) int {
+	switch cfg.accessPattern {
+	case "hot-set":
+		limit := cfg.hotSetObjects
+		if limit < 1 || limit > cfg.objects {
+			limit = cfg.objects
+		}
+		return (worker + iteration*cfg.clients) % limit
+	case "uniform-cyclic":
+		return (worker + iteration*cfg.clients) % cfg.objects
+	default:
+		return (worker + iteration*cfg.clients) % cfg.objects
+	}
+}
+
 func loadObjectsDetailed(client *http.Client, baseURL string, cfg config, start int, objects int, recorder *latencyRecorder) (loadObjectsResult, error) {
 	workers := cfg.clients
 	if workers < 1 {
@@ -1439,11 +1663,11 @@ func loadObjectsDetailed(client *http.Client, baseURL string, cfg config, start 
 	}
 	end := start + objects
 	workerResults := make([]loadObjectsResult, workers)
-	workerSamples := make([][]float64, workers)
+	workerRecorders := make([]*latencyRecorder, workers)
 	if recorder != nil {
 		limit := workerLatencyLimit(recorder.limit, workers)
-		for worker := range workerSamples {
-			workerSamples[worker] = make([]float64, 0, limit)
+		for worker := range workerRecorders {
+			workerRecorders[worker] = newLatencyRecorder(limit)
 		}
 	}
 	var result loadObjectsResult
@@ -1457,15 +1681,9 @@ func loadObjectsDetailed(client *http.Client, baseURL string, cfg config, start 
 		go func(worker int) {
 			defer wg.Done()
 			var local loadObjectsResult
-			var samples []float64
-			if recorder != nil {
-				samples = workerSamples[worker]
-			}
+			localRecorder := workerRecorders[worker]
 			defer func() {
 				workerResults[worker] = local
-				if recorder != nil {
-					workerSamples[worker] = samples
-				}
 			}()
 			for obj := start + worker; obj < end; obj += workers {
 				select {
@@ -1475,8 +1693,8 @@ func loadObjectsDetailed(client *http.Client, baseURL string, cfg config, start 
 				}
 				t0 := time.Now()
 				resp, err := objectRequest(client, baseURL, cfg, obj)
-				if recorder != nil && len(samples) < cap(samples) {
-					samples = append(samples, time.Since(t0).Seconds())
+				if localRecorder != nil {
+					localRecorder.add(time.Since(t0))
 				}
 				if err != nil {
 					firstErrMu.Lock()
@@ -1501,7 +1719,7 @@ func loadObjectsDetailed(client *http.Client, baseURL string, cfg config, start 
 		result.loadSuccesses += workerResults[worker].loadSuccesses
 		result.backendObjects += workerResults[worker].backendObjects
 		if recorder != nil {
-			recorder.mergeSamples(workerSamples[worker])
+			recorder.mergeRecorder(workerRecorders[worker])
 		}
 	}
 	firstErrMu.Lock()
@@ -2121,13 +2339,21 @@ func runLoadObjectsPhase(client *http.Client, baseURL string, cfg config, lines 
 	if err := writePhaseMarker(cfg, "load", "start"); err != nil {
 		return err
 	}
+	workStart := time.Now()
 	requests, err := loadObjects(client, baseURL, cfg, 0, cfg.objects, nil)
+	workSeconds := time.Since(workStart).Seconds()
+	drainSeconds := 0.0
 	if err == nil {
-		err = waitForPendingZero(client, baseURL, cfg)
+		drainSeconds, err = waitForPendingZeroTimed(client, baseURL, cfg)
 	}
 	seconds := time.Since(start).Seconds()
 	markerErr := writePhaseMarker(cfg, "load", "end")
 	lines.add("driver_load_wall_seconds", seconds)
+	lines.add("driver_load_request_seconds", workSeconds)
+	// Fixed attachment work includes cachetag's pending-attachment drain.
+	// The separate request/drain values are decomposition only.
+	lines.add("driver_load_fixed_work_seconds", seconds)
+	lines.add("driver_load_pending_drain_seconds", drainSeconds)
 	lines.add("driver_load_requests", requests)
 	if seconds > 0 {
 		lines.add("driver_load_requests_per_second", float64(requests)/seconds)
@@ -2143,16 +2369,22 @@ func runExactLoadObjectsPhase(client *http.Client, baseURL string, cfg config, l
 	if err := writePhaseMarker(cfg, "load", "start"); err != nil {
 		return err
 	}
+	workStart := time.Now()
 	result, err := loadObjectsDetailed(client, baseURL, cfg, 0, cfg.objects, nil)
+	workSeconds := time.Since(workStart).Seconds()
+	drainSeconds := 0.0
 	if err == nil && result.backendObjects != int64(cfg.objects) {
 		err = fmt.Errorf("exact load backend objects=%d expected=%d", result.backendObjects, cfg.objects)
 	}
 	if err == nil {
-		err = waitForPendingZero(client, baseURL, cfg)
+		drainSeconds, err = waitForPendingZeroTimed(client, baseURL, cfg)
 	}
 	seconds := time.Since(start).Seconds()
 	markerErr := writePhaseMarker(cfg, "load", "end")
 	lines.add("driver_load_wall_seconds", seconds)
+	lines.add("driver_load_request_seconds", workSeconds)
+	lines.add("driver_load_fixed_work_seconds", seconds)
+	lines.add("driver_load_pending_drain_seconds", drainSeconds)
 	lines.add("driver_load_requests", result.requests)
 	lines.add("driver_load_backend_objects", result.backendObjects)
 	lines.add("driver_load_backend_objects_expected", cfg.objects)
@@ -2178,7 +2410,7 @@ func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics
 	deadline := time.Now().Add(time.Duration(cfg.warmSeconds) * time.Second)
 	latencies := newLatencyRecorder(200000)
 	type warmWorkerResult struct {
-		samples  []float64
+		recorder *latencyRecorder
 		requests int64
 		hits     int64
 		misses   int64
@@ -2186,6 +2418,8 @@ func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics
 	}
 	workerResults := make([]warmWorkerResult, cfg.clients)
 	perWorkerLimit := workerLatencyLimit(latencies.limit, cfg.clients)
+	gate := newOperationGate(cfg.concurrentTargetRPS)
+	pacing := pacingStats{}
 	var firstErr error
 	var firstErrMu sync.Mutex
 	stop := make(chan struct{})
@@ -2209,23 +2443,28 @@ func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			local := warmWorkerResult{samples: make([]float64, 0, perWorkerLimit)}
+			local := warmWorkerResult{recorder: newLatencyRecorder(perWorkerLimit)}
 			defer func() { workerResults[workerID] = local }()
-			obj := workerID % cfg.objects
+			iteration := 0
+			obj := warmAccessObject(cfg, workerID, iteration)
 			for time.Now().Before(deadline) {
 				select {
 				case <-stop:
 					return
 				default:
 				}
+				scheduledNS, lagNS, skipped := gate.wait()
+				if !time.Now().Before(deadline) {
+					return
+				}
+				pacing.offered(scheduledNS, lagNS, skipped)
 				// A worker-local stride avoids an atomic request allocator on every
 				// warm request while retaining deterministic coverage of all objects.
 				t0 := time.Now()
 				resp, err := objectRequest(client, baseURL, cfg, obj)
-				if len(local.samples) < cap(local.samples) {
-					local.samples = append(local.samples, time.Since(t0).Seconds())
-				}
+				local.recorder.add(time.Since(t0))
 				if err != nil {
+					pacing.completed(false)
 					recordErr(&local, err)
 					return
 				}
@@ -2235,11 +2474,14 @@ func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics
 				} else {
 					local.misses++
 					if cfg.warmValidateHit {
+						pacing.completed(false)
 						recordErr(&local, fmt.Errorf("warm request returned %q for object %d", resp.cacheState, obj))
 						return
 					}
 				}
-				obj = (obj + cfg.clients) % cfg.objects
+				pacing.completed(true)
+				iteration++
+				obj = warmAccessObject(cfg, workerID, iteration)
 			}
 		}(worker)
 	}
@@ -2251,13 +2493,14 @@ func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics
 		hits += local.hits
 		misses += local.misses
 		errors += local.errors
-		latencies.mergeSamples(local.samples)
+		latencies.mergeRecorder(local.recorder)
 	}
 	markerErr := writePhaseMarker(cfg, "warm", "end")
 
 	seconds := time.Since(start).Seconds()
 	lines.add("driver_warm_enabled", true)
 	lines.add("driver_warm_seconds_requested", cfg.warmSeconds)
+	lines.add("driver_warm_target_rps", cfg.concurrentTargetRPS)
 	lines.add("driver_warm_validate_hit", cfg.warmValidateHit)
 	lines.add("driver_warm_wall_seconds", seconds)
 	lines.add("driver_warm_requests", requests)
@@ -2267,6 +2510,7 @@ func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics
 	lines.add("driver_warm_hits", hits)
 	lines.add("driver_warm_misses", misses)
 	lines.add("driver_warm_errors", errors)
+	pacing.emit("driver_warm_pacing", cfg.concurrentTargetRPS, seconds, lines)
 	latencies.emit("driver_warm", lines)
 
 	firstErrMu.Lock()
@@ -2279,7 +2523,10 @@ func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics
 }
 
 func runLoad(client *http.Client, baseURL string, cfg config, lines *metrics) error {
-	if err := runLoadObjectsPhase(client, baseURL, cfg, lines); err != nil {
+	// Initial comparative loads must prove that every declared object reached
+	// the backend.  The detailed loader records and validates that fixed work;
+	// the request-only loader cannot distinguish an accidental cache hit.
+	if err := runExactLoadObjectsPhase(client, baseURL, cfg, lines); err != nil {
 		return err
 	}
 	beginPhase(lines, "load-residency")
@@ -2287,6 +2534,28 @@ func runLoad(client *http.Client, baseURL string, cfg config, lines *metrics) er
 		return err
 	}
 	return runWarmHits(client, baseURL, cfg, lines)
+}
+
+// runWarmOnly deliberately starts from an already-populated cache. This keeps
+// post-load and post-warm captures separate for fixed-work memory campaigns.
+func runWarmOnly(client *http.Client, baseURL string, cfg config, lines *metrics) error {
+	start := beginPhase(lines, "warm-only")
+	if err := writePhaseMarker(cfg, "warm-only", "start"); err != nil {
+		return err
+	}
+	var err error
+	if cfg.validateResidency {
+		err = validateResidentHits(client, baseURL, cfg, 0, cfg.objects, lines, "driver_warm_only")
+	}
+	if err == nil {
+		err = runWarmHits(client, baseURL, cfg, lines)
+	}
+	markerErr := writePhaseMarker(cfg, "warm-only", "end")
+	recordPhaseSeconds(lines, "warm-only", start)
+	if err != nil {
+		return err
+	}
+	return markerErr
 }
 
 func runEviction(client *http.Client, baseURL string, cfg config, lines *metrics) error {
@@ -2947,27 +3216,67 @@ func runBulkPurge(client *http.Client, baseURL string, cfg config, lines *metric
 }
 
 type operationGate struct {
-	start time.Time
-	rps   int64
-	next  atomic.Int64
+	pacer *phase4Pacer
 }
 
 func newOperationGate(rps int) *operationGate {
-	if rps <= 0 {
-		return nil
-	}
-	return &operationGate{start: time.Now(), rps: int64(rps)}
+	return &operationGate{pacer: newPhase4Pacer(rps, time.Now())}
 }
 
-func (g *operationGate) wait() {
+func (g *operationGate) wait() (int64, int64, int64) {
 	if g == nil {
+		return -1, 0, 0
+	}
+	return g.pacer.wait()
+}
+
+type pacingStats struct {
+	scheduled atomic.Int64
+	executed  atomic.Int64
+	skipped   atomic.Int64
+	lagNS     atomic.Int64
+	maxLagNS  atomic.Int64
+	late      atomic.Int64
+	errors    atomic.Int64
+}
+
+func (s *pacingStats) offered(slotNS, lagNS, skipped int64) {
+	if slotNS < 0 {
+		// An unset target is intentionally unbounded, but each attempted
+		// operation still occupies one logical offered slot for accounting.
+		s.scheduled.Add(1)
 		return
 	}
-	slot := g.next.Add(1) - 1
-	target := g.start.Add(time.Duration(float64(slot) * float64(time.Second) / float64(g.rps)))
-	if delay := time.Until(target); delay > 0 {
-		time.Sleep(delay)
+	s.scheduled.Add(skipped + 1)
+	s.skipped.Add(skipped)
+	s.lagNS.Add(lagNS)
+	atomicMaxInt64(&s.maxLagNS, lagNS)
+	if lagNS > int64(time.Millisecond) {
+		s.late.Add(1)
 	}
+}
+
+func (s *pacingStats) completed(ok bool) {
+	s.executed.Add(1)
+	if !ok {
+		s.errors.Add(1)
+	}
+}
+
+func (s *pacingStats) emit(prefix string, offeredRPS int, wallSeconds float64, lines *metrics) {
+	scheduled := s.scheduled.Load()
+	executed := s.executed.Load()
+	lines.add(prefix+"_scheduled_slots", scheduled)
+	lines.add(prefix+"_executed_slots", executed)
+	lines.add(prefix+"_skipped_slots", s.skipped.Load())
+	lines.add(prefix+"_late_starts", s.late.Load())
+	lines.add(prefix+"_scheduling_lag_seconds", float64(s.lagNS.Load())/float64(time.Second))
+	lines.add(prefix+"_scheduling_lag_max_seconds", float64(s.maxLagNS.Load())/float64(time.Second))
+	lines.add(prefix+"_offered_rps", offeredRPS)
+	if wallSeconds > 0 {
+		lines.add(prefix+"_achieved_rps", float64(executed)/wallSeconds)
+	}
+	lines.add(prefix+"_errors", s.errors.Load())
 }
 
 type concurrentSecondStats struct {
@@ -3108,6 +3417,7 @@ type phase4ReadWindow struct {
 	err                        error
 	evidenceMu                 sync.Mutex
 	evidence                   map[string]int64
+	pacing                     pacingStats
 }
 
 const phase4SampleSchema = "phase4-request-v1"
@@ -3130,35 +3440,57 @@ type phase4RequestSample struct {
 }
 
 type phase4RequestRecorder struct {
-	mu      sync.Mutex
-	samples []phase4RequestSample
-	limit   int
-	dropped atomic.Int64
-	next    atomic.Uint64
+	limit    int
+	slots    []atomic.Pointer[phase4RequestSample]
+	dropped  atomic.Int64
+	sequence atomic.Uint64
+	next     atomic.Uint64
 }
 
 func newPhase4RequestRecorder(limit int) *phase4RequestRecorder {
-	return &phase4RequestRecorder{samples: make([]phase4RequestSample, 0, limit), limit: limit}
+	if limit < 0 {
+		limit = 0
+	}
+	return &phase4RequestRecorder{slots: make([]atomic.Pointer[phase4RequestSample], limit), limit: limit}
 }
 
 func (r *phase4RequestRecorder) nextSequence() uint64 {
-	return r.next.Add(1)
+	return r.sequence.Add(1)
 }
 
 func (r *phase4RequestRecorder) add(sample phase4RequestSample) {
-	r.mu.Lock()
-	if len(r.samples) < r.limit {
-		r.samples = append(r.samples, sample)
-	} else {
+	sequence := r.next.Add(1) - 1
+	if r.limit == 0 {
 		r.dropped.Add(1)
+		return
 	}
-	r.mu.Unlock()
+	slot := sequence
+	if sequence >= uint64(r.limit) {
+		r.dropped.Add(1)
+		slot = reservoirIndex(sequence) % (sequence + 1)
+		if slot >= uint64(r.limit) {
+			return
+		}
+	}
+	r.slots[slot].Store(&sample)
 }
 
 func (r *phase4RequestRecorder) snapshot() []phase4RequestSample {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]phase4RequestSample(nil), r.samples...)
+	seen := r.next.Load()
+	count := seen
+	if count > uint64(r.limit) {
+		count = uint64(r.limit)
+	}
+	result := make([]phase4RequestSample, 0, count)
+	for sequence := uint64(0); sequence < count; sequence++ {
+		if r.limit == 0 {
+			break
+		}
+		if sample := r.slots[sequence].Load(); sample != nil {
+			result = append(result, *sample)
+		}
+	}
+	return result
 }
 
 type phase4Pacer struct {
@@ -3179,20 +3511,47 @@ func (p *phase4Pacer) wait() (int64, int64, int64) {
 	interval := time.Duration(float64(time.Second) / float64(p.rps))
 	p.mu.Lock()
 	now := time.Now()
-	target := p.start.Add(time.Duration(float64(p.nextSlot) * float64(time.Second) / float64(p.rps)))
+	slot := p.nextSlot
+	currentSlot := int64(now.Sub(p.start) / interval)
 	skipped := int64(0)
-	if now.After(target.Add(interval)) {
-		skipped = int64(now.Sub(target) / interval)
-		p.nextSlot += skipped
-		target = p.start.Add(time.Duration(float64(p.nextSlot) * float64(time.Second) / float64(p.rps)))
+	if currentSlot > slot {
+		skipped = currentSlot - slot
+		slot = currentSlot
 	}
-	p.nextSlot++
+	target := p.start.Add(time.Duration(float64(slot) * float64(time.Second) / float64(p.rps)))
+	p.nextSlot = slot + 1
 	p.mu.Unlock()
 	if delay := time.Until(target); delay > 0 {
 		time.Sleep(delay)
 	}
 	actual := time.Now()
 	lag := actual.Sub(target)
+	if lag < 0 {
+		lag = 0
+	}
+	return target.Sub(p.start).Nanoseconds(), lag.Nanoseconds(), skipped
+}
+
+// waitAt reserves a slot at a supplied instant without sleeping. It is used
+// by deterministic driver tests to prove missed slots are skipped and never
+// replayed as a catch-up burst.
+func (p *phase4Pacer) waitAt(now time.Time) (int64, int64, int64) {
+	if p.rps <= 0 {
+		return -1, 0, 0
+	}
+	interval := time.Duration(float64(time.Second) / float64(p.rps))
+	p.mu.Lock()
+	slot := p.nextSlot
+	currentSlot := int64(now.Sub(p.start) / interval)
+	skipped := int64(0)
+	if currentSlot > slot {
+		skipped = currentSlot - slot
+		slot = currentSlot
+	}
+	target := p.start.Add(time.Duration(float64(slot) * float64(time.Second) / float64(p.rps)))
+	p.nextSlot = slot + 1
+	p.mu.Unlock()
+	lag := now.Sub(target)
 	if lag < 0 {
 		lag = 0
 	}
@@ -3371,15 +3730,16 @@ func startPhase4Readers(
 				if scheduledNS >= 0 {
 					scheduledNS += start.Sub(origin).Nanoseconds()
 				}
-				atomic.AddInt64(&result.scheduled, skipped+1)
-				atomic.AddInt64(&result.skippedSlots, skipped)
-				if schedulingLagNS > int64(time.Millisecond) {
-					atomic.AddInt64(&result.lateStarts, 1)
-				}
 				select {
 				case <-stop:
 					return
 				default:
+				}
+				result.pacing.offered(scheduledNS, schedulingLagNS, skipped)
+				atomic.AddInt64(&result.scheduled, skipped+1)
+				atomic.AddInt64(&result.skippedSlots, skipped)
+				if schedulingLagNS > int64(time.Millisecond) {
+					atomic.AddInt64(&result.lateStarts, 1)
 				}
 				obj := int(next.Add(1)-1) % cfg.objects
 				requestedEpoch := uint64(1)
@@ -3407,11 +3767,13 @@ func startPhase4Readers(
 					beganAfterEpochBoundary: boundaryNS >= 0 && startNS >= boundaryNS,
 				}
 				if err != nil {
+					result.pacing.completed(false)
 					sample.errorClass = "request_error"
 					rich.add(sample)
 					recordErr(err)
 					continue
 				}
+				result.pacing.completed(true)
 				sample.cacheState = resp.cacheState
 				sample.returnedEpoch = resp.originGeneration
 				sample.errorClass = "ok"
@@ -3471,17 +3833,13 @@ func emitPhase4ReadWindow(cfg config, prefix string, result *phase4ReadWindow, l
 	lines.add(prefix+"_stale_newer_responses", result.newerResponses)
 	lines.add(prefix+"_current_epoch_stale_responses", result.currentEpochStaleResponses)
 	lines.add(prefix+"_errors", result.errors)
+	result.pacing.emit(prefix, cfg.concurrentTargetRPS, result.wallSeconds, lines)
 	result.evidenceMu.Lock()
 	for key, count := range result.evidence {
 		lines.add(prefix+"_epoch_evidence_"+key, count)
 	}
 	result.evidenceMu.Unlock()
 	result.recorder.emit(prefix, lines)
-	path := latencySamplePath(cfg.metricsPath, prefix)
-	lines.add(prefix+"_latency_samples_path", path)
-	if err := writeLatencySamples(path, result.recorder.snapshot()); err != nil {
-		return err
-	}
 	return result.err
 }
 
@@ -3652,6 +4010,9 @@ func runPhase4SweepLatency(client *http.Client, baseURL string, cfg config, line
 	boundariesPath := phase4ArtifactPath(cfg.metricsPath, "phase4_boundaries.tsv")
 	defer func() {
 		lines.add("driver_phase4_sample_schema", phase4SampleSchema)
+		lines.add("driver_phase4_request_sampling_method", "deterministic-reservoir-v1")
+		lines.add("driver_phase4_request_sampling_limit", rich.limit)
+		lines.add("driver_phase4_request_sampling_seen", rich.next.Load())
 		lines.add("driver_phase4_samples_path", samplesPath)
 		lines.add("driver_phase4_boundaries_path", boundariesPath)
 		lines.add("driver_phase4_samples", len(rich.snapshot()))
@@ -3768,6 +4129,8 @@ func runPhase5HeldTraffic(client *http.Client, baseURL string, cfg config, lines
 	var firstErr error
 	var firstErrMu sync.Mutex
 	gate := newOperationGate(cfg.concurrentTargetRPS)
+	pacing := pacingStats{}
+	purgePacing := pacingStats{}
 	recordErr := func(err error) {
 		if err == nil {
 			return
@@ -3785,7 +4148,11 @@ func runPhase5HeldTraffic(client *http.Client, baseURL string, cfg config, lines
 		go func() {
 			defer wg.Done()
 			for time.Now().Before(deadline) {
-				gate.wait()
+				scheduledNS, lagNS, skipped := gate.wait()
+				if !time.Now().Before(deadline) {
+					return
+				}
+				pacing.offered(scheduledNS, lagNS, skipped)
 				obj := int(nextRead.Add(1)-1) % cfg.objects
 				t0 := time.Now()
 				_, err := objectRequest(client, baseURL, cfg, obj)
@@ -3794,9 +4161,11 @@ func runPhase5HeldTraffic(client *http.Client, baseURL string, cfg config, lines
 				atomicMaxInt64(&stats.readMaxNsec[second], elapsed.Nanoseconds())
 				readLatencies.add(elapsed)
 				if err != nil {
+					pacing.completed(false)
 					stats.errors[second].Add(1)
 					recordErr(err)
 				} else {
+					pacing.completed(true)
 					atomic.AddInt64(&reads, 1)
 					stats.reads[second].Add(1)
 				}
@@ -3807,14 +4176,13 @@ func runPhase5HeldTraffic(client *http.Client, baseURL string, cfg config, lines
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			interval := time.Duration(cfg.concurrentPurgers) * time.Second / time.Duration(cfg.concurrentPurgeRate)
-			if interval < time.Millisecond {
-				interval = time.Millisecond
-			}
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
+			purgeGate := newOperationGate(cfg.concurrentPurgeRate)
 			for time.Now().Before(deadline) {
-				<-ticker.C
+				scheduledNS, lagNS, skipped := purgeGate.wait()
+				if !time.Now().Before(deadline) {
+					return
+				}
+				purgePacing.offered(scheduledNS, lagNS, skipped)
 				purgeIndex := nextPurge.Add(1)
 				key := fmt.Sprintf("phase5:purge:%06d", purgeIndex)
 				if cfg.phase5CapPurges > 0 {
@@ -3827,9 +4195,11 @@ func runPhase5HeldTraffic(client *http.Client, baseURL string, cfg config, lines
 				atomicMaxInt64(&stats.purgeMaxNsec[second], elapsed.Nanoseconds())
 				purgeLatencies.add(elapsed)
 				if err != nil {
+					purgePacing.completed(false)
 					stats.errors[second].Add(1)
 					recordErr(err)
 				} else {
+					purgePacing.completed(true)
 					atomic.AddInt64(&purges, 1)
 					stats.purges[second].Add(1)
 					if purged == -1 {
@@ -3857,6 +4227,8 @@ func runPhase5HeldTraffic(client *http.Client, baseURL string, cfg config, lines
 	readLatencies.emit("driver_phase5_held_read", lines)
 	purgeLatencies.emit("driver_phase5_held_purge", lines)
 	emitConcurrentSecondStats("driver_phase5_held", stats, lines)
+	pacing.emit("driver_phase5_held_read", cfg.concurrentTargetRPS, time.Since(start).Seconds(), lines)
+	purgePacing.emit("driver_phase5_held_purge", cfg.concurrentPurgeRate, time.Since(start).Seconds(), lines)
 	recordPhaseSeconds(lines, "phase5-held-load", start)
 	if err != nil {
 		return err
@@ -4002,6 +4374,8 @@ func runConcurrent(client *http.Client, baseURL string, cfg config, lines *metri
 	var firstErr error
 	var firstErrMu sync.Mutex
 	gate := newOperationGate(cfg.concurrentTargetRPS)
+	pacing := pacingStats{}
+	purgePacing := pacingStats{}
 	recordErr := func(err error) {
 		if err == nil {
 			return
@@ -4019,7 +4393,11 @@ func runConcurrent(client *http.Client, baseURL string, cfg config, lines *metri
 		go func() {
 			defer wg.Done()
 			for time.Now().Before(deadline) {
-				gate.wait()
+				scheduledNS, lagNS, skipped := gate.wait()
+				if !time.Now().Before(deadline) {
+					return
+				}
+				pacing.offered(scheduledNS, lagNS, skipped)
 				obj := int(nextRead.Add(1)) % cfg.objects
 				t0 := time.Now()
 				err := cacheRequest(client, baseURL, cfg, obj)
@@ -4035,9 +4413,11 @@ func runConcurrent(client *http.Client, baseURL string, cfg config, lines *metri
 					atomic.AddInt64(&readOutsidePurge, 1)
 				}
 				if err != nil {
+					pacing.completed(false)
 					secondStats.errors[second].Add(1)
 					recordErr(err)
 				} else {
+					pacing.completed(true)
 					atomic.AddInt64(&reads, 1)
 					secondStats.reads[second].Add(1)
 				}
@@ -4049,7 +4429,11 @@ func runConcurrent(client *http.Client, baseURL string, cfg config, lines *metri
 		go func() {
 			defer wg.Done()
 			for time.Now().Before(deadline) {
-				gate.wait()
+				scheduledNS, lagNS, skipped := gate.wait()
+				if !time.Now().Before(deadline) {
+					return
+				}
+				pacing.offered(scheduledNS, lagNS, skipped)
 				obj := cfg.objects + int(nextInsert.Add(1))
 				t0 := time.Now()
 				err := cacheRequest(client, baseURL, cfg, obj)
@@ -4065,9 +4449,11 @@ func runConcurrent(client *http.Client, baseURL string, cfg config, lines *metri
 					atomic.AddInt64(&insertOutsidePurge, 1)
 				}
 				if err != nil {
+					pacing.completed(false)
 					secondStats.errors[second].Add(1)
 					recordErr(err)
 				} else {
+					pacing.completed(true)
 					atomic.AddInt64(&inserts, 1)
 					secondStats.inserts[second].Add(1)
 				}
@@ -4078,14 +4464,13 @@ func runConcurrent(client *http.Client, baseURL string, cfg config, lines *metri
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			interval := time.Duration(cfg.concurrentPurgers) * time.Second / time.Duration(cfg.concurrentPurgeRate)
-			if interval < time.Millisecond {
-				interval = time.Millisecond
-			}
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
+			purgeGate := newOperationGate(cfg.concurrentPurgeRate)
 			for time.Now().Before(deadline) {
-				<-ticker.C
+				scheduledNS, lagNS, skipped := purgeGate.wait()
+				if !time.Now().Before(deadline) {
+					return
+				}
+				purgePacing.offered(scheduledNS, lagNS, skipped)
 				purgeActive.Add(1)
 				t0 := time.Now()
 				allowQueued := modeIsCachetag(cfg.mode)
@@ -4094,9 +4479,11 @@ func runConcurrent(client *http.Client, baseURL string, cfg config, lines *metri
 				second := concurrentSecond(concurrentStart, cfg.concurrentSeconds)
 				atomicMaxInt64(&secondStats.purgeMaxNsec[second], elapsed.Nanoseconds())
 				if err != nil {
+					purgePacing.completed(false)
 					secondStats.errors[second].Add(1)
 					recordErr(err)
 				} else {
+					purgePacing.completed(true)
 					atomic.AddInt64(&purges, 1)
 					secondStats.purges[second].Add(1)
 					if purged == -1 {
@@ -4135,11 +4522,100 @@ func runConcurrent(client *http.Client, baseURL string, cfg config, lines *metri
 	insertPurgeLatencies.emit("driver_insert_during_purge", lines)
 	insertNoPurgeLatencies.emit("driver_insert_outside_purge", lines)
 	emitConcurrentSecondStats("driver_concurrent", secondStats, lines)
+	pacing.emit("driver_concurrent_read_write_pacing", cfg.concurrentTargetRPS, time.Since(concurrentStart).Seconds(), lines)
+	purgePacing.emit("driver_concurrent_purge_pacing", cfg.concurrentPurgeRate, time.Since(concurrentStart).Seconds(), lines)
 	recordPhaseSeconds(lines, "concurrent", concurrentStart)
 	if err != nil {
 		return err
 	}
 	return markerErr
+}
+
+// runHeadroom is a driver-only calibration seam. It exercises the same
+// offered-rate pacer and worker budget against an ordinary HTTP 200 endpoint,
+// without cache-specific response headers or accounting.
+func runHeadroom(client *http.Client, baseURL string, cfg config, lines *metrics) error {
+	start := beginPhase(lines, "headroom")
+	if err := writePhaseMarker(cfg, "headroom", "start"); err != nil {
+		return err
+	}
+	path := os.Getenv("BENCH_HEADROOM_PATH")
+	if path == "" {
+		path = "/"
+	}
+	seconds := cfg.concurrentSeconds
+	if raw := os.Getenv("BENCH_HEADROOM_SECONDS"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			return fmt.Errorf("BENCH_HEADROOM_SECONDS must be positive")
+		}
+		seconds = parsed
+	}
+	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
+	gate := newOperationGate(cfg.concurrentTargetRPS)
+	pacing := pacingStats{}
+	latencies := newLatencyRecorder(200000)
+	var requests atomic.Int64
+	var errors atomic.Int64
+	var firstErr error
+	var firstErrMu sync.Mutex
+	var wg sync.WaitGroup
+	for worker := 0; worker < cfg.concurrentReaders; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for time.Now().Before(deadline) {
+				scheduledNS, lagNS, skipped := gate.wait()
+				if !time.Now().Before(deadline) {
+					return
+				}
+				pacing.offered(scheduledNS, lagNS, skipped)
+				t0 := time.Now()
+				req, err := http.NewRequest(http.MethodGet, baseURL+path, nil)
+				if err == nil {
+					var resp *http.Response
+					resp, err = client.Do(req)
+					if err == nil {
+						_, err = io.Copy(io.Discard, resp.Body)
+						status := resp.StatusCode
+						_ = resp.Body.Close()
+						if status != http.StatusOK {
+							err = fmt.Errorf("headroom endpoint status=%d", status)
+						}
+					}
+				}
+				latencies.add(time.Since(t0))
+				if err != nil {
+					pacing.completed(false)
+					errors.Add(1)
+					firstErrMu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					firstErrMu.Unlock()
+					continue
+				}
+				pacing.completed(true)
+				requests.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	markerErr := writePhaseMarker(cfg, "headroom", "end")
+	wall := time.Since(start).Seconds()
+	lines.add("driver_headroom_endpoint", path)
+	lines.add("driver_headroom_seconds", seconds)
+	lines.add("driver_headroom_requests", requests.Load())
+	pacing.emit("driver_headroom", cfg.concurrentTargetRPS, wall, lines)
+	latencies.emit("driver_headroom", lines)
+	recordPhaseSeconds(lines, "headroom", start)
+	if markerErr != nil {
+		return markerErr
+	}
+	firstErrMu.Lock()
+	err := firstErr
+	firstErrMu.Unlock()
+	return err
 }
 
 func stormKey(cfg config, request int) (string, bool) {
@@ -4183,6 +4659,8 @@ func runPurgeStorm(client *http.Client, baseURL string, cfg config, lines *metri
 	var firstErrMu sync.Mutex
 	readGate := newOperationGate(cfg.concurrentTargetRPS)
 	purgeGate := newOperationGate(cfg.purgeStormRate)
+	readPacing := pacingStats{}
+	purgePacing := pacingStats{}
 	recordErr := func(err error) {
 		if err == nil {
 			return
@@ -4200,7 +4678,11 @@ func runPurgeStorm(client *http.Client, baseURL string, cfg config, lines *metri
 		go func() {
 			defer wg.Done()
 			for time.Now().Before(deadline) {
-				readGate.wait()
+				scheduledNS, lagNS, skipped := readGate.wait()
+				if !time.Now().Before(deadline) {
+					return
+				}
+				readPacing.offered(scheduledNS, lagNS, skipped)
 				obj := int(nextRead.Add(1)-1) % cfg.objects
 				t0 := time.Now()
 				err := cacheRequest(client, baseURL, cfg, obj)
@@ -4209,9 +4691,11 @@ func runPurgeStorm(client *http.Client, baseURL string, cfg config, lines *metri
 				readLatencies.add(elapsed)
 				atomicMaxInt64(&secondStats.readMaxNsec[second], elapsed.Nanoseconds())
 				if err != nil {
+					readPacing.completed(false)
 					secondStats.errors[second].Add(1)
 					recordErr(err)
 				} else {
+					readPacing.completed(true)
 					atomic.AddInt64(&reads, 1)
 					secondStats.reads[second].Add(1)
 				}
@@ -4223,7 +4707,11 @@ func runPurgeStorm(client *http.Client, baseURL string, cfg config, lines *metri
 		go func() {
 			defer wg.Done()
 			for time.Now().Before(deadline) {
-				purgeGate.wait()
+				scheduledNS, lagNS, skipped := purgeGate.wait()
+				if !time.Now().Before(deadline) {
+					return
+				}
+				purgePacing.offered(scheduledNS, lagNS, skipped)
 				request := int(nextPurge.Add(1) - 1)
 				key, unknown := stormKey(cfg, request)
 				mode := "hard"
@@ -4241,9 +4729,11 @@ func runPurgeStorm(client *http.Client, baseURL string, cfg config, lines *metri
 				purgeLatencies.add(elapsed)
 				atomicMaxInt64(&secondStats.purgeMaxNsec[second], elapsed.Nanoseconds())
 				if err != nil {
+					purgePacing.completed(false)
 					secondStats.errors[second].Add(1)
 					recordErr(err)
 				} else {
+					purgePacing.completed(true)
 					atomic.AddInt64(&purges, 1)
 					secondStats.purges[second].Add(1)
 					if purged == -1 {
@@ -4278,6 +4768,8 @@ func runPurgeStorm(client *http.Client, baseURL string, cfg config, lines *metri
 	readLatencies.emit("driver_purge_storm_read", lines)
 	purgeLatencies.emit("driver_purge_storm_purge", lines)
 	emitConcurrentSecondStats("driver_purge_storm", secondStats, lines)
+	readPacing.emit("driver_purge_storm_read", cfg.concurrentTargetRPS, time.Since(start).Seconds(), lines)
+	purgePacing.emit("driver_purge_storm_purge", cfg.purgeStormRate, time.Since(start).Seconds(), lines)
 	recordPhaseSeconds(lines, "purge-storm", start)
 	if err != nil {
 		return err
@@ -4519,6 +5011,7 @@ func runColdResidencySweep(client *http.Client, baseURL string, cfg config, purg
 	secondStats := newConcurrentSecondStats(cfg.residencySweepSeconds)
 	readLatencies := newLatencyRecorder(200000)
 	readGate := newOperationGate(cfg.concurrentTargetRPS)
+	readPacing := pacingStats{}
 	sampleEvery := time.Duration(cfg.residencySampleMS) * time.Millisecond
 	if sampleEvery <= 0 {
 		sampleEvery = time.Second
@@ -4544,10 +5037,11 @@ func runColdResidencySweep(client *http.Client, baseURL string, cfg config, purg
 		go func() {
 			defer wg.Done()
 			for time.Now().Before(deadline) {
-				readGate.wait()
+				scheduledNS, lagNS, skipped := readGate.wait()
 				if !time.Now().Before(deadline) {
 					return
 				}
+				readPacing.offered(scheduledNS, lagNS, skipped)
 				obj := int(nextRead.Add(1)-1) % cfg.objects
 				t0 := time.Now()
 				err := cacheRequest(client, baseURL, cfg, obj)
@@ -4556,9 +5050,11 @@ func runColdResidencySweep(client *http.Client, baseURL string, cfg config, purg
 				readLatencies.add(elapsed)
 				atomicMaxInt64(&secondStats.readMaxNsec[second], elapsed.Nanoseconds())
 				if err != nil {
+					readPacing.completed(false)
 					secondStats.errors[second].Add(1)
 					recordErr(err)
 				} else {
+					readPacing.completed(true)
 					atomic.AddInt64(&reads, 1)
 					secondStats.reads[second].Add(1)
 				}
@@ -4616,6 +5112,7 @@ func runColdResidencySweep(client *http.Client, baseURL string, cfg config, purg
 	}
 	readLatencies.emit("driver_cold_residency_sweep_read", lines)
 	emitConcurrentSecondStats("driver_cold_residency_sweep", secondStats, lines)
+	readPacing.emit("driver_cold_residency_sweep_read", cfg.concurrentTargetRPS, time.Since(start).Seconds(), lines)
 	recordPhaseSeconds(lines, "cold-residency-sweep", start)
 	firstErrMu.Lock()
 	err := firstErr
@@ -4775,6 +5272,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+	setLatencyArtifactMetricsPath(cfg.metricsPath)
 	cfg.originEpoch = newOriginEpochController()
 	maxConns := cfg.clients + cfg.concurrentReaders + cfg.concurrentWriters + cfg.concurrentPurgers + 4
 	transport := &http.Transport{
@@ -4794,11 +5292,22 @@ func main() {
 	t0 := time.Now()
 	lines := metrics{}
 	lines.add("driver_implementation", "go")
+	lines.add("driver_phase_telemetry_schema", "phase-aligned-v1")
+	lines.add("driver_pacing_schema", "slot-skipping-v1")
 	lines.add("driver_mode", cfg.mode)
 	lines.add("driver_profile", cfg.profile)
 	lines.add("driver_clients", cfg.clients)
 	lines.add("driver_bucket_modulus", cfg.buckets)
 	lines.add("driver_tags_per_object", cfg.tagsPerObject)
+	lines.add("driver_access_pattern", cfg.accessPattern)
+	lines.add("driver_hot_set_objects", cfg.hotSetObjects)
+	lines.add("driver_fixture_name", cfg.fixtureName)
+	lines.add("driver_fixture_fingerprint", cfg.fixtureFingerprint)
+	lines.add("driver_fixture_expected_objects", cfg.fixtureExpectedObjects)
+	lines.add("driver_fixture_expected_relationships", cfg.fixtureExpectedRelationships)
+	lines.add("driver_runtime_gomaxprocs", runtime.GOMAXPROCS(0))
+	lines.add("driver_runtime_gogc", os.Getenv("GOGC"))
+	lines.add("driver_runtime_gomemlimit", os.Getenv("GOMEMLIMIT"))
 	lines.add("driver_warm_seconds_configured", cfg.warmSeconds)
 	lines.add("driver_warm_validate_hit_configured", cfg.warmValidateHit)
 	lines.add("driver_allow_stale_after_purge", cfg.allowStaleAfterPurge)
@@ -4836,6 +5345,8 @@ func main() {
 		switch phase {
 		case "noindex", "load":
 			err = runLoad(client, baseURL, cfg, &lines)
+		case "warm-only":
+			err = runWarmOnly(client, baseURL, cfg, &lines)
 		case "eviction":
 			err = runEviction(client, baseURL, cfg, &lines)
 		case "purge":
@@ -4854,6 +5365,8 @@ func main() {
 			err = runBulkPurge(client, baseURL, cfg, &lines)
 		case "concurrent":
 			err = runConcurrent(client, baseURL, cfg, &lines)
+		case "headroom", "driver-headroom":
+			err = runHeadroom(client, baseURL, cfg, &lines)
 		case "purge-storm":
 			err = runPurgeStorm(client, baseURL, cfg, &lines)
 		case "purged-cold-residency":
@@ -4875,6 +5388,9 @@ func main() {
 		default:
 			err = fmt.Errorf("unsupported mode: %s", cfg.mode)
 		}
+	}
+	if err == nil {
+		err = latencyArtifactError()
 	}
 	after := getUsage()
 	lines.add("driver_wall_seconds", time.Since(t0).Seconds())

@@ -42,9 +42,6 @@ Environment:
                            auto.
   CACHE_TAG_SKIP_BUILD     1 to reuse the remote benchmark build cache; reuse is
                            provenance-checked against the synced sources (BR-016)
-  CACHE_TAG_ALLOW_STALE_BUILD
-                           1 to downgrade a build-provenance mismatch to a warning
-                           (default: 0)
   CACHE_TAG_BENCH_PERF_RECORD
                            Pass BENCH_PERF_RECORD to the benchmark container
                            for opt-in perf record profiling (default: empty)
@@ -90,6 +87,9 @@ Environment:
   CACHE_TAG_TAG_LENGTH_CLASS
                            Override BENCH_TAG_LENGTH_CLASS: short, default,
                            or long (default: matrix default)
+  CACHE_TAG_VALIDATE_TAG_SHAPE
+                           Override BENCH_VALIDATE_TAG_SHAPE (default: matrix
+                           default)
   CACHE_TAG_CHURN_CYCLES   Override CHURN_CYCLES for short-ttl-high-churn
                            profiles (default: matrix default)
   CACHE_TAG_BENCH_TTL      Override generated benchmark VCL TTL for selected
@@ -148,6 +148,47 @@ Environment:
                            perf record frequency (default: benchmark default)
   CACHE_TAG_RUNS_OVERRIDE   Override RUNS for the selected matrix
                            (default: matrix default)
+  CACHE_TAG_BENCHMARK_CONTRACT
+                           Set BENCHMARK_CONTRACT (development-v1 or
+                           comparison-v1; default: development-v1)
+  CACHE_TAG_BENCH_CPUSET_CPUS
+                           Docker CPU set for the benchmark container
+  CACHE_TAG_BENCH_DRIVER_CPUSET_CPUS
+                           CPU set for the Go driver taskset placement
+  CACHE_TAG_BENCH_BACKEND_CPUSET_CPUS
+                           CPU set for the origin backend taskset placement
+  CACHE_TAG_BENCH_VINYL_CPUSET_CPUS
+                           CPU set for the Vinyl process tree
+  CACHE_TAG_BENCH_DRIVER_HEADROOM_REQUIRED
+                           Require the executable trivial-endpoint headroom gate
+  CACHE_TAG_BENCH_DRIVER_HEADROOM_TARGET_RPS
+                           Headroom target RPS (must match offered RPS)
+  CACHE_TAG_BENCH_DRIVER_HEADROOM_SECONDS
+                           Headroom probe duration in seconds
+  CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS
+                           Generic offered RPS override for the selected row
+  CACHE_TAG_BENCH_COMPARISON_MEMORY_ENDPOINTS
+                           Enable comparison cache-main endpoint captures
+  CACHE_TAG_BENCH_MEMORY_POST_LOAD_QUIET_SECONDS
+                           Post-load cache-main quiescence delay
+  CACHE_TAG_BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS
+                           Post-load confirmation quiescence delay
+  CACHE_TAG_BENCH_DRIVER_GOMAXPROCS / CACHE_TAG_BENCH_BACKEND_GOMAXPROCS
+                           Pin Go scheduler capacity for driver/backend
+  CACHE_TAG_BENCH_DRIVER_GOGC / CACHE_TAG_BENCH_BACKEND_GOGC
+                           Pin Go GC percentage for driver/backend
+  CACHE_TAG_BENCH_DRIVER_GOMEMLIMIT / CACHE_TAG_BENCH_BACKEND_GOMEMLIMIT
+                           Pin Go memory limit for driver/backend
+  CACHE_TAG_BENCH_BACKEND_BODY_BYTES
+                           Origin body size for the selected row
+  CACHE_TAG_BENCH_SYSTEM_SAMPLE_INTERVAL
+                           Host sampler interval in seconds
+  CACHE_TAG_BENCH_DETAILED_MEMORY_INTERVAL / CACHE_TAG_BENCH_DETAILED_MEMORY_TIMEOUT
+                           Detailed memory sampler interval/timeout
+  CACHE_TAG_BENCH_OBJECTS / CACHE_TAG_BENCH_BUCKETS / CACHE_TAG_BENCH_STORAGE
+                           Override synthetic row object, bucket and storage scale
+  CACHE_TAG_BENCH_HTTP_TIMEOUT / CACHE_TAG_BENCH_RESIDENCY_VALIDATE_OBJECTS
+                           Override request timeout and residency probes
   CACHE_TAG_INSTRUMENT_OBJ_MTX
                            Set BENCH_INSTRUMENT_OBJ_MTX for opt-in request-lock
                            and resize attribution (default: disabled)
@@ -357,7 +398,9 @@ pressure_purgers_override=${CACHE_TAG_PRESSURE_PURGERS:-}
 pressure_target_rps_override=${CACHE_TAG_PRESSURE_TARGET_RPS:-}
 pressure_purge_rate_override=${CACHE_TAG_PRESSURE_PURGE_RATE:-}
 skip_build=${CACHE_TAG_SKIP_BUILD:-0}
-allow_stale_build=${CACHE_TAG_ALLOW_STALE_BUILD:-0}
+# Retained only because the quoted remote environment line is a stable public
+# transport surface. The benchmark harness no longer consumes or honours it.
+allow_stale_build=
 bench_perf_record_override=${CACHE_TAG_BENCH_PERF_RECORD:-}
 bench_perf_record_scope_override=${CACHE_TAG_BENCH_PERF_RECORD_SCOPE:-}
 bench_perf_record_phase_override=${CACHE_TAG_BENCH_PERF_RECORD_PHASE:-}
@@ -374,6 +417,7 @@ vtc_quiet_override=${CACHE_TAG_VTC_QUIET:-}
 bench_profile_override=${CACHE_TAG_BENCH_PROFILE:-}
 tags_per_object_override=${CACHE_TAG_TAGS_PER_OBJECT:-}
 tag_length_class_override=${CACHE_TAG_TAG_LENGTH_CLASS:-}
+validate_tag_shape_override=${CACHE_TAG_VALIDATE_TAG_SHAPE:-}
 churn_cycles_override=${CACHE_TAG_CHURN_CYCLES:-}
 bench_ttl_override=${CACHE_TAG_BENCH_TTL:-}
 churn_compact_each_cycle_override=${CACHE_TAG_CHURN_COMPACT_EACH_CYCLE:-}
@@ -402,6 +446,33 @@ instrument_obj_mtx_override=${CACHE_TAG_INSTRUMENT_OBJ_MTX:-}
 malloc_conf_override=${CACHE_TAG_MALLOC_CONF:-}
 malloc_arena_max_override=${CACHE_TAG_MALLOC_ARENA_MAX:-}
 malloc_trim_threshold_override=${CACHE_TAG_MALLOC_TRIM_THRESHOLD:-}
+benchmark_contract_override=${CACHE_TAG_BENCHMARK_CONTRACT:-}
+bench_cpuset_override=${CACHE_TAG_BENCH_CPUSET_CPUS:-}
+bench_driver_cpuset_override=${CACHE_TAG_BENCH_DRIVER_CPUSET_CPUS:-}
+bench_backend_cpuset_override=${CACHE_TAG_BENCH_BACKEND_CPUSET_CPUS:-}
+bench_vinyl_cpuset_override=${CACHE_TAG_BENCH_VINYL_CPUSET_CPUS:-}
+bench_driver_headroom_required_override=${CACHE_TAG_BENCH_DRIVER_HEADROOM_REQUIRED:-}
+bench_driver_headroom_target_rps_override=${CACHE_TAG_BENCH_DRIVER_HEADROOM_TARGET_RPS:-}
+bench_driver_headroom_seconds_override=${CACHE_TAG_BENCH_DRIVER_HEADROOM_SECONDS:-}
+bench_concurrent_target_rps_override=${CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS:-}
+bench_comparison_memory_endpoints_override=${CACHE_TAG_BENCH_COMPARISON_MEMORY_ENDPOINTS:-}
+bench_memory_post_load_quiet_seconds_override=${CACHE_TAG_BENCH_MEMORY_POST_LOAD_QUIET_SECONDS:-}
+bench_memory_confirmation_quiet_seconds_override=${CACHE_TAG_BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS:-}
+bench_driver_gomaxprocs_override=${CACHE_TAG_BENCH_DRIVER_GOMAXPROCS:-}
+bench_backend_gomaxprocs_override=${CACHE_TAG_BENCH_BACKEND_GOMAXPROCS:-}
+bench_driver_gogc_override=${CACHE_TAG_BENCH_DRIVER_GOGC:-}
+bench_backend_gogc_override=${CACHE_TAG_BENCH_BACKEND_GOGC:-}
+bench_driver_gomemlimit_override=${CACHE_TAG_BENCH_DRIVER_GOMEMLIMIT:-}
+bench_backend_gomemlimit_override=${CACHE_TAG_BENCH_BACKEND_GOMEMLIMIT:-}
+bench_backend_body_bytes_override=${CACHE_TAG_BENCH_BACKEND_BODY_BYTES:-}
+bench_system_sample_interval_override=${CACHE_TAG_BENCH_SYSTEM_SAMPLE_INTERVAL:-}
+bench_detailed_memory_interval_override=${CACHE_TAG_BENCH_DETAILED_MEMORY_INTERVAL:-}
+bench_detailed_memory_timeout_override=${CACHE_TAG_BENCH_DETAILED_MEMORY_TIMEOUT:-}
+bench_objects_override=${CACHE_TAG_BENCH_OBJECTS:-}
+bench_buckets_override=${CACHE_TAG_BENCH_BUCKETS:-}
+bench_storage_override=${CACHE_TAG_BENCH_STORAGE:-}
+bench_http_timeout_override=${CACHE_TAG_BENCH_HTTP_TIMEOUT:-}
+bench_residency_validate_objects_override=${CACHE_TAG_BENCH_RESIDENCY_VALIDATE_OBJECTS:-}
 clean_stale=${CACHE_TAG_REMOTE_CLEAN_STALE:-0}
 remote_docker=${REMOTE_DOCKER:-auto}
 remote_docker_run_args=${REMOTE_DOCKER_RUN_ARGS:---cap-add PERFMON}
@@ -411,7 +482,7 @@ quote() {
 }
 
 remote_sh() {
-	ssh "$target" "REMOTE_DIR=$(quote "$remote_dir") VINYL_DOCKER_IMAGE=$(quote "$image") REMOTE_DOCKER=$(quote "$remote_docker") REMOTE_DOCKER_RUN_ARGS=$(quote "$remote_docker_run_args") CACHE_TAG_BENCH_CLIENTS=$(quote "$bench_clients_override") CACHE_TAG_VINYL_THREAD_POOL_MAX=$(quote "$vinyl_threads_override") CACHE_TAG_PRESSURE_READERS=$(quote "$pressure_readers_override") CACHE_TAG_PRESSURE_WRITERS=$(quote "$pressure_writers_override") CACHE_TAG_PRESSURE_PURGERS=$(quote "$pressure_purgers_override") CACHE_TAG_PRESSURE_TARGET_RPS=$(quote "$pressure_target_rps_override") CACHE_TAG_PRESSURE_PURGE_RATE=$(quote "$pressure_purge_rate_override") CACHE_TAG_SKIP_BUILD=$(quote "$skip_build") CACHE_TAG_ALLOW_STALE_BUILD=$(quote "$allow_stale_build") CACHE_TAG_BENCH_PERF_RECORD=$(quote "$bench_perf_record_override") CACHE_TAG_BENCH_PERF_RECORD_SCOPE=$(quote "$bench_perf_record_scope_override") CACHE_TAG_BENCH_PERF_RECORD_PHASE=$(quote "$bench_perf_record_phase_override") CACHE_TAG_BENCH_PERF_RECORD_TARGET=$(quote "$bench_perf_record_target_override") CACHE_TAG_BENCH_PERF_RECORD_RUNS=$(quote "$bench_perf_record_runs_override") CACHE_TAG_BENCH_PERF_RECORD_WORKLOAD=$(quote "$bench_perf_record_workload_override") CACHE_TAG_BENCH_WORKLOAD_FILTER=$(quote "$bench_workload_filter_override") CACHE_TAG_BENCH_VALIDATE_RESIDENCY=$(quote "$bench_validate_residency_override") CACHE_TAG_BENCH_WARM_SECONDS=$(quote "$bench_warm_seconds_override") CACHE_TAG_BENCH_SKIP_PURGE=$(quote "$bench_skip_purge_override") CACHE_TAG_BENCH_RESTART_TAG_PROFILE=$(quote "$bench_restart_tag_profile_override") CACHE_TAG_BENCH_RESTART_TOUCH_PERCENT=$(quote "$bench_restart_touch_percent_override") CACHE_TAG_VTC_QUIET=$(quote "$vtc_quiet_override") CACHE_TAG_BENCH_PROFILE=$(quote "$bench_profile_override") CACHE_TAG_TAGS_PER_OBJECT=$(quote "$tags_per_object_override") CACHE_TAG_TAG_LENGTH_CLASS=$(quote "$tag_length_class_override") CACHE_TAG_BENCH_TTL=$(quote "$bench_ttl_override") CACHE_TAG_CHURN_COMPACT_EACH_CYCLE=$(quote "$churn_compact_each_cycle_override") CACHE_TAG_BENCH_STORAGE_KIND=$(quote "$bench_storage_kind_override") CACHE_TAG_BUDDY_SIZE=$(quote "$buddy_size_override") CACHE_TAG_BUDDY_RESERVE_CHUNKS=$(quote "$buddy_reserve_chunks_override") CACHE_TAG_FELLOW_SIZE=$(quote "$fellow_size_override") CACHE_TAG_FELLOW_SEGMENT_SIZE=$(quote "$fellow_segment_size_override") CACHE_TAG_FELLOW_BLOCK_SIZE=$(quote "$fellow_block_size_override") CACHE_TAG_CACHE_TAG_PERSIST=$(quote "$cachetag_persist_override") CACHE_TAG_WAL_FSYNC=$(quote "$wal_fsync_override") CACHE_TAG_SWEEP_BATCH_OBJECTS=$(quote "$sweep_batch_objects_override") CACHE_TAG_SWEEP_BATCH_HOLD=$(quote "$sweep_batch_hold_override") CACHE_TAG_SWEEP_BATCH_YIELD=$(quote "$sweep_batch_yield_override") CACHE_TAG_SHUTDOWN_DRAIN_SECONDS=$(quote "$shutdown_drain_seconds_override") CACHE_TAG_RUN_NOINDEX=$(quote "$run_noindex_override") CACHE_TAG_RUN_XKEY=$(quote "$run_xkey_override") CACHE_TAG_ALLOW_STALE_AFTER_PURGE=$(quote "$allow_stale_after_purge_override") CACHE_TAG_ALLOW_LRU_NUKED=$(quote "$allow_lru_nuked_override") CACHE_TAG_PURGE_SETTLE_MS=$(quote "$purge_settle_ms_override") CACHE_TAG_PURGE_WINDOW_TIMEOUT_MS=$(quote "$purge_window_timeout_ms_override") CACHE_TAG_PURGE_WINDOW_CONCURRENCY=$(quote "$purge_window_concurrency_override") CACHE_TAG_BENCH_PERF_FREQ=$(quote "$bench_perf_freq_override") CACHE_TAG_RUNS_OVERRIDE=$(quote "$runs_override") CACHE_TAG_INSTRUMENT_OBJ_MTX=$(quote "$instrument_obj_mtx_override") CACHE_TAG_MALLOC_CONF=$(quote "$malloc_conf_override") CACHE_TAG_MALLOC_ARENA_MAX=$(quote "$malloc_arena_max_override") CACHE_TAG_MALLOC_TRIM_THRESHOLD=$(quote "$malloc_trim_threshold_override") CACHE_TAG_REMOTE_CLEAN_STALE=$(quote "$clean_stale"); if [ \"\${REMOTE_DIR#/}\" = \"\$REMOTE_DIR\" ]; then REMOTE_DIR=\$HOME/\$REMOTE_DIR; fi; export REMOTE_DIR VINYL_DOCKER_IMAGE REMOTE_DOCKER REMOTE_DOCKER_RUN_ARGS CACHE_TAG_BENCH_CLIENTS CACHE_TAG_VINYL_THREAD_POOL_MAX CACHE_TAG_PRESSURE_READERS CACHE_TAG_PRESSURE_WRITERS CACHE_TAG_PRESSURE_PURGERS CACHE_TAG_PRESSURE_TARGET_RPS CACHE_TAG_PRESSURE_PURGE_RATE CACHE_TAG_SKIP_BUILD CACHE_TAG_ALLOW_STALE_BUILD CACHE_TAG_BENCH_PERF_RECORD CACHE_TAG_BENCH_PERF_RECORD_SCOPE CACHE_TAG_BENCH_PERF_RECORD_PHASE CACHE_TAG_BENCH_PERF_RECORD_TARGET CACHE_TAG_BENCH_PERF_RECORD_RUNS CACHE_TAG_BENCH_PERF_RECORD_WORKLOAD CACHE_TAG_BENCH_WORKLOAD_FILTER CACHE_TAG_BENCH_VALIDATE_RESIDENCY CACHE_TAG_BENCH_WARM_SECONDS CACHE_TAG_BENCH_SKIP_PURGE CACHE_TAG_BENCH_RESTART_TAG_PROFILE CACHE_TAG_BENCH_RESTART_TOUCH_PERCENT CACHE_TAG_VTC_QUIET CACHE_TAG_BENCH_PROFILE CACHE_TAG_TAGS_PER_OBJECT CACHE_TAG_TAG_LENGTH_CLASS CACHE_TAG_BENCH_TTL CACHE_TAG_CHURN_COMPACT_EACH_CYCLE CACHE_TAG_BENCH_STORAGE_KIND CACHE_TAG_BUDDY_SIZE CACHE_TAG_BUDDY_RESERVE_CHUNKS CACHE_TAG_FELLOW_SIZE CACHE_TAG_FELLOW_SEGMENT_SIZE CACHE_TAG_FELLOW_BLOCK_SIZE CACHE_TAG_CACHE_TAG_PERSIST CACHE_TAG_WAL_FSYNC CACHE_TAG_SWEEP_BATCH_OBJECTS CACHE_TAG_SWEEP_BATCH_HOLD CACHE_TAG_SWEEP_BATCH_YIELD CACHE_TAG_SHUTDOWN_DRAIN_SECONDS CACHE_TAG_RUN_NOINDEX CACHE_TAG_RUN_XKEY CACHE_TAG_ALLOW_STALE_AFTER_PURGE CACHE_TAG_ALLOW_LRU_NUKED CACHE_TAG_PURGE_SETTLE_MS CACHE_TAG_PURGE_WINDOW_TIMEOUT_MS CACHE_TAG_PURGE_WINDOW_CONCURRENCY CACHE_TAG_BENCH_PERF_FREQ CACHE_TAG_RUNS_OVERRIDE CACHE_TAG_INSTRUMENT_OBJ_MTX CACHE_TAG_MALLOC_CONF CACHE_TAG_MALLOC_ARENA_MAX CACHE_TAG_MALLOC_TRIM_THRESHOLD CACHE_TAG_REMOTE_CLEAN_STALE; sh -s"
+	ssh "$target" "REMOTE_DIR=$(quote "$remote_dir") VINYL_DOCKER_IMAGE=$(quote "$image") REMOTE_DOCKER=$(quote "$remote_docker") REMOTE_DOCKER_RUN_ARGS=$(quote "$remote_docker_run_args") CACHE_TAG_BENCH_CLIENTS=$(quote "$bench_clients_override") CACHE_TAG_VINYL_THREAD_POOL_MAX=$(quote "$vinyl_threads_override") CACHE_TAG_PRESSURE_READERS=$(quote "$pressure_readers_override") CACHE_TAG_PRESSURE_WRITERS=$(quote "$pressure_writers_override") CACHE_TAG_PRESSURE_PURGERS=$(quote "$pressure_purgers_override") CACHE_TAG_PRESSURE_TARGET_RPS=$(quote "$pressure_target_rps_override") CACHE_TAG_PRESSURE_PURGE_RATE=$(quote "$pressure_purge_rate_override") CACHE_TAG_SKIP_BUILD=$(quote "$skip_build") CACHE_TAG_ALLOW_STALE_BUILD=$(quote "$allow_stale_build") CACHE_TAG_BENCH_PERF_RECORD=$(quote "$bench_perf_record_override") CACHE_TAG_BENCH_PERF_RECORD_SCOPE=$(quote "$bench_perf_record_scope_override") CACHE_TAG_BENCH_PERF_RECORD_PHASE=$(quote "$bench_perf_record_phase_override") CACHE_TAG_BENCH_PERF_RECORD_TARGET=$(quote "$bench_perf_record_target_override") CACHE_TAG_BENCH_PERF_RECORD_RUNS=$(quote "$bench_perf_record_runs_override") CACHE_TAG_BENCH_PERF_RECORD_WORKLOAD=$(quote "$bench_perf_record_workload_override") CACHE_TAG_BENCH_WORKLOAD_FILTER=$(quote "$bench_workload_filter_override") CACHE_TAG_BENCH_VALIDATE_RESIDENCY=$(quote "$bench_validate_residency_override") CACHE_TAG_BENCH_WARM_SECONDS=$(quote "$bench_warm_seconds_override") CACHE_TAG_BENCH_SKIP_PURGE=$(quote "$bench_skip_purge_override") CACHE_TAG_BENCH_RESTART_TAG_PROFILE=$(quote "$bench_restart_tag_profile_override") CACHE_TAG_BENCH_RESTART_TOUCH_PERCENT=$(quote "$bench_restart_touch_percent_override") CACHE_TAG_VTC_QUIET=$(quote "$vtc_quiet_override") CACHE_TAG_BENCH_PROFILE=$(quote "$bench_profile_override") CACHE_TAG_TAGS_PER_OBJECT=$(quote "$tags_per_object_override") CACHE_TAG_TAG_LENGTH_CLASS=$(quote "$tag_length_class_override") CACHE_TAG_VALIDATE_TAG_SHAPE=$(quote "$validate_tag_shape_override") CACHE_TAG_BENCH_TTL=$(quote "$bench_ttl_override") CACHE_TAG_CHURN_COMPACT_EACH_CYCLE=$(quote "$churn_compact_each_cycle_override") CACHE_TAG_BENCH_STORAGE_KIND=$(quote "$bench_storage_kind_override") CACHE_TAG_BUDDY_SIZE=$(quote "$buddy_size_override") CACHE_TAG_BUDDY_RESERVE_CHUNKS=$(quote "$buddy_reserve_chunks_override") CACHE_TAG_FELLOW_SIZE=$(quote "$fellow_size_override") CACHE_TAG_FELLOW_SEGMENT_SIZE=$(quote "$fellow_segment_size_override") CACHE_TAG_FELLOW_BLOCK_SIZE=$(quote "$fellow_block_size_override") CACHE_TAG_CACHE_TAG_PERSIST=$(quote "$cachetag_persist_override") CACHE_TAG_WAL_FSYNC=$(quote "$wal_fsync_override") CACHE_TAG_SWEEP_BATCH_OBJECTS=$(quote "$sweep_batch_objects_override") CACHE_TAG_SWEEP_BATCH_HOLD=$(quote "$sweep_batch_hold_override") CACHE_TAG_SWEEP_BATCH_YIELD=$(quote "$sweep_batch_yield_override") CACHE_TAG_SHUTDOWN_DRAIN_SECONDS=$(quote "$shutdown_drain_seconds_override") CACHE_TAG_RUN_NOINDEX=$(quote "$run_noindex_override") CACHE_TAG_RUN_XKEY=$(quote "$run_xkey_override") CACHE_TAG_ALLOW_STALE_AFTER_PURGE=$(quote "$allow_stale_after_purge_override") CACHE_TAG_ALLOW_LRU_NUKED=$(quote "$allow_lru_nuked_override") CACHE_TAG_PURGE_SETTLE_MS=$(quote "$purge_settle_ms_override") CACHE_TAG_PURGE_WINDOW_TIMEOUT_MS=$(quote "$purge_window_timeout_ms_override") CACHE_TAG_PURGE_WINDOW_CONCURRENCY=$(quote "$purge_window_concurrency_override") CACHE_TAG_BENCH_PERF_FREQ=$(quote "$bench_perf_freq_override") CACHE_TAG_RUNS_OVERRIDE=$(quote "$runs_override") CACHE_TAG_INSTRUMENT_OBJ_MTX=$(quote "$instrument_obj_mtx_override") CACHE_TAG_MALLOC_CONF=$(quote "$malloc_conf_override") CACHE_TAG_MALLOC_ARENA_MAX=$(quote "$malloc_arena_max_override") CACHE_TAG_MALLOC_TRIM_THRESHOLD=$(quote "$malloc_trim_threshold_override") CACHE_TAG_BENCHMARK_CONTRACT=$(quote "$benchmark_contract_override") CACHE_TAG_BENCH_CPUSET_CPUS=$(quote "$bench_cpuset_override") CACHE_TAG_BENCH_DRIVER_CPUSET_CPUS=$(quote "$bench_driver_cpuset_override") CACHE_TAG_BENCH_BACKEND_CPUSET_CPUS=$(quote "$bench_backend_cpuset_override") CACHE_TAG_BENCH_VINYL_CPUSET_CPUS=$(quote "$bench_vinyl_cpuset_override") CACHE_TAG_BENCH_DRIVER_HEADROOM_REQUIRED=$(quote "$bench_driver_headroom_required_override") CACHE_TAG_BENCH_DRIVER_HEADROOM_TARGET_RPS=$(quote "$bench_driver_headroom_target_rps_override") CACHE_TAG_BENCH_DRIVER_HEADROOM_SECONDS=$(quote "$bench_driver_headroom_seconds_override") CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS=$(quote "$bench_concurrent_target_rps_override") CACHE_TAG_BENCH_COMPARISON_MEMORY_ENDPOINTS=$(quote "$bench_comparison_memory_endpoints_override") CACHE_TAG_BENCH_MEMORY_POST_LOAD_QUIET_SECONDS=$(quote "$bench_memory_post_load_quiet_seconds_override") CACHE_TAG_BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS=$(quote "$bench_memory_confirmation_quiet_seconds_override") CACHE_TAG_BENCH_DRIVER_GOMAXPROCS=$(quote "$bench_driver_gomaxprocs_override") CACHE_TAG_BENCH_BACKEND_GOMAXPROCS=$(quote "$bench_backend_gomaxprocs_override") CACHE_TAG_BENCH_DRIVER_GOGC=$(quote "$bench_driver_gogc_override") CACHE_TAG_BENCH_BACKEND_GOGC=$(quote "$bench_backend_gogc_override") CACHE_TAG_BENCH_DRIVER_GOMEMLIMIT=$(quote "$bench_driver_gomemlimit_override") CACHE_TAG_BENCH_BACKEND_GOMEMLIMIT=$(quote "$bench_backend_gomemlimit_override") CACHE_TAG_BENCH_BACKEND_BODY_BYTES=$(quote "$bench_backend_body_bytes_override") CACHE_TAG_BENCH_SYSTEM_SAMPLE_INTERVAL=$(quote "$bench_system_sample_interval_override") CACHE_TAG_BENCH_DETAILED_MEMORY_INTERVAL=$(quote "$bench_detailed_memory_interval_override") CACHE_TAG_BENCH_DETAILED_MEMORY_TIMEOUT=$(quote "$bench_detailed_memory_timeout_override") CACHE_TAG_BENCH_OBJECTS=$(quote "$bench_objects_override") CACHE_TAG_BENCH_BUCKETS=$(quote "$bench_buckets_override") CACHE_TAG_BENCH_STORAGE=$(quote "$bench_storage_override") CACHE_TAG_BENCH_HTTP_TIMEOUT=$(quote "$bench_http_timeout_override") CACHE_TAG_BENCH_RESIDENCY_VALIDATE_OBJECTS=$(quote "$bench_residency_validate_objects_override") CACHE_TAG_REMOTE_CLEAN_STALE=$(quote "$clean_stale"); if [ \"\${REMOTE_DIR#/}\" = \"\$REMOTE_DIR\" ]; then REMOTE_DIR=\$HOME/\$REMOTE_DIR; fi; export REMOTE_DIR VINYL_DOCKER_IMAGE REMOTE_DOCKER REMOTE_DOCKER_RUN_ARGS CACHE_TAG_BENCH_CLIENTS CACHE_TAG_VINYL_THREAD_POOL_MAX CACHE_TAG_PRESSURE_READERS CACHE_TAG_PRESSURE_WRITERS CACHE_TAG_PRESSURE_PURGERS CACHE_TAG_PRESSURE_TARGET_RPS CACHE_TAG_PRESSURE_PURGE_RATE CACHE_TAG_SKIP_BUILD CACHE_TAG_ALLOW_STALE_BUILD CACHE_TAG_BENCH_PERF_RECORD CACHE_TAG_BENCH_PERF_RECORD_SCOPE CACHE_TAG_BENCH_PERF_RECORD_PHASE CACHE_TAG_BENCH_PERF_RECORD_TARGET CACHE_TAG_BENCH_PERF_RECORD_RUNS CACHE_TAG_BENCH_PERF_RECORD_WORKLOAD CACHE_TAG_BENCH_WORKLOAD_FILTER CACHE_TAG_BENCH_VALIDATE_RESIDENCY CACHE_TAG_BENCH_WARM_SECONDS CACHE_TAG_BENCH_SKIP_PURGE CACHE_TAG_BENCH_RESTART_TAG_PROFILE CACHE_TAG_BENCH_RESTART_TOUCH_PERCENT CACHE_TAG_VTC_QUIET CACHE_TAG_BENCH_PROFILE CACHE_TAG_TAGS_PER_OBJECT CACHE_TAG_TAG_LENGTH_CLASS CACHE_TAG_VALIDATE_TAG_SHAPE CACHE_TAG_BENCH_TTL CACHE_TAG_CHURN_COMPACT_EACH_CYCLE CACHE_TAG_BENCH_STORAGE_KIND CACHE_TAG_BUDDY_SIZE CACHE_TAG_BUDDY_RESERVE_CHUNKS CACHE_TAG_FELLOW_SIZE CACHE_TAG_FELLOW_SEGMENT_SIZE CACHE_TAG_FELLOW_BLOCK_SIZE CACHE_TAG_CACHE_TAG_PERSIST CACHE_TAG_WAL_FSYNC CACHE_TAG_SWEEP_BATCH_OBJECTS CACHE_TAG_SWEEP_BATCH_HOLD CACHE_TAG_SWEEP_BATCH_YIELD CACHE_TAG_SHUTDOWN_DRAIN_SECONDS CACHE_TAG_RUN_NOINDEX CACHE_TAG_RUN_XKEY CACHE_TAG_ALLOW_STALE_AFTER_PURGE CACHE_TAG_ALLOW_LRU_NUKED CACHE_TAG_PURGE_SETTLE_MS CACHE_TAG_PURGE_WINDOW_TIMEOUT_MS CACHE_TAG_PURGE_WINDOW_CONCURRENCY CACHE_TAG_BENCH_PERF_FREQ CACHE_TAG_RUNS_OVERRIDE CACHE_TAG_INSTRUMENT_OBJ_MTX CACHE_TAG_MALLOC_CONF CACHE_TAG_MALLOC_ARENA_MAX CACHE_TAG_MALLOC_TRIM_THRESHOLD CACHE_TAG_BENCHMARK_CONTRACT CACHE_TAG_BENCH_CPUSET_CPUS CACHE_TAG_BENCH_DRIVER_CPUSET_CPUS CACHE_TAG_BENCH_BACKEND_CPUSET_CPUS CACHE_TAG_BENCH_VINYL_CPUSET_CPUS CACHE_TAG_BENCH_DRIVER_HEADROOM_REQUIRED CACHE_TAG_BENCH_DRIVER_HEADROOM_TARGET_RPS CACHE_TAG_BENCH_DRIVER_HEADROOM_SECONDS CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS CACHE_TAG_BENCH_COMPARISON_MEMORY_ENDPOINTS CACHE_TAG_BENCH_MEMORY_POST_LOAD_QUIET_SECONDS CACHE_TAG_BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS CACHE_TAG_BENCH_DRIVER_GOMAXPROCS CACHE_TAG_BENCH_BACKEND_GOMAXPROCS CACHE_TAG_BENCH_DRIVER_GOGC CACHE_TAG_BENCH_BACKEND_GOGC CACHE_TAG_BENCH_DRIVER_GOMEMLIMIT CACHE_TAG_BENCH_BACKEND_GOMEMLIMIT CACHE_TAG_BENCH_BACKEND_BODY_BYTES CACHE_TAG_BENCH_SYSTEM_SAMPLE_INTERVAL CACHE_TAG_BENCH_DETAILED_MEMORY_INTERVAL CACHE_TAG_BENCH_DETAILED_MEMORY_TIMEOUT CACHE_TAG_BENCH_OBJECTS CACHE_TAG_BENCH_BUCKETS CACHE_TAG_BENCH_STORAGE CACHE_TAG_BENCH_HTTP_TIMEOUT CACHE_TAG_BENCH_RESIDENCY_VALIDATE_OBJECTS CACHE_TAG_REMOTE_CLEAN_STALE; sh -s"
 }
 
 install_remote() {
@@ -485,7 +556,6 @@ sync_checkout() {
 	ssh "$target" "REMOTE_DIR=$(quote "$remote_dir"); if [ \"\${REMOTE_DIR#/}\" = \"\$REMOTE_DIR\" ]; then REMOTE_DIR=\$HOME/\$REMOTE_DIR; fi; mkdir -p \"\$REMOTE_DIR\"; printf '%s\n' \"\$REMOTE_DIR\""
 	resolved_remote_dir=$(ssh "$target" "REMOTE_DIR=$(quote "$remote_dir"); if [ \"\${REMOTE_DIR#/}\" = \"\$REMOTE_DIR\" ]; then REMOTE_DIR=\$HOME/\$REMOTE_DIR; fi; printf '%s\n' \"\$REMOTE_DIR\"")
 	rsync -a --delete \
-		--exclude='.git' \
 		--exclude='.codex' \
 		--exclude='.agents' \
 		--exclude='devdocs' \
@@ -505,18 +575,15 @@ sync_checkout() {
 		--exclude='libvmod-cachetag-*.tar.gz' \
 		"$repo_dir/" "$target:$resolved_remote_dir/libvmod-cachetag/"
 	rsync -a --delete \
-		--exclude='.git' \
 		--exclude='devdocs' \
 		"$workspace_dir/vinyl-cache/" "$target:$resolved_remote_dir/vinyl-cache/"
 	if [ -d "$workspace_dir/varnish-modules" ]; then
 		rsync -a --delete \
-			--exclude='.git' \
 			--exclude='devdocs' \
 			"$workspace_dir/varnish-modules/" "$target:$resolved_remote_dir/varnish-modules/"
 	fi
 	if [ -d "$workspace_dir/slash" ]; then
 		rsync -a --delete \
-			--exclude='.git' \
 			--exclude='devdocs' \
 			--exclude='.libs' \
 			--exclude='.deps' \
@@ -986,7 +1053,6 @@ case "\$matrix" in
 		;;
 esac
 envs="SKIP_BUILD=\$CACHE_TAG_SKIP_BUILD \$envs"
-envs="CACHE_TAG_ALLOW_STALE_BUILD=\$CACHE_TAG_ALLOW_STALE_BUILD \$envs"
 envs="BENCH_VINYL_THREAD_POOL_MAX=\$bench_vinyl_thread_pool_max BENCH_VINYL_THREAD_POOLS=2 \$envs"
 if [ -n "\$CACHE_TAG_RUNS_OVERRIDE" ]; then
 	envs="\$envs RUNS=\$CACHE_TAG_RUNS_OVERRIDE"
@@ -1011,6 +1077,9 @@ if [ -n "\$CACHE_TAG_TAGS_PER_OBJECT" ]; then
 fi
 if [ -n "\$CACHE_TAG_TAG_LENGTH_CLASS" ]; then
 	envs="\$envs BENCH_TAG_LENGTH_CLASS=\$CACHE_TAG_TAG_LENGTH_CLASS"
+fi
+if [ -n "\$CACHE_TAG_VALIDATE_TAG_SHAPE" ]; then
+	envs="\$envs BENCH_VALIDATE_TAG_SHAPE=\$CACHE_TAG_VALIDATE_TAG_SHAPE"
 fi
 if [ -n "\$CACHE_TAG_BENCH_TTL" ]; then
 	envs="\$envs CACHE_TAG_BENCH_TTL=\$CACHE_TAG_BENCH_TTL"
@@ -1096,6 +1165,96 @@ fi
 if [ -n "\$CACHE_TAG_VTC_QUIET" ]; then
 	envs="\$envs VTC_QUIET=\$CACHE_TAG_VTC_QUIET"
 fi
+if [ -n "\$CACHE_TAG_BENCHMARK_CONTRACT" ]; then
+	envs="\$envs BENCHMARK_CONTRACT=\$CACHE_TAG_BENCHMARK_CONTRACT"
+fi
+if [ -n "\$CACHE_TAG_BENCH_CPUSET_CPUS" ]; then
+	envs="\$envs BENCH_CPUSET_CPUS=\$CACHE_TAG_BENCH_CPUSET_CPUS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_DRIVER_CPUSET_CPUS" ]; then
+	envs="\$envs BENCH_DRIVER_CPUSET_CPUS=\$CACHE_TAG_BENCH_DRIVER_CPUSET_CPUS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_BACKEND_CPUSET_CPUS" ]; then
+	envs="\$envs BENCH_BACKEND_CPUSET_CPUS=\$CACHE_TAG_BENCH_BACKEND_CPUSET_CPUS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_VINYL_CPUSET_CPUS" ]; then
+	envs="\$envs BENCH_VINYL_CPUSET_CPUS=\$CACHE_TAG_BENCH_VINYL_CPUSET_CPUS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_DRIVER_HEADROOM_REQUIRED" ]; then
+	envs="\$envs BENCH_DRIVER_HEADROOM_REQUIRED=\$CACHE_TAG_BENCH_DRIVER_HEADROOM_REQUIRED"
+fi
+if [ -n "\$CACHE_TAG_BENCH_DRIVER_HEADROOM_TARGET_RPS" ]; then
+	envs="\$envs BENCH_DRIVER_HEADROOM_TARGET_RPS=\$CACHE_TAG_BENCH_DRIVER_HEADROOM_TARGET_RPS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_DRIVER_HEADROOM_SECONDS" ]; then
+	envs="\$envs BENCH_DRIVER_HEADROOM_SECONDS=\$CACHE_TAG_BENCH_DRIVER_HEADROOM_SECONDS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS" ]; then
+	envs="\$envs BENCH_CONCURRENT_TARGET_RPS=\$CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_COMPARISON_MEMORY_ENDPOINTS" ]; then
+	envs="\$envs BENCH_COMPARISON_MEMORY_ENDPOINTS=\$CACHE_TAG_BENCH_COMPARISON_MEMORY_ENDPOINTS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_MEMORY_POST_LOAD_QUIET_SECONDS" ]; then
+	envs="\$envs BENCH_MEMORY_POST_LOAD_QUIET_SECONDS=\$CACHE_TAG_BENCH_MEMORY_POST_LOAD_QUIET_SECONDS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS" ]; then
+	envs="\$envs BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS=\$CACHE_TAG_BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_DRIVER_GOMAXPROCS" ]; then
+	envs="\$envs BENCH_DRIVER_GOMAXPROCS=\$CACHE_TAG_BENCH_DRIVER_GOMAXPROCS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_BACKEND_GOMAXPROCS" ]; then
+	envs="\$envs BENCH_BACKEND_GOMAXPROCS=\$CACHE_TAG_BENCH_BACKEND_GOMAXPROCS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_DRIVER_GOGC" ]; then
+	envs="\$envs BENCH_DRIVER_GOGC=\$CACHE_TAG_BENCH_DRIVER_GOGC"
+fi
+if [ -n "\$CACHE_TAG_BENCH_BACKEND_GOGC" ]; then
+	envs="\$envs BENCH_BACKEND_GOGC=\$CACHE_TAG_BENCH_BACKEND_GOGC"
+fi
+if [ -n "\$CACHE_TAG_BENCH_DRIVER_GOMEMLIMIT" ]; then
+	envs="\$envs BENCH_DRIVER_GOMEMLIMIT=\$CACHE_TAG_BENCH_DRIVER_GOMEMLIMIT"
+fi
+if [ -n "\$CACHE_TAG_BENCH_BACKEND_GOMEMLIMIT" ]; then
+	envs="\$envs BENCH_BACKEND_GOMEMLIMIT=\$CACHE_TAG_BENCH_BACKEND_GOMEMLIMIT"
+fi
+if [ -n "\$CACHE_TAG_BENCH_BACKEND_BODY_BYTES" ]; then
+	envs="\$envs BENCH_BACKEND_BODY_BYTES=\$CACHE_TAG_BENCH_BACKEND_BODY_BYTES"
+fi
+if [ -n "\$CACHE_TAG_BENCH_SYSTEM_SAMPLE_INTERVAL" ]; then
+	envs="\$envs BENCH_SYSTEM_SAMPLE_INTERVAL=\$CACHE_TAG_BENCH_SYSTEM_SAMPLE_INTERVAL"
+fi
+if [ -n "\$CACHE_TAG_BENCH_DETAILED_MEMORY_INTERVAL" ]; then
+	envs="\$envs BENCH_DETAILED_MEMORY_INTERVAL=\$CACHE_TAG_BENCH_DETAILED_MEMORY_INTERVAL"
+fi
+if [ -n "\$CACHE_TAG_BENCH_DETAILED_MEMORY_TIMEOUT" ]; then
+	envs="\$envs BENCH_DETAILED_MEMORY_TIMEOUT=\$CACHE_TAG_BENCH_DETAILED_MEMORY_TIMEOUT"
+fi
+if [ -n "\$CACHE_TAG_BENCH_OBJECTS" ]; then
+	envs="\$envs OBJECTS=\$CACHE_TAG_BENCH_OBJECTS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_BUCKETS" ]; then
+	envs="\$envs BENCH_BUCKETS=\$CACHE_TAG_BENCH_BUCKETS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_STORAGE" ]; then
+	envs="\$envs BENCH_STORAGE=\$CACHE_TAG_BENCH_STORAGE"
+fi
+if [ -n "\$CACHE_TAG_BENCH_HTTP_TIMEOUT" ]; then
+	envs="\$envs BENCH_HTTP_TIMEOUT=\$CACHE_TAG_BENCH_HTTP_TIMEOUT"
+fi
+if [ -n "\$CACHE_TAG_BENCH_RESIDENCY_VALIDATE_OBJECTS" ]; then
+	envs="\$envs BENCH_RESIDENCY_VALIDATE_OBJECTS=\$CACHE_TAG_BENCH_RESIDENCY_VALIDATE_OBJECTS"
+fi
+
+# Matrix defaults are deliberately overrideable, but retain only the final
+# value for each variable in the reconstructable command record.
+envs=\$(
+	printf '%s\n' \$envs |
+		awk -F= '{ final[\$1] = \$0 } END { for (key in final) print final[key] }' |
+		sort |
+		paste -sd ' ' -
+)
 
 timestamp=\$(date -u +%Y%m%dT%H%M%SZ)
 result_id="remote-\$timestamp-\$matrix"

@@ -22,6 +22,12 @@ campaign or judging results, and open every campaign note/report with a
 `Rules reviewed: ...` line citing the applicable BR rules. This README documents
 how to run the harness; the rules directory documents how not to be fooled by it.
 
+## Reset comparison readiness
+
+The reset cachetag/xkey comparison is not ready for remote execution. Its versioned [preflight manifest](../devdocs/benchmarks/20260818_0900_manifest_reset-in-memory-cachetag-xkey-v0.1.md) makes missing calibration fields fail closed and records the required local and remote gates. `cms-trace-static-v1` has no executable public payload or expected fingerprints yet; its test fixture is for loader regression only. Do not run it as a benchmark substitute or infer request-access or purge history from its static regeneration data.
+
+Generic harness output, including local Docker/OrbStack output, does not reopen the reset programme or establish a comparative claim. Follow the manifest and [the programme](../devdocs/benchmarks/defensible-benchmarks.md) before any remote calibration or cachetag versus xkey judgment.
+
 ## Quick Run
 
 From this repository:
@@ -136,7 +142,7 @@ BENCH_PROFILE=all BENCH_BUCKETS=64 CHURN_CYCLES=3 OBJECTS=10000 RUNS=3 \
 - `BENCH_INSTRUMENT_OBJ_MTX`: enable opt-in request-lock timing counters for the matched observability-overhead control; default `0`.
 - `BENCH_VINYL_THREAD_POOL_MAX`: generated Vinyl maximum workers in each pool, default `16`. It is a per-pool limit, not a total worker cap.
 - `BENCH_VINYL_THREAD_POOLS`: explicit generated Vinyl pool count, default `2`. A client sweep must hold this and `BENCH_VINYL_THREAD_POOL_MAX` fixed; scale workers only in an explicitly two-dimensional experiment.
-- `BENCH_CPUSET_CPUS`: optional Docker CPU list for the whole benchmark container. `BENCH_DRIVER_CPUSET_CPUS` and `BENCH_BACKEND_CPUSET_CPUS` optionally apply `taskset -c` to just the Go driver and origin backend. `BENCH_DRIVER_HEADROOM_REQUIRED=1` fails before a campaign unless an assigned driver CPU set and positive integer `BENCH_DRIVER_HEADROOM_TARGET_RPS`/`BENCH_DRIVER_HEADROOM_PROVEN_RPS` are supplied, with the declared trivial-endpoint rate at least 120% of target. It records this declaration in `system.env`; it does not itself run the trivial-endpoint test. For a standalone server-capacity claim, separate the driver (and preferably backend) from the server CPU budget, or demonstrate driver headroom against a trivial endpoint on its assigned CPUs first.
+- `BENCH_CPUSET_CPUS`: optional Docker CPU list for the whole benchmark container. `BENCH_DRIVER_CPUSET_CPUS`, `BENCH_BACKEND_CPUSET_CPUS`, and `BENCH_VINYL_CPUSET_CPUS` apply separate `taskset -c` placement to the Go driver, origin backend, and Vinyl process tree. `BENCH_DRIVER_HEADROOM_REQUIRED=1` requires an assigned driver CPU set and positive integer `BENCH_DRIVER_HEADROOM_TARGET_RPS`, then runs the driver against the bounded trivial backend endpoint before any workload. The probe is offered above the admission boundary and fails unless its error-free achieved rate is at least 120% of the target. The measured rate and actual process CPU lists are recorded; a supplied `BENCH_DRIVER_HEADROOM_PROVEN_RPS` does not bypass the executable gate.
 - `CHURN_CYCLES`: load/sleep cycles for short-TTL profiles; Phase 6 requires at least `10`.
 - `RUNS`: repetitions per workload.
 - `RUN_XKEY`: `1`, `0`, or `auto`.
@@ -147,14 +153,7 @@ BENCH_PROFILE=all BENCH_BUCKETS=64 CHURN_CYCLES=3 OBJECTS=10000 RUNS=3 \
 - `RESULTS_DIR`: explicit output directory.
 - `VINYL_DOCKER_IMAGE`: build/test image.
 
-Use `SKIP_BUILD=1` after the first build when only rerunning generated
-benchmarks against an already-built tree. Reuse is provenance-checked: the
-build records source-content hashes in `build-provenance.env` (also copied into
-each result dir), and a `SKIP_BUILD=1` run fails if the mounted sources no
-longer match the cached build ([BR-016](rules/BR-016-build-cache-contamination.md));
-set `CACHE_TAG_ALLOW_STALE_BUILD=1` only for a deliberate, labelled stale reuse.
-Build caches created before provenance recording fail their first
-`SKIP_BUILD=1` run — rebuild once to mint the provenance file.
+Use `SKIP_BUILD=1` after the first build when only rerunning generated benchmarks against an already-built tree. Reuse is provenance-checked: the build records source-content hashes in `build-provenance.env` (also copied into each result dir), and a `SKIP_BUILD=1` run fails if the mounted sources no longer match the cached build ([BR-016](rules/BR-016-build-cache-contamination.md)). There is no stale-build override for comparison rows. Build caches created before provenance recording fail their first `SKIP_BUILD=1` run; rebuild once to mint the provenance file.
 
 Treat Docker cgroup `memory.peak` as a benchmark-runtime signal only when the measured container did not also build Vinyl, Slash, or this VMOD; a build-inclusive peak is a lifetime high-water mark dominated by compiler/linker activity. Full rule and comply-by list: [BR-001](rules/BR-001-build-inclusive-memory-peak.md). Never `SKIP_BUILD=1` across an arm or storage-kind change: [BR-016](rules/BR-016-build-cache-contamination.md).
 
@@ -170,7 +169,7 @@ counts, purge/compact results, and timing metrics to the `.driver` artifact.
 
 The `phase4-sweep-latency` profile writes raw latency sample files beside the `.driver` file as `<workload>.run-<n>.driver_phase4_pre.latency_samples.tsv`, `<workload>.run-<n>.driver_phase4_sweep.latency_samples.tsv`, and `<workload>.run-<n>.driver_phase4_post.latency_samples.tsv`. Use those raw samples, not only precomputed percentiles, when judging an accepted pause/tail budget ([BR-023](rules/BR-023-tail-budget-judgment.md)). If no owner-approved budget is documented, treat Phase 4 rows as evidence collection only.
 
-Every `run_with_metrics.py` wrapped VTC run writes a raw sampler stream beside its `.time` file as `<workload>.run-<n>.time.samples.jsonl`. The stable phase-attribution fields are `phase_marker_events` (a JSON array of `{phase,event,time_unix_nano}` ordered by embedded timestamp), `phase_active` (the marked interval ending at the sample), and, for each tracked process label, `tracked_<label>_cpu_delta_ticks`, `tracked_<label>_cpu_delta_seconds`, `tracked_<label>_cpu_percent`, and `tracked_<label>_thread_count`. Each line also contains host `meminfo`/`vmstat`, cgroup memory, and tracked-process identity/RSS. Process matching uses `comm` plus executable identity; `cmdline`, `maps`, and `smaps_rollup` are read only by a timeout-controlled helper process on the slower detailed-memory interval. The `.time` file records cadence ratio, a boundary-inclusive longest gap, detail attempts/successes/timeouts, helper state, PID/start-time identity, PSS maxima, and explicit sampler/memory validity. Generated `*.stats` snapshots include `MAIN.*`, which retains the actual server `threads`, `thread_queue_len`, `threads_limited`, `threads_created`, and `threads_failed` counters alongside VMOD counters. Use the JSONL stream for phase-aligned lightweight attribution, these snapshots for actual worker/queue state, the provenanced `cache_process` detailed aggregate for worker PSS gates, and do not infer jemalloc active/retained values from libc RSS ([BR-006](rules/BR-006-allocator-decay-purge-signature.md)).
+Every `run_with_metrics.py` wrapped VTC run writes a raw sampler stream beside its `.time` file as `<workload>.run-<n>.time.samples.jsonl`. The stable phase fields are `phase_marker_events` (a JSON array of `{phase,event,time_unix_nano}` ordered by embedded timestamp), `phase_active`, and, for each tracked process label, `tracked_<label>_cpu_delta_ticks`, `tracked_<label>_cpu_delta_seconds`, `tracked_<label>_cpu_percent`, and `tracked_<label>_thread_count`. The final `.time` file also records overlap-weighted phase totals under `system_phase_<phase>_{cache_main,driver,backend}_cpu_seconds`, with schema `phase-aligned-process-cpu-v1`; comparison rows fail closed when load or warm attribution is incomplete. Each JSONL line also contains host `meminfo`/`vmstat`, cgroup memory, and tracked-process identity/RSS. Process matching uses `comm` plus executable identity; `cmdline`, `maps`, and `smaps_rollup` are read only by a timeout-controlled helper process on the slower detailed-memory interval. Generated `*.stats` snapshots retain actual worker and queue counters. Use phase CPU for attribution, snapshots for worker state, and the provenanced `cache_process` aggregate and explicit endpoint captures for PSS gates; do not infer jemalloc active/retained values from libc RSS ([BR-006](rules/BR-006-allocator-decay-purge-signature.md)).
 
 Run the sampler liveness regression only through Docker:
 
@@ -314,6 +313,16 @@ Remote matrix defaults can be tuned with environment variables:
 - `CACHE_TAG_WAL_FSYNC`: override `BENCH_CACHE_TAG_WAL_FSYNC`.
 - `CACHE_TAG_SWEEP_BATCH_OBJECTS`, `CACHE_TAG_SWEEP_BATCH_HOLD`, `CACHE_TAG_SWEEP_BATCH_YIELD`: override the matching `BENCH_CACHE_TAG_*` bounded-sweep knobs.
 - `CACHE_TAG_BENCH_PERF_FREQ`: `perf record` frequency.
+- `CACHE_TAG_BENCHMARK_CONTRACT`: `development-v1` or `comparison-v1`.
+- `CACHE_TAG_BENCH_CPUSET_CPUS`, `CACHE_TAG_BENCH_DRIVER_CPUSET_CPUS`, `CACHE_TAG_BENCH_BACKEND_CPUSET_CPUS`, `CACHE_TAG_BENCH_VINYL_CPUSET_CPUS`: whole-container and per-process CPU placement.
+- `CACHE_TAG_BENCH_DRIVER_HEADROOM_REQUIRED`, `CACHE_TAG_BENCH_DRIVER_HEADROOM_TARGET_RPS`, `CACHE_TAG_BENCH_DRIVER_HEADROOM_SECONDS`: executable trivial-endpoint headroom gate controls.
+- `CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS`: generic offered-rate override; `CACHE_TAG_PRESSURE_TARGET_RPS` remains the pressure-matrix override.
+- `CACHE_TAG_BENCH_COMPARISON_MEMORY_ENDPOINTS`, `CACHE_TAG_BENCH_MEMORY_POST_LOAD_QUIET_SECONDS`, `CACHE_TAG_BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS`: comparison PSS endpoint and quiescence controls.
+- `CACHE_TAG_BENCH_DRIVER_GOMAXPROCS`, `CACHE_TAG_BENCH_BACKEND_GOMAXPROCS`, `CACHE_TAG_BENCH_DRIVER_GOGC`, `CACHE_TAG_BENCH_BACKEND_GOGC`, `CACHE_TAG_BENCH_DRIVER_GOMEMLIMIT`, `CACHE_TAG_BENCH_BACKEND_GOMEMLIMIT`: pinned Go runtime controls.
+- `CACHE_TAG_BENCH_BACKEND_BODY_BYTES`, `CACHE_TAG_BENCH_SYSTEM_SAMPLE_INTERVAL`, `CACHE_TAG_BENCH_DETAILED_MEMORY_INTERVAL`, `CACHE_TAG_BENCH_DETAILED_MEMORY_TIMEOUT`: measured workload and sampler controls.
+- `CACHE_TAG_BENCH_OBJECTS`, `CACHE_TAG_BENCH_BUCKETS`, `CACHE_TAG_BENCH_STORAGE`, `CACHE_TAG_BENCH_HTTP_TIMEOUT`, `CACHE_TAG_BENCH_RESIDENCY_VALIDATE_OBJECTS`: synthetic scale and validation overrides applied after the named matrix defaults.
+
+The reset comparison's `comparison-v1` rows require explicit CPU sets, an executable headroom target matching `BENCH_CONCURRENT_TARGET_RPS`, comparison memory endpoints, and pinned Go controls. The wrapper forwards these controls to the remote benchmark command and records them in `remote-run.env`; it still does not perform owner admission or choose a target rate. Run `sh scripts/test-benchmark-comparison-preflight.sh` for the local regression; it uses a fake Docker command and never starts a benchmark container.
 
 Slash-backed storage benchmarks are deliberately isolated from the default in-memory matrices. Use `BENCH_STORAGE_KIND=fellow` or the dedicated `fellow-*` remote matrices when the question is Fellow-backed persistent storage behavior; these lanes build patched Slash/Fellow inside the benchmark container and run cachetag with a persistent namespace by default. Use `BENCH_STORAGE_KIND=buddy` or the dedicated `buddy-*` remote matrices when the question is Buddy-backed volatile storage behavior; Buddy lanes build patched Slash/Buddy inside the benchmark container and keep cachetag persistence disabled by default.
 
