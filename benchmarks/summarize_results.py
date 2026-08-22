@@ -65,13 +65,11 @@ PURGEMAP_FELLOW_DIRECT_PHASE_FIELDS = tuple(
 )
 PHASE4_VSC_LEGACY_COUNTERS = (
     *(f"request_{category}_obj_mtx_{suffix}" for category in ("probe", "attach", "invalidate")
-      for suffix in ("calls", "wait_usec", "wait_max_usec", "wait_over_50us", "wait_over_250us",
-                     "wait_over_1ms", "wait_over_10ms", "wait_over_50ms")),
+      for suffix in ("calls", "wait_usec", "wait_max_usec")),
     *(f"{operation}_{suffix}" for operation in (
         "object_grow", "object_shrink", "side_grow_rehash", "side_shrink_rehash", "zero_container_free"
     ) for suffix in (
-        "calls", "old_capacity_last", "new_capacity_last", "usec", "max_usec", "last_usec",
-        "failures", "compact_active_calls"
+        "calls", "usec", "max_usec", "failures", "compact_active_calls"
     )),
     "record_shrink_calls", "record_shrink_obj_mtx_wait_usec", "record_shrink_obj_mtx_wait_max_usec",
     "record_shrink_obj_mtx_hold_usec", "record_shrink_obj_mtx_hold_max_usec",
@@ -84,11 +82,11 @@ PHASE4_VSC_RESIZE_GAUGES = (
     "side_retiring_buckets", "side_retiring_bytes", "side_retiring_live",
     "side_retiring_tombstones", "side_resize_state", "side_resize_reason",
     "side_resize_attach_grow_old_buckets_max",
-    "side_migration_cursor", "side_migration_buckets_remaining",
+    "side_migration_buckets_remaining",
     "side_migration_live_remaining",
     "resize_low_water_active", "resize_low_water_elapsed_usec",
     "resize_low_water_observed_live", "resize_low_water_target_objects",
-    "resize_low_water_target_side_buckets", "resize_low_water_cancellation_reason",
+    "resize_low_water_target_side_buckets",
     "resize_active_bytes", "resize_retiring_bytes", "resize_detached_bytes",
     "resize_reconciled_bytes",
 )

@@ -104,4 +104,6 @@ With Fellow persistence, complete object membership is stored only in a checksum
 
 The `stale()` checks in `vcl_hit` and `vcl_deliver` are part of the hard-purge pattern. They catch objects invalidated after registration, including fetch races and objects that remain physically resident, then restart so the request can fetch fresh content.
 
+Cachetag's VSC counters are published at three levels. `info` counters are the production contract worth watching routinely: call volumes, rejection counts, persistence health, and purge-map state. `diag` counters are what you reach for during an incident: memory decomposition, resize and publication state, and the denominators behind the `info` counters. `debug` counters are implementation internals and opt-in instrumentation, useful when working on cachetag itself rather than operating it. `vinylstat`'s interactive (curses) view filters by level and starts at `info`; one-shot (`-1`) and JSON (`-j`) output always report every counter regardless of level.
+
 For persistent cache tags with Fellow, create the namespace with `persist_path` as shown in [Fellow / Slash Integration](#fellow--slash-integration). Without `persist_path`, the namespace is memory-only.

@@ -20,7 +20,7 @@
 
 .. vinyl_vsc:: volatile_side_table_buckets
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Volatile membership side-table buckets
 
 .. vinyl_vsc:: volatile_side_table_grows
@@ -40,12 +40,12 @@
 
 .. vinyl_vsc:: volatile_object_count_sidecar_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Volatile membership object-count sidecar bytes
 
 .. vinyl_vsc:: volatile_object_count_overflow_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Live overflow membership metadata bytes
 
 	Bytes used to encode memberships with 255 or more folds. Direct-vector
@@ -54,7 +54,7 @@
 
 .. vinyl_vsc:: volatile_interned_sets
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Live unique interned membership sets
 
 	Distinct multi-fold membership sets currently interned in the process-local
@@ -62,7 +62,7 @@
 
 .. vinyl_vsc:: volatile_interned_set_refs
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Live object references to interned membership sets
 
 	Total live multi-tag objects referencing an interned membership set, summed
@@ -70,17 +70,17 @@
 
 .. vinyl_vsc:: volatile_interned_set_hits
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Attaches reusing an interned membership set
 
 .. vinyl_vsc:: volatile_interned_set_misses
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Attaches creating an interned membership set
 
 .. vinyl_vsc:: volatile_interned_set_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Interned membership-set node bytes
 
 	Bytes held by interned-set nodes: a 32-byte header plus 8 bytes per fold,
@@ -88,7 +88,7 @@
 
 .. vinyl_vsc:: volatile_interned_table_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Interning hash-table bucket-array bytes
 
 .. vinyl_vsc:: volatile_interned_acquire_calls
@@ -133,19 +133,6 @@
 	:level:	debug
 	:oneliner:	Maximum bounded interned-table publication and migration time while holding obj_mtx
 
-.. vinyl_vsc:: volatile_interned_set_alloc_calls
-	:type:	counter
-	:level:	debug
-	:oneliner:	Legacy interned-set allocation calls while holding obj_mtx (always zero)
-.. vinyl_vsc:: volatile_interned_set_alloc_usec
-	:type:	counter
-	:level:	debug
-	:oneliner:	Legacy interned-set allocation microseconds while holding obj_mtx (always zero)
-.. vinyl_vsc:: volatile_interned_set_alloc_max_usec
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Legacy maximum interned-set allocation time while holding obj_mtx (always zero)
-
 .. vinyl_vsc:: volatile_interned_candidate_alloc_calls
 	:type:	counter
 	:level:	debug
@@ -172,7 +159,7 @@
 	:oneliner:	Maximum intern-table bucket allocation time outside obj_mtx
 .. vinyl_vsc:: volatile_interned_migration_active
 	:type:	gauge
-	:level:	debug
+	:level:	diag
 	:oneliner:	Intern-table migration active
 .. vinyl_vsc:: volatile_interned_old_table_bytes
 	:type:	gauge
@@ -201,7 +188,7 @@
 
 .. vinyl_vsc:: volatile_object_table_slots
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Volatile membership object-vector slots
 
 .. vinyl_vsc:: volatile_object_table_shrinks
@@ -221,7 +208,7 @@
 
 .. vinyl_vsc:: volatile_inline_folds
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	One-fold memberships stored inline
 
 .. vinyl_vsc:: volatile_attached
@@ -246,27 +233,6 @@
 	:type:	gauge
 	:level:	debug
 	:oneliner:	Maximum instrumented request probe obj_mtx wait
-.. vinyl_vsc:: request_probe_obj_mtx_wait_over_50us
-	:type:	counter
-	:level:	debug
-	:oneliner:	Request probe obj_mtx waits above 50us
-.. vinyl_vsc:: request_probe_obj_mtx_wait_over_250us
-	:type:	counter
-	:level:	debug
-	:oneliner:	Request probe obj_mtx waits above 250us
-.. vinyl_vsc:: request_probe_obj_mtx_wait_over_1ms
-	:type:	counter
-	:level:	debug
-	:oneliner:	Request probe obj_mtx waits above 1ms
-.. vinyl_vsc:: request_probe_obj_mtx_wait_over_10ms
-	:type:	counter
-	:level:	debug
-	:oneliner:	Request probe obj_mtx waits above 10ms
-.. vinyl_vsc:: request_probe_obj_mtx_wait_over_50ms
-	:type:	counter
-	:level:	debug
-	:oneliner:	Request probe obj_mtx waits above 50ms
-
 .. vinyl_vsc:: request_attach_obj_mtx_calls
 	:type:	counter
 	:level:	debug
@@ -279,27 +245,6 @@
 	:type:	gauge
 	:level:	debug
 	:oneliner:	Maximum instrumented request attach obj_mtx wait
-.. vinyl_vsc:: request_attach_obj_mtx_wait_over_50us
-	:type:	counter
-	:level:	debug
-	:oneliner:	Request attach obj_mtx waits above 50us
-.. vinyl_vsc:: request_attach_obj_mtx_wait_over_250us
-	:type:	counter
-	:level:	debug
-	:oneliner:	Request attach obj_mtx waits above 250us
-.. vinyl_vsc:: request_attach_obj_mtx_wait_over_1ms
-	:type:	counter
-	:level:	debug
-	:oneliner:	Request attach obj_mtx waits above 1ms
-.. vinyl_vsc:: request_attach_obj_mtx_wait_over_10ms
-	:type:	counter
-	:level:	debug
-	:oneliner:	Request attach obj_mtx waits above 10ms
-.. vinyl_vsc:: request_attach_obj_mtx_wait_over_50ms
-	:type:	counter
-	:level:	debug
-	:oneliner:	Request attach obj_mtx waits above 50ms
-
 .. vinyl_vsc:: request_invalidate_obj_mtx_calls
 	:type:	counter
 	:level:	debug
@@ -312,39 +257,10 @@
 	:type:	gauge
 	:level:	debug
 	:oneliner:	Maximum instrumented invalidation obj_mtx wait
-.. vinyl_vsc:: request_invalidate_obj_mtx_wait_over_50us
-	:type:	counter
-	:level:	debug
-	:oneliner:	Invalidation obj_mtx waits above 50us
-.. vinyl_vsc:: request_invalidate_obj_mtx_wait_over_250us
-	:type:	counter
-	:level:	debug
-	:oneliner:	Invalidation obj_mtx waits above 250us
-.. vinyl_vsc:: request_invalidate_obj_mtx_wait_over_1ms
-	:type:	counter
-	:level:	debug
-	:oneliner:	Invalidation obj_mtx waits above 1ms
-.. vinyl_vsc:: request_invalidate_obj_mtx_wait_over_10ms
-	:type:	counter
-	:level:	debug
-	:oneliner:	Invalidation obj_mtx waits above 10ms
-.. vinyl_vsc:: request_invalidate_obj_mtx_wait_over_50ms
-	:type:	counter
-	:level:	debug
-	:oneliner:	Invalidation obj_mtx waits above 50ms
-
 .. vinyl_vsc:: object_grow_calls
 	:type:	counter
 	:level:	debug
 	:oneliner:	Dense object-vector growth attempts
-.. vinyl_vsc:: object_grow_old_capacity_last
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last dense growth old capacity
-.. vinyl_vsc:: object_grow_new_capacity_last
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last dense growth requested capacity
 .. vinyl_vsc:: object_grow_usec
 	:type:	counter
 	:level:	debug
@@ -353,10 +269,6 @@
 	:type:	gauge
 	:level:	debug
 	:oneliner:	Maximum dense growth microseconds
-.. vinyl_vsc:: object_grow_last_usec
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last dense growth microseconds
 .. vinyl_vsc:: object_grow_failures
 	:type:	counter
 	:level:	debug
@@ -370,14 +282,6 @@
 	:type:	counter
 	:level:	debug
 	:oneliner:	Dense object-vector shrink attempts
-.. vinyl_vsc:: object_shrink_old_capacity_last
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last dense shrink old capacity
-.. vinyl_vsc:: object_shrink_new_capacity_last
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last dense shrink requested capacity
 .. vinyl_vsc:: object_shrink_usec
 	:type:	counter
 	:level:	debug
@@ -386,10 +290,6 @@
 	:type:	gauge
 	:level:	debug
 	:oneliner:	Maximum dense shrink microseconds
-.. vinyl_vsc:: object_shrink_last_usec
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last dense shrink microseconds
 .. vinyl_vsc:: object_shrink_failures
 	:type:	counter
 	:level:	debug
@@ -403,14 +303,6 @@
 	:type:	counter
 	:level:	debug
 	:oneliner:	Side-map growth or same-size rehash attempts
-.. vinyl_vsc:: side_grow_rehash_old_capacity_last
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last side growth rehash old capacity
-.. vinyl_vsc:: side_grow_rehash_new_capacity_last
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last side growth rehash new capacity
 .. vinyl_vsc:: side_grow_rehash_usec
 	:type:	counter
 	:level:	debug
@@ -419,10 +311,6 @@
 	:type:	gauge
 	:level:	debug
 	:oneliner:	Maximum side growth rehash microseconds
-.. vinyl_vsc:: side_grow_rehash_last_usec
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last side growth rehash microseconds
 .. vinyl_vsc:: side_grow_rehash_failures
 	:type:	counter
 	:level:	debug
@@ -436,14 +324,6 @@
 	:type:	counter
 	:level:	debug
 	:oneliner:	Side-map shrink rehash attempts
-.. vinyl_vsc:: side_shrink_rehash_old_capacity_last
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last side shrink rehash old capacity
-.. vinyl_vsc:: side_shrink_rehash_new_capacity_last
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last side shrink rehash new capacity
 .. vinyl_vsc:: side_shrink_rehash_usec
 	:type:	counter
 	:level:	debug
@@ -452,10 +332,6 @@
 	:type:	gauge
 	:level:	debug
 	:oneliner:	Maximum side shrink rehash microseconds
-.. vinyl_vsc:: side_shrink_rehash_last_usec
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last side shrink rehash microseconds
 .. vinyl_vsc:: side_shrink_rehash_failures
 	:type:	counter
 	:level:	debug
@@ -469,14 +345,6 @@
 	:type:	counter
 	:level:	debug
 	:oneliner:	Zero-object container free operations
-.. vinyl_vsc:: zero_container_free_old_capacity_last
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last zero-free combined old capacity
-.. vinyl_vsc:: zero_container_free_new_capacity_last
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last zero-free new capacity
 .. vinyl_vsc:: zero_container_free_usec
 	:type:	counter
 	:level:	debug
@@ -485,10 +353,6 @@
 	:type:	gauge
 	:level:	debug
 	:oneliner:	Maximum zero-object free microseconds
-.. vinyl_vsc:: zero_container_free_last_usec
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last zero-object free microseconds
 .. vinyl_vsc:: zero_container_free_failures
 	:type:	counter
 	:level:	debug
@@ -525,19 +389,19 @@
 
 .. vinyl_vsc:: object_segments
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Published object segment count
 .. vinyl_vsc:: object_published_slots
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Published object slots
 .. vinyl_vsc:: object_published_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Published object-entry segment bytes
 .. vinyl_vsc:: object_count_published_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Published object-count sidecar bytes
 .. vinyl_vsc:: object_segment_grow_publishes
 	:type:	counter
@@ -585,48 +449,44 @@
 	:oneliner:	Last object segment free microseconds
 .. vinyl_vsc:: side_primary_buckets
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Primary side table buckets
 .. vinyl_vsc:: side_primary_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Primary side table bytes
 .. vinyl_vsc:: side_primary_live
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Primary side table live entries
 .. vinyl_vsc:: side_primary_tombstones
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Primary side table tombstones
 .. vinyl_vsc:: side_retiring_buckets
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Retiring side table buckets
 .. vinyl_vsc:: side_retiring_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Retiring side table bytes
 .. vinyl_vsc:: side_retiring_live
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Retiring side table live entries
 .. vinyl_vsc:: side_retiring_tombstones
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Retiring side table tombstones
 .. vinyl_vsc:: side_resize_state
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Resize state 0 idle 1 migrate 2 observe 3 ready
 .. vinyl_vsc:: side_resize_reason
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Resize reason 0 none 1 grow 2 rebuild 3 shrink 4 rollback
-.. vinyl_vsc:: side_migration_cursor
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Side migration retiring bucket cursor
 .. vinyl_vsc:: side_migration_buckets_remaining
 	:type:	gauge
 	:level:	debug
@@ -745,7 +605,7 @@
 	:oneliner:	Resize batch obj_mtx holds above 10ms
 .. vinyl_vsc:: resize_low_water_active
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Low-water observation active
 .. vinyl_vsc:: resize_low_water_starts
 	:type:	counter
@@ -765,39 +625,35 @@
 	:oneliner:	Current low-water observation elapsed microseconds
 .. vinyl_vsc:: resize_low_water_observed_live
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Low-water observed live objects
 .. vinyl_vsc:: resize_low_water_target_objects
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Low-water target object slots
 .. vinyl_vsc:: resize_low_water_target_side_buckets
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Low-water target side buckets
 .. vinyl_vsc:: resize_low_water_cancellations
 	:type:	counter
 	:level:	debug
 	:oneliner:	Low-water observation cancellations
-.. vinyl_vsc:: resize_low_water_cancellation_reason
-	:type:	gauge
-	:level:	debug
-	:oneliner:	Last low-water cancellation 0 none 1 refill 2 object-growth 3 side-growth 4 no-reclaim 5 alloc-failure
 .. vinyl_vsc:: resize_active_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Active object and primary side bytes
 .. vinyl_vsc:: resize_retiring_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Retiring side bytes
 .. vinyl_vsc:: resize_detached_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Detached resize bytes not yet freed
 .. vinyl_vsc:: resize_reconciled_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Active plus retiring plus detached resize bytes
 
 .. vinyl_vsc:: parse_errors
@@ -827,17 +683,17 @@
 
 .. vinyl_vsc:: purgemap_table_slots
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Purge-map table slots
 
 .. vinyl_vsc:: purgemap_tombstones
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Purge-map tombstone slots
 
 .. vinyl_vsc:: purgemap_empty_slots
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Purge-map empty slots
 
 .. vinyl_vsc:: purgemap_bytes
@@ -847,12 +703,12 @@
 
 .. vinyl_vsc:: purgemap_hard_floor
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Hard-purge history floor
 
 .. vinyl_vsc:: purgemap_soft_floor
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Soft-purge history floor
 
 .. vinyl_vsc:: purgemap_seq
@@ -872,17 +728,17 @@
 
 .. vinyl_vsc:: purgemap_rebuilds_grow
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Purge-map growth rebuilds
 
 .. vinyl_vsc:: purgemap_rebuilds_same_size
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Purge-map same-size rebuilds
 
 .. vinyl_vsc:: purgemap_rebuilds_shrink
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Purge-map shrinking rebuilds
 
 .. vinyl_vsc:: purgemap_auto_reclaim_passes
@@ -897,73 +753,58 @@
 
 .. vinyl_vsc:: purgemap_auto_reclaimed_bytes
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Purge-map bytes removed by certified reclamation
 
 .. vinyl_vsc:: purgemap_auto_reclaim_deferred_pending
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Reclamation attempts deferred for pending publications
 
 .. vinyl_vsc:: purgemap_auto_reclaim_defer_usec
 	:type:	counter
-	:level:	info
+	:level:	debug
 	:oneliner:	Publication-grace reclamation deferral microseconds
 
 .. vinyl_vsc:: purgemap_auto_reclaim_defer_max_usec
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Maximum publication-grace reclamation deferral microseconds
 
 .. vinyl_vsc:: purgemap_auto_reclaim_defer_last_usec
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Last publication-grace reclamation deferral microseconds
 
 .. vinyl_vsc:: purgemap_auto_reclaim_filter_usec
 	:type:	counter
-	:level:	info
+	:level:	debug
 	:oneliner:	Purge-map certified reclamation filter microseconds
 
 .. vinyl_vsc:: purgemap_auto_reclaim_filter_max_usec
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Maximum purge-map certified reclamation filter microseconds
 
 .. vinyl_vsc:: purgemap_auto_reclaim_filter_last_usec
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Last purge-map certified reclamation filter microseconds
 
 .. vinyl_vsc:: purgemap_auto_reclaim_transient_bytes
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Last old-plus-new purge-map bytes during reclamation
-
-.. vinyl_vsc:: purgemap_auto_reclaim_transient_max_bytes
-	:type:	gauge
-	:level:	info
-	:oneliner:	Maximum old-plus-new purge-map bytes during reclamation
 
 .. vinyl_vsc:: purgemap_auto_reclaim_table_slots_before
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Purge-map slots before last certified reclamation
 
 .. vinyl_vsc:: purgemap_auto_reclaim_table_slots_after
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Purge-map slots after last certified reclamation
-
-.. vinyl_vsc:: purgemap_auto_reclaim_table_bytes_before
-	:type:	gauge
-	:level:	info
-	:oneliner:	Purge-map bytes before last certified reclamation
-
-.. vinyl_vsc:: purgemap_auto_reclaim_table_bytes_after
-	:type:	gauge
-	:level:	info
-	:oneliner:	Purge-map bytes after last certified reclamation
 
 .. vinyl_vsc:: purgemap_probe_hard_hits
 	:type:	counter
@@ -977,7 +818,7 @@
 
 .. vinyl_vsc:: purgemap_insert_probe_hits
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Insert-time purge probe hits
 
 .. vinyl_vsc:: purgemap_fellow_attr_objects_written
@@ -987,7 +828,7 @@
 
 .. vinyl_vsc:: purgemap_fellow_attr_bytes_written
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Attributed Fellow cachetag attribute bytes written
 
 .. vinyl_vsc:: purgemap_fellow_direct_probes
@@ -1012,7 +853,7 @@
 
 .. vinyl_vsc:: purgemap_fellow_namespace_records_probed
 	:type:	counter
-	:level:	debug
+	:level:	diag
 	:oneliner:	Fellow namespace records probed
 
 .. vinyl_vsc:: purgemap_fellow_store_invariant_failures
@@ -1032,7 +873,7 @@
 
 .. vinyl_vsc:: sweep_aborts
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Purge-map sweeps aborted by shutdown
 
 .. vinyl_vsc:: sweep_scanned
@@ -1047,217 +888,177 @@
 
 .. vinyl_vsc:: sweep_reduced
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Objects reduced by soft-purge sweeps
 
 .. vinyl_vsc:: sweep_batches
 	:type:	counter
-	:level:	info
+	:level:	debug
 	:oneliner:	Sweep batches
 
 .. vinyl_vsc:: sweep_last_batches
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Batches in the last sweep pass
 
 .. vinyl_vsc:: sweep_batch_scanned_max
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Maximum objects scanned by one sweep batch
 
 .. vinyl_vsc:: sweep_batch_hold_over_2ms
 	:type:	counter
-	:level:	info
+	:level:	debug
 	:oneliner:	Sweep batches holding obj_mtx above 2ms
 
 .. vinyl_vsc:: sweep_batch_hold_over_5ms
 	:type:	counter
-	:level:	info
+	:level:	debug
 	:oneliner:	Sweep batches holding obj_mtx above 5ms
 
 .. vinyl_vsc:: sweep_batch_hold_over_10ms
 	:type:	counter
-	:level:	info
+	:level:	debug
 	:oneliner:	Sweep batches holding obj_mtx above 10ms
 
 .. vinyl_vsc:: sweep_remaining
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Objects remaining in the active sweep pass
 
 .. vinyl_vsc:: sweep_wakeups
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Purge-map sweeper condition wakeups
 
 .. vinyl_vsc:: sweep_iterations
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Purge-map sweeper work-loop iterations
 
 .. vinyl_vsc:: sweep_obj_mtx_wait_usec
 	:type:	counter
-	:level:	info
+	:level:	debug
 	:oneliner:	Sweep obj_mtx wait microseconds
 
 .. vinyl_vsc:: sweep_obj_mtx_wait_max_usec
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Maximum sweep obj_mtx wait microseconds
 
 .. vinyl_vsc:: sweep_obj_mtx_wait_last_usec
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Last sweep obj_mtx wait microseconds
 
 .. vinyl_vsc:: sweep_obj_mtx_hold_usec
 	:type:	counter
-	:level:	info
+	:level:	debug
 	:oneliner:	Sweep continuous obj_mtx hold microseconds
 
 .. vinyl_vsc:: sweep_obj_mtx_hold_max_usec
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Maximum sweep continuous obj_mtx hold microseconds
 
 .. vinyl_vsc:: sweep_obj_mtx_hold_last_usec
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Last sweep continuous obj_mtx hold microseconds
 
 .. vinyl_vsc:: sweep_unlocked_gap_usec
 	:type:	counter
-	:level:	info
+	:level:	debug
 	:oneliner:	Sweep inter-batch unlocked gap microseconds
 
 .. vinyl_vsc:: sweep_unlocked_gap_last_usec
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Last sweep inter-batch unlocked gap microseconds
 
 .. vinyl_vsc:: sweep_per_object_max_usec
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Maximum single object operation microseconds during sweeps
 
 .. vinyl_vsc:: sweep_deferred_shrinks
 	:type:	counter
-	:level:	info
+	:level:	debug
 	:oneliner:	Container shrinks deferred while a sweep pass was active
 
 .. vinyl_vsc:: sweep_total_usec
 	:type:	counter
-	:level:	info
+	:level:	debug
 	:oneliner:	Total certified sweep microseconds
 
 .. vinyl_vsc:: sweep_total_max_usec
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Maximum certified sweep microseconds
 
 .. vinyl_vsc:: sweep_total_last_usec
 	:type:	gauge
-	:level:	info
+	:level:	debug
 	:oneliner:	Last certified sweep microseconds
 
 .. vinyl_vsc:: sweep_last_scanned
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Objects scanned by last sweep
 
 .. vinyl_vsc:: sweep_last_killed
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Objects killed by last sweep
 
 .. vinyl_vsc:: sweep_last_reduced
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Objects reduced by last sweep
 
 .. vinyl_vsc:: sweep_last_objects_before
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Volatile objects before last sweep
 
 .. vinyl_vsc:: sweep_last_objects_after
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Volatile objects after last sweep
-
-.. vinyl_vsc:: sweep_last_object_slots_before
-	:type:	gauge
-	:level:	info
-	:oneliner:	Object-vector slots before last sweep
-
-.. vinyl_vsc:: sweep_last_object_slots_after
-	:type:	gauge
-	:level:	info
-	:oneliner:	Object-vector slots after last sweep
-
-.. vinyl_vsc:: sweep_last_object_bytes_before
-	:type:	gauge
-	:level:	info
-	:oneliner:	Object-vector bytes before last sweep
-
-.. vinyl_vsc:: sweep_last_object_bytes_after
-	:type:	gauge
-	:level:	info
-	:oneliner:	Object-vector bytes after last sweep
-
-.. vinyl_vsc:: sweep_last_side_buckets_before
-	:type:	gauge
-	:level:	info
-	:oneliner:	Side-table buckets before last sweep
-
-.. vinyl_vsc:: sweep_last_side_buckets_after
-	:type:	gauge
-	:level:	info
-	:oneliner:	Side-table buckets after last sweep
-
-.. vinyl_vsc:: sweep_last_side_bytes_before
-	:type:	gauge
-	:level:	info
-	:oneliner:	Side-table bytes before last sweep
-
-.. vinyl_vsc:: sweep_last_side_bytes_after
-	:type:	gauge
-	:level:	info
-	:oneliner:	Side-table bytes after last sweep
 
 .. vinyl_vsc:: publication_phase
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Current publication phase
 
 .. vinyl_vsc:: publication_readers_phase0
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Current publication readers in phase zero
 
 .. vinyl_vsc:: publication_readers_phase1
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Current publication readers in phase one
 
 .. vinyl_vsc:: publication_acquires
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Publication reader tokens acquired
 
 .. vinyl_vsc:: publication_releases
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Publication reader tokens released
 
 .. vinyl_vsc:: reclaim_pending
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Certified reclamation waiting for publication readers
 
 .. vinyl_vsc:: reclaim_phase
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Publication phase blocking certified reclamation
 
 .. vinyl_vsc:: persist_wal_records
@@ -1277,27 +1078,27 @@
 
 .. vinyl_vsc:: persist_checkpoint_wal_sequence
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	WAL record sequence covered by the published checkpoint
 
 .. vinyl_vsc:: persist_checkpoint_bytes
 	:type:	gauge
-	:level:	info
+	:level:	diag
 	:oneliner:	Bytes in the published purge-history checkpoint
 
 .. vinyl_vsc:: persist_checkpoint_publications
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Purge-history checkpoints published
 
 .. vinyl_vsc:: persist_checkpoint_segments_collected
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Checkpoint-covered WAL segments collected
 
 .. vinyl_vsc:: persist_orphan_files_collected
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Manifest-relative orphan persistence files collected
 
 .. vinyl_vsc:: persist_replay_records
@@ -1317,7 +1118,7 @@
 
 .. vinyl_vsc:: fellow_replayed_records
 	:type:	counter
-	:level:	info
+	:level:	diag
 	:oneliner:	Purge WAL records replayed for Fellow namespaces
 
 .. vinyl_vsc_end:: cachetag

@@ -14,6 +14,7 @@ libvmod_cachetag_la_LDFLAGS = \
 
 libvmod_cachetag_la_SOURCES = \
 	cachetag.vsc \
+	cachetag_counters.h \
 	cachetag_util.h \
 	vmod_cachetag.c \
 	vmod_cachetag_types.h \
@@ -75,7 +76,22 @@ CLEANFILES = \
 # Test suite
 
 check_PROGRAMS = \
-	cachetag_wal_test
+	cachetag_wal_test \
+	cachetag_counter_dump
+
+# Parity between src/cachetag.vsc and the src/cachetag_counters.h inventory the
+# C side is generated from.  The dump program needs no Vinyl headers and no
+# link dependencies; the script diffs it against the schema.
+
+cachetag_counter_dump_SOURCES = \
+	cachetag_counter_dump.c \
+	cachetag_counters.h
+
+cachetag_counter_dump_CFLAGS = \
+	$(AM_CFLAGS)
+
+dist_check_SCRIPTS = \
+	cachetag_counter_parity.sh
 
 cachetag_wal_test_SOURCES = \
 	cachetag_util.h \
@@ -93,7 +109,9 @@ cachetag_wal_test_LDADD = \
 
 AM_TESTS_ENVIRONMENT = \
 	PATH="$(abs_builddir):$(VINYL_TEST_PATH):$(PATH)" \
-	LD_LIBRARY_PATH="$(VINYL_LIBRARY_PATH)"
+	LD_LIBRARY_PATH="$(VINYL_LIBRARY_PATH)" \
+	CACHETAG_SRCDIR='$(srcdir)' \
+	CACHETAG_COUNTER_DUMP='$(abs_builddir)/cachetag_counter_dump'
 TEST_EXTENSIONS = .vtc
 VTC_LOG_COMPILER = vinyltest -v
 AM_VTC_LOG_FLAGS = \
@@ -222,6 +240,7 @@ FELLOW_VTC_TESTS = \
 
 TESTS = \
 	cachetag_wal_test \
+	cachetag_counter_parity.sh \
 	$(VTC_TESTS)
 
 # Documentation

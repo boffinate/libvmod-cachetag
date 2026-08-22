@@ -134,7 +134,6 @@ struct cachetag_index {
 	uint64_t intern_misses;
 	struct cachetag_timing_counters intern_acquire_timing;
 	struct cachetag_timing_counters intern_table_grow_timing;
-	struct cachetag_timing_counters intern_set_alloc_timing;
 	struct cachetag_timing_counters intern_candidate_alloc_timing;
 	struct cachetag_timing_counters intern_table_alloc_timing;
 #endif
@@ -156,6 +155,22 @@ struct cachetag_index {
 
 	pthread_mutex_t counter_mtx;
 	struct cachetag_counters counters;
+	/*
+	 * Family accumulators.  The published struct is flat, so these live
+	 * here and cachetag_snapshot_counters() fans them out under
+	 * counter_mtx.  Written under counter_mtx like idx->counters, and
+	 * zero from ALLOC_OBJ, which is what a build that never writes them
+	 * relies on.  Deliberately outside the CACHE_TAG_SET_INTERNING block
+	 * above: the lockwait and resize families exist in every build.
+	 */
+	struct cachetag_lockwait_counters lockwait_request_probe;
+	struct cachetag_lockwait_counters lockwait_request_attach;
+	struct cachetag_lockwait_counters lockwait_request_invalidate;
+	struct cachetag_resize_counters resize_object_grow;
+	struct cachetag_resize_counters resize_object_shrink;
+	struct cachetag_resize_counters resize_side_grow_rehash;
+	struct cachetag_resize_counters resize_side_shrink_rehash;
+	struct cachetag_resize_counters resize_zero_container_free;
 	struct cachetag_epoch_gate publication_gate;
 	pthread_mutex_t purge_mtx;
 	pthread_cond_t sweep_cond;

@@ -1145,7 +1145,6 @@ cachetag_account_objects_locked(struct cachetag_index *idx)
 		idx->counters.side_resize_state = TAG_RESIZE_VSC_IDLE;
 		idx->counters.side_resize_reason = TAG_SIDE_MIGRATION_NONE;
 	}
-	idx->counters.side_migration_cursor = idx->side_migrate_cursor;
 	idx->counters.side_migration_buckets_remaining =
 	    idx->side_migration_active &&
 	    idx->side_retiring.buckets > idx->side_migrate_cursor ?
@@ -1185,14 +1184,10 @@ cachetag_account_objects_locked(struct cachetag_index *idx)
 	    idx->intern_detached_set_bytes;
 	idx->counters.volatile_interned_detached_table_bytes =
 	    idx->intern_detached_table_bytes;
-	idx->counters.volatile_interned_acquire = idx->intern_acquire_timing;
-	idx->counters.volatile_interned_table_grow =
-	    idx->intern_table_grow_timing;
-	idx->counters.volatile_interned_set_alloc = idx->intern_set_alloc_timing;
-	idx->counters.volatile_interned_candidate_alloc =
-	    idx->intern_candidate_alloc_timing;
-	idx->counters.volatile_interned_table_alloc =
-	    idx->intern_table_alloc_timing;
+	/*
+	 * The intern_*_timing accumulators are published by the generated
+	 * fan-out in cachetag_snapshot_counters(), not copied wholesale here.
+	 */
 	idx->counters.volatile_object_count_overflow_bytes =
 	    idx->intern_overflow_sets * sizeof(struct cachetag_interned_set);
 	idx->counters.index_memory_bytes = sizeof *idx + idx->namespace_len + 1 +
@@ -1218,16 +1213,11 @@ cachetag_account_objects_locked(struct cachetag_index *idx)
 	idx->counters.volatile_interned_table_alloc_failures = 0;
 	idx->counters.volatile_interned_table_grow_failures = 0;
 	idx->counters.volatile_interned_candidate_discards = 0;
-	memset(&idx->counters.volatile_interned_acquire, 0,
-	    sizeof idx->counters.volatile_interned_acquire);
-	memset(&idx->counters.volatile_interned_table_grow, 0,
-	    sizeof idx->counters.volatile_interned_table_grow);
-	memset(&idx->counters.volatile_interned_set_alloc, 0,
-	    sizeof idx->counters.volatile_interned_set_alloc);
-	memset(&idx->counters.volatile_interned_candidate_alloc, 0,
-	    sizeof idx->counters.volatile_interned_candidate_alloc);
-	memset(&idx->counters.volatile_interned_table_alloc, 0,
-	    sizeof idx->counters.volatile_interned_table_alloc);
+	/*
+	 * The volatile_interned_* timing fields need no zeroing: their
+	 * accumulators live on the index, this build never writes them, and
+	 * the fields are zero from ALLOC_OBJ.
+	 */
 	idx->counters.index_memory_bytes = sizeof *idx + idx->namespace_len + 1 +
 		object_bytes + count_bytes +
 		side_bytes +
@@ -1253,13 +1243,13 @@ cachetag_note_request_wait_locked(struct cachetag_index *idx,
 
 	switch (category) {
 	case TAG_REQUEST_LOCK_PROBE:
-		counters = &idx->counters.request_probe;
+		counters = &idx->lockwait_request_probe;
 		break;
 	case TAG_REQUEST_LOCK_ATTACH:
-		counters = &idx->counters.request_attach;
+		counters = &idx->lockwait_request_attach;
 		break;
 	default:
-		counters = &idx->counters.request_invalidate;
+		counters = &idx->lockwait_request_invalidate;
 		break;
 	}
 	PTOK(pthread_mutex_lock(&idx->counter_mtx));
@@ -1267,11 +1257,6 @@ cachetag_note_request_wait_locked(struct cachetag_index *idx,
 	counters->wait_usec += wait_usec;
 	if (wait_usec > counters->wait_max_usec)
 		counters->wait_max_usec = wait_usec;
-	counters->wait_over_50us += wait_usec > 50;
-	counters->wait_over_250us += wait_usec > 250;
-	counters->wait_over_1ms += wait_usec > 1000;
-	counters->wait_over_10ms += wait_usec > 10000;
-	counters->wait_over_50ms += wait_usec > 50000;
 	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 }
 
@@ -1299,10 +1284,7 @@ cachetag_note_resize(struct cachetag_index *idx,
 {
 	PTOK(pthread_mutex_lock(&idx->counter_mtx));
 	counters->calls++;
-	counters->old_capacity_last = old_capacity;
-	counters->new_capacity_last = new_capacity;
 	counters->usec += usec;
-	counters->last_usec = usec;
 	if (usec > counters->max_usec)
 		counters->max_usec = usec;
 	counters->failures += failed != 0;
@@ -1315,10 +1297,10 @@ cachetag_note_side_rehash(struct cachetag_index *idx, size_t old_capacity,
     size_t new_capacity, uint64_t usec, int failed)
 {
 	if (new_capacity < old_capacity) {
-		cachetag_note_resize(idx, &idx->counters.side_shrink_rehash,
+		cachetag_note_resize(idx, &idx->resize_side_shrink_rehash,
 		    old_capacity, new_capacity, usec, failed, idx->sweep_active);
 	} else {
-		cachetag_note_resize(idx, &idx->counters.side_grow_rehash,
+		cachetag_note_resize(idx, &idx->resize_side_grow_rehash,
 		    old_capacity, new_capacity, usec, failed, idx->sweep_active);
 	}
 }
@@ -2003,7 +1985,6 @@ cachetag_low_water_cancel_locked(struct cachetag_index *idx, unsigned reason)
 	    reason != TAG_RESIZE_LOW_WATER_CANCEL_NONE) {
 		PTOK(pthread_mutex_lock(&idx->counter_mtx));
 		idx->counters.resize_low_water_cancellations++;
-		idx->counters.resize_low_water_cancellation_reason = reason;
 		if (reason == TAG_RESIZE_LOW_WATER_CANCEL_REFILL_OVERRUN)
 			idx->counters.side_resize_shrink_cancellations++;
 		PTOK(pthread_mutex_unlock(&idx->counter_mtx));
@@ -2029,8 +2010,6 @@ cachetag_low_water_start_locked(struct cachetag_index *idx, uint64_t start_usec,
 		idx->counters.resize_low_water_rearms++;
 	else
 		idx->counters.resize_low_water_starts++;
-	idx->counters.resize_low_water_cancellation_reason =
-	    TAG_RESIZE_LOW_WATER_CANCEL_NONE;
 	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 }
 
@@ -2293,7 +2272,7 @@ cachetag_resize_publish_object_segment(struct cachetag_index *idx)
 	}
 	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
 	if (!cachetag_object_segment_allocation_bytes(segment_index, NULL)) {
-		cachetag_note_resize(idx, &idx->counters.object_grow,
+		cachetag_note_resize(idx, &idx->resize_object_grow,
 		    old_capacity, cap, 0, 1, 0);
 		return (0);
 	}
@@ -2302,7 +2281,7 @@ cachetag_resize_publish_object_segment(struct cachetag_index *idx)
 	resize_usec = cachetag_elapsed_usec(resize_started, cachetag_now_usec());
 	cachetag_note_object_segment_alloc(idx, resize_usec, segment == NULL);
 	if (segment == NULL) {
-		cachetag_note_resize(idx, &idx->counters.object_grow,
+		cachetag_note_resize(idx, &idx->resize_object_grow,
 		    old_capacity, cap, resize_usec, 1, 0);
 		return (0);
 	}
@@ -2317,7 +2296,7 @@ cachetag_resize_publish_object_segment(struct cachetag_index *idx)
 		idx->capobjects = cap;
 		segment = NULL;
 		published = 1;
-		cachetag_note_resize(idx, &idx->counters.object_grow,
+		cachetag_note_resize(idx, &idx->resize_object_grow,
 		    old_capacity, cap, resize_usec, 0, idx->sweep_active);
 		cachetag_counter_add(idx,
 		    &idx->counters.object_segment_grow_publishes, 1);
@@ -2512,7 +2491,7 @@ cachetag_resize_apply_low_water(struct cachetag_index *idx)
 			idx->counters.object_segment_detach_batches++;
 		idx->resize_detached_bytes += detached_bytes;
 		PTOK(pthread_mutex_unlock(&idx->counter_mtx));
-		cachetag_note_resize(idx, &idx->counters.zero_container_free,
+		cachetag_note_resize(idx, &idx->resize_zero_container_free,
 		    old_capacity, 0,
 		    cachetag_elapsed_usec(resize_started, cachetag_now_usec()),
 		    0, idx->sweep_active);
@@ -2550,7 +2529,7 @@ cachetag_resize_apply_low_water(struct cachetag_index *idx)
 		ndetached_segments =
 		    cachetag_object_detach_segments_locked(idx, object_target,
 		    detached_segments);
-		cachetag_note_resize(idx, &idx->counters.object_shrink,
+		cachetag_note_resize(idx, &idx->resize_object_shrink,
 		    old_capacity, object_target,
 		    cachetag_elapsed_usec(resize_started, cachetag_now_usec()),
 		    0, idx->sweep_active);
@@ -2856,7 +2835,7 @@ again:
 		segment_index =
 		    cachetag_object_segment_count_for_capacity(old_capacity);
 		if (segment_index >= TAG_OBJECT_SEGMENTS) {
-			cachetag_note_resize(idx, &idx->counters.object_grow,
+			cachetag_note_resize(idx, &idx->resize_object_grow,
 			    idx->capobjects, idx->capobjects, 0, 1,
 			    idx->sweep_active);
 			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
@@ -2869,7 +2848,7 @@ again:
 		cap = cachetag_object_capacity_for_segments(segment_index + 1);
 		if (!cachetag_object_segment_allocation_bytes(segment_index,
 		    NULL)) {
-			cachetag_note_resize(idx, &idx->counters.object_grow,
+			cachetag_note_resize(idx, &idx->resize_object_grow,
 			    idx->capobjects, cap, 0, 1, idx->sweep_active);
 			PTOK(pthread_mutex_unlock(&idx->obj_mtx));
 		#if CACHE_TAG_SET_INTERNING
@@ -2886,7 +2865,7 @@ again:
 		cachetag_note_object_segment_alloc(idx, resize_usec,
 		    segment == NULL);
 		if (segment == NULL) {
-			cachetag_note_resize(idx, &idx->counters.object_grow,
+			cachetag_note_resize(idx, &idx->resize_object_grow,
 			    old_capacity, cap, resize_usec, 1, 0);
 		#if CACHE_TAG_SET_INTERNING
 			cachetag_intern_attach_cleanup(idx, &cleanup, candidate,
@@ -2900,7 +2879,7 @@ again:
 			idx->object_segments[segment_index] = segment;
 			idx->capobjects = cap;
 			segment = NULL;
-			cachetag_note_resize(idx, &idx->counters.object_grow,
+			cachetag_note_resize(idx, &idx->resize_object_grow,
 			    old_capacity, cap, resize_usec, 0,
 			    idx->sweep_active);
 			cachetag_note_object_emergency_segment(idx, old_capacity);
@@ -3725,6 +3704,42 @@ cachetag_snapshot_counters(struct cachetag_index *idx,
 	PTOK(pthread_mutex_lock(&idx->counter_mtx));
 	cachetag_account_objects_locked(idx);
 	*counters = idx->counters;
+	/*
+	 * Fan the family accumulators out into the flat published struct,
+	 * still under counter_mtx and obj_mtx.  Same lock scope and the same
+	 * words as the wholesale substruct copies this replaced.
+	 */
+#define CACHETAG_FANOUT_LOCKWAIT_MEMBER(g, i, m)			\
+	counters->g##_obj_mtx_##m = idx->i.m;
+#define CACHETAG_FANOUT_LOCKWAIT_GROUP(g, i)				\
+	CACHETAG_LOCKWAIT_MEMBERS(CACHETAG_FANOUT_LOCKWAIT_MEMBER, g, i)
+	CACHETAG_LOCKWAIT_GROUPS(CACHETAG_FANOUT_LOCKWAIT_GROUP)
+#undef CACHETAG_FANOUT_LOCKWAIT_GROUP
+#undef CACHETAG_FANOUT_LOCKWAIT_MEMBER
+
+#define CACHETAG_FANOUT_RESIZE_MEMBER(g, i, m)				\
+	counters->g##_##m = idx->i.m;
+#define CACHETAG_FANOUT_RESIZE_GROUP(g, i)				\
+	CACHETAG_RESIZE_MEMBERS(CACHETAG_FANOUT_RESIZE_MEMBER, g, i)
+	CACHETAG_RESIZE_GROUPS(CACHETAG_FANOUT_RESIZE_GROUP)
+#undef CACHETAG_FANOUT_RESIZE_GROUP
+#undef CACHETAG_FANOUT_RESIZE_MEMBER
+
+#if CACHE_TAG_SET_INTERNING
+	/*
+	 * Only guarded family: the intern_*_timing accumulators exist only in
+	 * a set-interning build.  Elsewhere the fields stay zero from
+	 * ALLOC_OBJ, which is what the memset()s in the non-interning branch
+	 * of cachetag_account_objects_locked() used to spell out.
+	 */
+#define CACHETAG_FANOUT_TIMING_MEMBER(g, i, m)				\
+	counters->g##_##m = idx->i.m;
+#define CACHETAG_FANOUT_TIMING_GROUP(g, i, MEMBERS)			\
+	MEMBERS(CACHETAG_FANOUT_TIMING_MEMBER, g, i)
+	CACHETAG_TIMING_GROUPS(CACHETAG_FANOUT_TIMING_GROUP)
+#undef CACHETAG_FANOUT_TIMING_GROUP
+#undef CACHETAG_FANOUT_TIMING_MEMBER
+#endif
 	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
 	counters->publication_phase = __atomic_load_n(

@@ -56,17 +56,6 @@ AM_PROG_AR
 LT_PREREQ([2.2.6])
 LT_INIT([dlopen disable-static])
 
-AC_ARG_ENABLE([attach-timing],
-	AS_HELP_STRING([--enable-attach-timing],
-		[enable attach-path timing VSC counters (default: disabled)]),
-	[],
-	[enable_attach_timing=no])
-AS_IF([test "x$enable_attach_timing" = "xyes"],
-	[AC_DEFINE([CACHE_TAG_ATTACH_TIMING], [1],
-		[Define to 1 to collect attach-path timing counters.])],
-	[AC_DEFINE([CACHE_TAG_ATTACH_TIMING], [0],
-		[Define to 0 to leave attach-path timing counters disabled.])])
-
 dnl Experimental resident membership representation. When enabled, multi-fold
 dnl volatile memberships are canonicalized and hash-consed per namespace.
 dnl Disabled builds retain the direct per-object fold-vector implementation.
@@ -141,7 +130,6 @@ AS_ECHO("
 	vmoddir:      $vmoddir
 	vcldir:       $vcldir
 	pkgvcldir:    $pkgvcldir
-	attach timing: $enable_attach_timing
 	set interning: $enable_set_interning
 	demo diagnostics: $enable_demo_diagnostics
 	test hooks:   $enable_test_hooks

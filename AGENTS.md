@@ -101,19 +101,19 @@ scripts/test-fellow-with-vinyl-cache.sh ../vinyl-cache
 ```
 
 For `CACHE_TAG_CHECK_TARGET=check` with the default diagnostic-surface build,
-expect the standalone WAL test and the 53 storage-agnostic VTCs in `VTC_TESTS`
-(16 `c`, 7 `r`, 30 `pm`) to pass:
+expect the standalone WAL test, the counter-surface parity check, and the 53
+storage-agnostic VTCs in `VTC_TESTS` (16 `c`, 7 `r`, 30 `pm`) to pass:
 
 ```text
-# TOTAL: 54
-# PASS:  54
+# TOTAL: 55
+# PASS:  55
 # FAIL:  0
 # ERROR: 0
 ```
 
 With `CACHE_TAG_CONFIGURE_ARGS=""` (production surface: no demo diagnostics,
-no test hooks) only the core VTCs run, and the expected total is 38 (the WAL
-test plus 37 VTCs: 15 `c`, 7 `r`, 15 `pm`).
+no test hooks) only the core VTCs run, and the expected total is 39 (the WAL
+test, the counter-surface parity check, and 37 VTCs: 15 `c`, 7 `r`, 15 `pm`).
 
 For the default `distcheck`, expect:
 

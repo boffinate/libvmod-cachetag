@@ -114,17 +114,6 @@ cachetag_purgemap_note_sweep(struct cachetag_index *idx,
 	idx->counters.sweep_last_reduced = sweep->reduced;
 	idx->counters.sweep_last_objects_before = sweep->objects_before;
 	idx->counters.sweep_last_objects_after = sweep->objects_after;
-	idx->counters.sweep_last_object_slots_before =
-	    sweep->object_slots_before;
-	idx->counters.sweep_last_object_slots_after = sweep->object_slots_after;
-	idx->counters.sweep_last_object_bytes_before =
-	    sweep->object_bytes_before;
-	idx->counters.sweep_last_object_bytes_after = sweep->object_bytes_after;
-	idx->counters.sweep_last_side_buckets_before =
-	    sweep->side_buckets_before;
-	idx->counters.sweep_last_side_buckets_after = sweep->side_buckets_after;
-	idx->counters.sweep_last_side_bytes_before = sweep->side_bytes_before;
-	idx->counters.sweep_last_side_bytes_after = sweep->side_bytes_after;
 	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 }
 
@@ -556,7 +545,7 @@ cachetag_purgemap_try_reclaim(struct cachetag_index *idx,
 {
 	struct cachetag_purgemap_table *retired = NULL;
 	struct cachetag_purgemap_table *tbl;
-	uint64_t before_bytes, after_bytes, defer_usec, filter_usec;
+	uint64_t after_bytes, defer_usec, filter_usec;
 	uint64_t filter_start, filter_end, oldbytes, newbytes;
 	uint64_t before_slots, after_slots;
 	size_t before, after;
@@ -578,7 +567,6 @@ cachetag_purgemap_try_reclaim(struct cachetag_index *idx,
 	before = pm->nentry;
 	tbl = __atomic_load_n(&pm->table, __ATOMIC_ACQUIRE);
 	before_slots = tbl != NULL ? tbl->nslot : 0;
-	before_bytes = cachetag_purgemap_table_bytes(tbl);
 	filter_start = cachetag_now_usec();
 	if (cachetag_purgemap_reclaim_locked(idx, pm, idx->reclaim_cutoff,
 	    &retired) == 0) {
@@ -610,17 +598,10 @@ cachetag_purgemap_try_reclaim(struct cachetag_index *idx,
 		    filter_usec);
 		idx->counters.purgemap_auto_reclaim_transient_bytes =
 		    oldbytes + newbytes;
-		cachetag_counter_note_max(
-		    &idx->counters.purgemap_auto_reclaim_transient_max_bytes,
-		    oldbytes + newbytes);
 		idx->counters.purgemap_auto_reclaim_table_slots_before =
 		    before_slots;
 		idx->counters.purgemap_auto_reclaim_table_slots_after =
 		    after_slots;
-		idx->counters.purgemap_auto_reclaim_table_bytes_before =
-		    before_bytes;
-		idx->counters.purgemap_auto_reclaim_table_bytes_after =
-		    after_bytes;
 		if (defer_usec != 0) {
 			idx->counters.purgemap_auto_reclaim_defer_usec +=
 			    defer_usec;
