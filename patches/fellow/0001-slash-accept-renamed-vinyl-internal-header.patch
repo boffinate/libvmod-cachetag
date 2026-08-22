@@ -1,0 +1,115 @@
+diff --git a/src/aux_cache_wrk.c b/src/aux_cache_wrk.c
+index 8fe319a..064f149 100644
+--- a/src/aux_cache_wrk.c
++++ b/src/aux_cache_wrk.c
+@@ -35,7 +35,17 @@
+ #include <stdlib.h>
+ #include <sched.h>
+
+-#include "cache/cache_vinyld.h"
++/*
++ * Vinyl renamed its installed internal header (cache/cache_vinyld.h ->
++ * cache/cache_int.h, upstream 6d36364cc1). Accept either so Slash builds
++ * against both the 9.0.1 release and current trunk. Drop the fallback
++ * branch once the oldest supported Vinyl carries the rename.
++ */
++#if defined(__has_include) && __has_include("cache/cache_int.h")
++#  include "cache/cache_int.h"
++#else
++#  include "cache/cache_vinyld.h"
++#endif
+
+ /*
+  * stripped down version of Vinyl Cache WRK_BgThread for
+diff --git a/src/buddy_storage.c b/src/buddy_storage.c
+index c1f916e..241127b 100644
+--- a/src/buddy_storage.c
++++ b/src/buddy_storage.c
+@@ -25,7 +25,17 @@
+ #include <stdlib.h>
+ #include <stdio.h>	// vsl.h needs
+
+-#include "cache/cache_vinyld.h"
++/*
++ * Vinyl renamed its installed internal header (cache/cache_vinyld.h ->
++ * cache/cache_int.h, upstream 6d36364cc1). Accept either so Slash builds
++ * against both the 9.0.1 release and current trunk. Drop the fallback
++ * branch once the oldest supported Vinyl carries the rename.
++ */
++#if defined(__has_include) && __has_include("cache/cache_int.h")
++#  include "cache/cache_int.h"
++#else
++#  include "cache/cache_vinyld.h"
++#endif
+
+ #include "cache/cache_obj.h"
+ #include "cache/cache_objhead.h"
+diff --git a/src/fellow_cache.c b/src/fellow_cache.c
+index 1cfee5d..4ad671a 100644
+--- a/src/fellow_cache.c
++++ b/src/fellow_cache.c
+@@ -26,7 +26,17 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+
+-#include "cache/cache_vinyld.h"
++/*
++ * Vinyl renamed its installed internal header (cache/cache_vinyld.h ->
++ * cache/cache_int.h, upstream 6d36364cc1). Accept either so Slash builds
++ * against both the 9.0.1 release and current trunk. Drop the fallback
++ * branch once the oldest supported Vinyl carries the rename.
++ */
++#if defined(__has_include) && __has_include("cache/cache_int.h")
++#  include "cache/cache_int.h"
++#else
++#  include "cache/cache_vinyld.h"
++#endif
+
+ #include "debug.h"
+ #include "compiler.h"
+diff --git a/src/fellow_storage.c b/src/fellow_storage.c
+index 3a63c0d..12a3c85 100644
+--- a/src/fellow_storage.c
++++ b/src/fellow_storage.c
+@@ -26,7 +26,17 @@
+ #include <stdio.h>	// close
+ #include <sys/stat.h>
+
+-#include "cache/cache_vinyld.h"
++/*
++ * Vinyl renamed its installed internal header (cache/cache_vinyld.h ->
++ * cache/cache_int.h, upstream 6d36364cc1). Accept either so Slash builds
++ * against both the 9.0.1 release and current trunk. Drop the fallback
++ * branch once the oldest supported Vinyl carries the rename.
++ */
++#if defined(__has_include) && __has_include("cache/cache_int.h")
++#  include "cache/cache_int.h"
++#else
++#  include "cache/cache_vinyld.h"
++#endif
+
+ #include "cache/cache_obj.h"
+ #include "cache/cache_objhead.h"
+diff --git a/src/vmod_slash_loadmasters.c b/src/vmod_slash_loadmasters.c
+index e40cb65..6783075 100644
+--- a/src/vmod_slash_loadmasters.c
++++ b/src/vmod_slash_loadmasters.c
+@@ -26,7 +26,17 @@
+ #include <stdlib.h>
+ //#include <limits.h>
+
+-#include <cache/cache_vinyld.h>
++/*
++ * Vinyl renamed its installed internal header (cache/cache_vinyld.h ->
++ * cache/cache_int.h, upstream 6d36364cc1). Accept either so Slash builds
++ * against both the 9.0.1 release and current trunk. Drop the fallback
++ * branch once the oldest supported Vinyl carries the rename.
++ */
++#if defined(__has_include) && __has_include(<cache/cache_int.h>)
++#  include <cache/cache_int.h>
++#else
++#  include <cache/cache_vinyld.h>
++#endif
+ #include <cache/cache_objhead.h>	// struct objhead
+ #include <storage/storage.h>
+ #include <vcl.h>

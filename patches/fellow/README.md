@@ -11,6 +11,7 @@ Apply these patches to the `slash` checkout based on:
 
 Current patch stack:
 
+- `0001-slash-accept-renamed-vinyl-internal-header.patch`
 - `0002-add-fellow-object-attr-provider.patch`
 - `0003-fix-fellow-shutdown-drain-races.patch`
 - `0004-fellow_logcache-bound-entries-by-scratch-capacity.patch`
@@ -24,6 +25,15 @@ Current patch stack:
 - `0012-fellow-storage-skip-drain-idle-grace-on-shutdown.patch`
 - `0013-fellow-storage-skip-global-shutdown-drain.patch`
 - `0014-fellow-object-attr-add-read-failure-test-hook.patch`
+
+`0001` lets Slash build against Vinyl trunk after upstream `6d36364cc1`
+("Un-brand the vinyld internal header file") renamed the installed internal
+header `cache/cache_vinyld.h` to `cache/cache_int.h` with no content change.
+The five Slash sources that include it now select the header with
+`__has_include`, keeping the old name as the fallback so the same tree still
+builds against the 9.0.1 release. `src/fellow_log_storage.h` only mentions the
+old name in a comment and is left alone. Drop the fallback branch once the
+oldest supported Vinyl carries the rename.
 
 `0002` adds one narrowly generic opaque object-attribute provider backed by
 `fellow_disk_obj.va_reserve[0]`. A provider returns the exact byte count before
