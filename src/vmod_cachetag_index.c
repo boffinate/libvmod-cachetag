@@ -1092,112 +1092,331 @@ static size_t cachetag_object_low_water_target_locked(
 static size_t cachetag_side_low_water_target_locked(
     const struct cachetag_index *);
 
+/*
+ * Gauge recompute, split into three steps so the arithmetic no longer runs
+ * under obj_mtx.
+ *
+ * cachetag_gauge_inputs_locked() copies the obj_mtx-protected scalars the
+ * gauges are derived from, cachetag_gauges_compute() does the arithmetic with
+ * no lock held, and cachetag_gauges_store_locked() publishes the result into
+ * idx->counters under counter_mtx, finishing index_memory_bytes from the
+ * counter_mtx-protected read-backs.  cachetag_snapshot_counters() therefore no
+ * longer nests the two locks; the sweep paths, which already hold both, call
+ * the three steps back to back and keep their behaviour.
+ */
+struct cachetag_gauge_inputs {
+	size_t nobjects;
+	size_t capobjects;
+	size_t object_table_bytes;
+	size_t object_count_sidecar_bytes;
+	size_t side_primary_buckets;
+	size_t side_primary_live;
+	size_t side_primary_tombstones;
+	size_t side_retiring_buckets;
+	size_t side_retiring_live;
+	size_t side_retiring_tombstones;
+	size_t side_migrate_cursor;
+	unsigned side_migration_active;
+	unsigned side_migration_reason;
+	unsigned resize_low_water_active;
+	unsigned resize_low_water_force;
+	uint64_t resize_low_water_start_usec;
+	size_t resize_low_water_live;
+	size_t resize_low_water_target_objects;
+	size_t resize_low_water_target_side_buckets;
+	size_t resize_detached_bytes;
+	size_t namespace_len;
+#if CACHE_TAG_SET_INTERNING
+	size_t intern_sets;
+	size_t intern_refs;
+	uint64_t intern_hits;
+	uint64_t intern_misses;
+	size_t intern_bytes;
+	size_t intern_nbuckets;
+	size_t intern_old_nbuckets;
+	unsigned intern_migration_active;
+	size_t intern_detached_set_bytes;
+	size_t intern_detached_table_bytes;
+	size_t intern_overflow_sets;
+#endif
+};
+
+struct cachetag_gauges {
+	uint64_t volatile_objects;
+	uint64_t volatile_side_table_buckets;
+	uint64_t volatile_side_table_bytes;
+	uint64_t volatile_object_table_slots;
+	uint64_t volatile_object_table_bytes;
+	uint64_t volatile_object_count_sidecar_bytes;
+	uint64_t object_segments;
+	uint64_t object_published_slots;
+	uint64_t object_published_bytes;
+	uint64_t object_count_published_bytes;
+	uint64_t side_primary_buckets;
+	uint64_t side_primary_bytes;
+	uint64_t side_primary_live;
+	uint64_t side_primary_tombstones;
+	uint64_t side_retiring_buckets;
+	uint64_t side_retiring_bytes;
+	uint64_t side_retiring_live;
+	uint64_t side_retiring_tombstones;
+	uint64_t side_resize_state;
+	uint64_t side_resize_reason;
+	uint64_t side_migration_buckets_remaining;
+	uint64_t side_migration_live_remaining;
+	uint64_t resize_low_water_active;
+	uint64_t resize_low_water_elapsed_usec;
+	uint64_t resize_low_water_observed_live;
+	uint64_t resize_low_water_target_objects;
+	uint64_t resize_low_water_target_side_buckets;
+	uint64_t resize_active_bytes;
+	uint64_t resize_retiring_bytes;
+	uint64_t resize_detached_bytes;
+	uint64_t resize_reconciled_bytes;
+#if CACHE_TAG_SET_INTERNING
+	uint64_t volatile_interned_sets;
+	uint64_t volatile_interned_set_refs;
+	uint64_t volatile_interned_set_hits;
+	uint64_t volatile_interned_set_misses;
+	uint64_t volatile_interned_set_bytes;
+	uint64_t volatile_interned_table_bytes;
+	uint64_t volatile_interned_migration_active;
+	uint64_t volatile_interned_old_table_bytes;
+	uint64_t volatile_interned_detached_set_bytes;
+	uint64_t volatile_interned_detached_table_bytes;
+	uint64_t volatile_object_count_overflow_bytes;
+#endif
+	/*
+	 * index_memory_bytes without the terms that read back from
+	 * idx->counters; cachetag_gauges_store_locked() adds those under
+	 * counter_mtx.
+	 */
+	uint64_t index_memory_bytes_partial;
+};
+
 static void
-cachetag_account_objects_locked(struct cachetag_index *idx)
+cachetag_gauge_inputs_locked(const struct cachetag_index *idx,
+    struct cachetag_gauge_inputs *in)
 {
-	size_t active_bytes, count_bytes, object_bytes, side_buckets, side_bytes;
+
+	in->nobjects = idx->nobjects;
+	in->capobjects = idx->capobjects;
+	in->object_table_bytes = cachetag_object_table_bytes(idx);
+	in->object_count_sidecar_bytes =
+	    cachetag_object_count_sidecar_bytes(idx);
+	in->side_primary_buckets = idx->side_primary.buckets;
+	in->side_primary_live = idx->side_primary.live;
+	in->side_primary_tombstones = idx->side_primary.tombstones;
+	in->side_retiring_buckets = idx->side_retiring.buckets;
+	in->side_retiring_live = idx->side_retiring.live;
+	in->side_retiring_tombstones = idx->side_retiring.tombstones;
+	in->side_migrate_cursor = idx->side_migrate_cursor;
+	in->side_migration_active = idx->side_migration_active;
+	in->side_migration_reason = idx->side_migration_reason;
+	in->resize_low_water_active = idx->resize_low_water_active;
+	in->resize_low_water_force = idx->resize_low_water_force;
+	in->resize_low_water_start_usec = idx->resize_low_water_start_usec;
+	in->resize_low_water_live = idx->resize_low_water_live;
+	in->resize_low_water_target_objects = idx->resize_low_water_active ?
+	    cachetag_object_low_water_target_locked(idx) : 0;
+	in->resize_low_water_target_side_buckets = idx->resize_low_water_active ?
+	    cachetag_side_low_water_target_locked(idx) : 0;
+	in->resize_detached_bytes = idx->resize_detached_bytes;
+	in->namespace_len = idx->namespace_len;
+#if CACHE_TAG_SET_INTERNING
+	in->intern_sets = idx->intern_sets;
+	in->intern_refs = idx->intern_refs;
+	in->intern_hits = idx->intern_hits;
+	in->intern_misses = idx->intern_misses;
+	in->intern_bytes = idx->intern_bytes;
+	in->intern_nbuckets = idx->intern_nbuckets;
+	in->intern_old_nbuckets = idx->intern_old_nbuckets;
+	in->intern_migration_active = idx->intern_migration_active;
+	in->intern_detached_set_bytes = idx->intern_detached_set_bytes;
+	in->intern_detached_table_bytes = idx->intern_detached_table_bytes;
+	in->intern_overflow_sets = idx->intern_overflow_sets;
+#endif
+}
+
+static void
+cachetag_gauges_compute(const struct cachetag_gauge_inputs *in,
+    struct cachetag_gauges *g)
+{
+	size_t active_bytes, side_buckets, side_bytes;
 	size_t side_primary_bytes, side_retiring_bytes;
 	uint64_t now;
 
-	side_buckets = idx->side_primary.buckets + idx->side_retiring.buckets;
+	side_buckets = in->side_primary_buckets + in->side_retiring_buckets;
 	side_bytes = side_buckets * sizeof(struct cachetag_side_bucket);
 	side_primary_bytes =
-	    idx->side_primary.buckets * sizeof(struct cachetag_side_bucket);
+	    in->side_primary_buckets * sizeof(struct cachetag_side_bucket);
 	side_retiring_bytes =
-	    idx->side_retiring.buckets * sizeof(struct cachetag_side_bucket);
-	object_bytes = cachetag_object_table_bytes(idx);
-	count_bytes = cachetag_object_count_sidecar_bytes(idx);
-	active_bytes = object_bytes + count_bytes + side_primary_bytes;
-	now = cachetag_now_usec();
-	idx->counters.volatile_objects = idx->nobjects;
-	idx->counters.volatile_side_table_buckets = side_buckets;
-	idx->counters.volatile_side_table_bytes = side_bytes;
-	idx->counters.volatile_object_table_slots = idx->capobjects;
-	idx->counters.volatile_object_table_bytes = object_bytes;
-	idx->counters.volatile_object_count_sidecar_bytes = count_bytes;
-	idx->counters.object_segments =
-	    cachetag_object_segment_count_for_capacity(idx->capobjects);
-	idx->counters.object_published_slots = idx->capobjects;
-	idx->counters.object_published_bytes = object_bytes;
-	idx->counters.object_count_published_bytes = count_bytes;
-	idx->counters.side_primary_buckets = idx->side_primary.buckets;
-	idx->counters.side_primary_bytes = side_primary_bytes;
-	idx->counters.side_primary_live = idx->side_primary.live;
-	idx->counters.side_primary_tombstones = idx->side_primary.tombstones;
-	idx->counters.side_retiring_buckets = idx->side_retiring.buckets;
-	idx->counters.side_retiring_bytes = side_retiring_bytes;
-	idx->counters.side_retiring_live = idx->side_retiring.live;
-	idx->counters.side_retiring_tombstones = idx->side_retiring.tombstones;
-	if (idx->side_migration_active) {
-		idx->counters.side_resize_state = TAG_RESIZE_VSC_SIDE_MIGRATION;
-		idx->counters.side_resize_reason = idx->side_migration_reason;
-	} else if (idx->resize_low_water_active) {
-		if (idx->resize_low_water_force ||
-		    cachetag_elapsed_usec(idx->resize_low_water_start_usec, now) >=
+	    in->side_retiring_buckets * sizeof(struct cachetag_side_bucket);
+	active_bytes = in->object_table_bytes + in->object_count_sidecar_bytes +
+	    side_primary_bytes;
+	/* Only the low-water gauges need the clock. */
+	now = in->resize_low_water_active ? cachetag_now_usec() : 0;
+	g->volatile_objects = in->nobjects;
+	g->volatile_side_table_buckets = side_buckets;
+	g->volatile_side_table_bytes = side_bytes;
+	g->volatile_object_table_slots = in->capobjects;
+	g->volatile_object_table_bytes = in->object_table_bytes;
+	g->volatile_object_count_sidecar_bytes = in->object_count_sidecar_bytes;
+	g->object_segments =
+	    cachetag_object_segment_count_for_capacity(in->capobjects);
+	g->object_published_slots = in->capobjects;
+	g->object_published_bytes = in->object_table_bytes;
+	g->object_count_published_bytes = in->object_count_sidecar_bytes;
+	g->side_primary_buckets = in->side_primary_buckets;
+	g->side_primary_bytes = side_primary_bytes;
+	g->side_primary_live = in->side_primary_live;
+	g->side_primary_tombstones = in->side_primary_tombstones;
+	g->side_retiring_buckets = in->side_retiring_buckets;
+	g->side_retiring_bytes = side_retiring_bytes;
+	g->side_retiring_live = in->side_retiring_live;
+	g->side_retiring_tombstones = in->side_retiring_tombstones;
+	if (in->side_migration_active) {
+		g->side_resize_state = TAG_RESIZE_VSC_SIDE_MIGRATION;
+		g->side_resize_reason = in->side_migration_reason;
+	} else if (in->resize_low_water_active) {
+		if (in->resize_low_water_force ||
+		    cachetag_elapsed_usec(in->resize_low_water_start_usec, now) >=
 		    TAG_RESIZE_LOW_WATER_OBSERVE_USEC)
-			idx->counters.side_resize_state =
-			    TAG_RESIZE_VSC_LOW_WATER_READY;
+			g->side_resize_state = TAG_RESIZE_VSC_LOW_WATER_READY;
 		else
-			idx->counters.side_resize_state =
-			    TAG_RESIZE_VSC_LOW_WATER_OBSERVE;
-		idx->counters.side_resize_reason = TAG_SIDE_MIGRATION_SHRINK;
+			g->side_resize_state = TAG_RESIZE_VSC_LOW_WATER_OBSERVE;
+		g->side_resize_reason = TAG_SIDE_MIGRATION_SHRINK;
 	} else {
-		idx->counters.side_resize_state = TAG_RESIZE_VSC_IDLE;
-		idx->counters.side_resize_reason = TAG_SIDE_MIGRATION_NONE;
+		g->side_resize_state = TAG_RESIZE_VSC_IDLE;
+		g->side_resize_reason = TAG_SIDE_MIGRATION_NONE;
 	}
-	idx->counters.side_migration_buckets_remaining =
-	    idx->side_migration_active &&
-	    idx->side_retiring.buckets > idx->side_migrate_cursor ?
-	    idx->side_retiring.buckets - idx->side_migrate_cursor : 0;
-	idx->counters.side_migration_live_remaining =
-	    idx->side_migration_active ? idx->side_retiring.live : 0;
-	idx->counters.resize_low_water_active =
-	    idx->resize_low_water_active != 0;
-	idx->counters.resize_low_water_elapsed_usec =
-	    idx->resize_low_water_active ?
-	    cachetag_elapsed_usec(idx->resize_low_water_start_usec, now) : 0;
-	idx->counters.resize_low_water_observed_live =
-	    idx->resize_low_water_active ? idx->resize_low_water_live : 0;
-	idx->counters.resize_low_water_target_objects =
-	    idx->resize_low_water_active ? cachetag_object_low_water_target_locked(idx) : 0;
-	idx->counters.resize_low_water_target_side_buckets =
-	    idx->resize_low_water_active ? cachetag_side_low_water_target_locked(idx) : 0;
-	idx->counters.resize_active_bytes = active_bytes;
-	idx->counters.resize_retiring_bytes = side_retiring_bytes;
-	idx->counters.resize_detached_bytes = idx->resize_detached_bytes;
-	idx->counters.resize_reconciled_bytes = active_bytes +
-	    side_retiring_bytes + idx->resize_detached_bytes;
+	g->side_migration_buckets_remaining =
+	    in->side_migration_active &&
+	    in->side_retiring_buckets > in->side_migrate_cursor ?
+	    in->side_retiring_buckets - in->side_migrate_cursor : 0;
+	g->side_migration_live_remaining =
+	    in->side_migration_active ? in->side_retiring_live : 0;
+	g->resize_low_water_active = in->resize_low_water_active != 0;
+	g->resize_low_water_elapsed_usec = in->resize_low_water_active ?
+	    cachetag_elapsed_usec(in->resize_low_water_start_usec, now) : 0;
+	g->resize_low_water_observed_live =
+	    in->resize_low_water_active ? in->resize_low_water_live : 0;
+	g->resize_low_water_target_objects =
+	    in->resize_low_water_target_objects;
+	g->resize_low_water_target_side_buckets =
+	    in->resize_low_water_target_side_buckets;
+	g->resize_active_bytes = active_bytes;
+	g->resize_retiring_bytes = side_retiring_bytes;
+	g->resize_detached_bytes = in->resize_detached_bytes;
+	g->resize_reconciled_bytes = active_bytes + side_retiring_bytes +
+	    in->resize_detached_bytes;
 #if CACHE_TAG_SET_INTERNING
-	idx->counters.volatile_interned_sets = idx->intern_sets;
-	idx->counters.volatile_interned_set_refs = idx->intern_refs;
-	idx->counters.volatile_interned_set_hits = idx->intern_hits;
-	idx->counters.volatile_interned_set_misses = idx->intern_misses;
-	idx->counters.volatile_interned_set_bytes = idx->intern_bytes;
+	g->volatile_interned_sets = in->intern_sets;
+	g->volatile_interned_set_refs = in->intern_refs;
+	g->volatile_interned_set_hits = in->intern_hits;
+	g->volatile_interned_set_misses = in->intern_misses;
+	g->volatile_interned_set_bytes = in->intern_bytes;
+	g->volatile_interned_table_bytes =
+	    cachetag_intern_table_bytes(in->intern_nbuckets) +
+	    cachetag_intern_table_bytes(in->intern_old_nbuckets);
+	g->volatile_interned_migration_active = in->intern_migration_active;
+	g->volatile_interned_old_table_bytes =
+	    cachetag_intern_table_bytes(in->intern_old_nbuckets);
+	g->volatile_interned_detached_set_bytes = in->intern_detached_set_bytes;
+	g->volatile_interned_detached_table_bytes =
+	    in->intern_detached_table_bytes;
+	g->volatile_object_count_overflow_bytes =
+	    in->intern_overflow_sets * sizeof(struct cachetag_interned_set);
+	g->index_memory_bytes_partial = sizeof(struct cachetag_index) +
+		in->namespace_len + 1 +
+		in->object_table_bytes + in->object_count_sidecar_bytes +
+		side_bytes +
+		in->resize_detached_bytes +
+		g->volatile_interned_set_bytes +
+		g->volatile_interned_table_bytes +
+		g->volatile_interned_detached_set_bytes +
+		g->volatile_interned_detached_table_bytes;
+#else
+	g->index_memory_bytes_partial = sizeof(struct cachetag_index) +
+		in->namespace_len + 1 +
+		in->object_table_bytes + in->object_count_sidecar_bytes +
+		side_bytes +
+		in->resize_detached_bytes;
+#endif
+}
+
+static void
+cachetag_gauges_store_locked(struct cachetag_index *idx,
+    const struct cachetag_gauges *g)
+{
+
+	idx->counters.volatile_objects = g->volatile_objects;
+	idx->counters.volatile_side_table_buckets =
+	    g->volatile_side_table_buckets;
+	idx->counters.volatile_side_table_bytes = g->volatile_side_table_bytes;
+	idx->counters.volatile_object_table_slots =
+	    g->volatile_object_table_slots;
+	idx->counters.volatile_object_table_bytes =
+	    g->volatile_object_table_bytes;
+	idx->counters.volatile_object_count_sidecar_bytes =
+	    g->volatile_object_count_sidecar_bytes;
+	idx->counters.object_segments = g->object_segments;
+	idx->counters.object_published_slots = g->object_published_slots;
+	idx->counters.object_published_bytes = g->object_published_bytes;
+	idx->counters.object_count_published_bytes =
+	    g->object_count_published_bytes;
+	idx->counters.side_primary_buckets = g->side_primary_buckets;
+	idx->counters.side_primary_bytes = g->side_primary_bytes;
+	idx->counters.side_primary_live = g->side_primary_live;
+	idx->counters.side_primary_tombstones = g->side_primary_tombstones;
+	idx->counters.side_retiring_buckets = g->side_retiring_buckets;
+	idx->counters.side_retiring_bytes = g->side_retiring_bytes;
+	idx->counters.side_retiring_live = g->side_retiring_live;
+	idx->counters.side_retiring_tombstones = g->side_retiring_tombstones;
+	idx->counters.side_resize_state = g->side_resize_state;
+	idx->counters.side_resize_reason = g->side_resize_reason;
+	idx->counters.side_migration_buckets_remaining =
+	    g->side_migration_buckets_remaining;
+	idx->counters.side_migration_live_remaining =
+	    g->side_migration_live_remaining;
+	idx->counters.resize_low_water_active = g->resize_low_water_active;
+	idx->counters.resize_low_water_elapsed_usec =
+	    g->resize_low_water_elapsed_usec;
+	idx->counters.resize_low_water_observed_live =
+	    g->resize_low_water_observed_live;
+	idx->counters.resize_low_water_target_objects =
+	    g->resize_low_water_target_objects;
+	idx->counters.resize_low_water_target_side_buckets =
+	    g->resize_low_water_target_side_buckets;
+	idx->counters.resize_active_bytes = g->resize_active_bytes;
+	idx->counters.resize_retiring_bytes = g->resize_retiring_bytes;
+	idx->counters.resize_detached_bytes = g->resize_detached_bytes;
+	idx->counters.resize_reconciled_bytes = g->resize_reconciled_bytes;
+#if CACHE_TAG_SET_INTERNING
+	idx->counters.volatile_interned_sets = g->volatile_interned_sets;
+	idx->counters.volatile_interned_set_refs = g->volatile_interned_set_refs;
+	idx->counters.volatile_interned_set_hits = g->volatile_interned_set_hits;
+	idx->counters.volatile_interned_set_misses =
+	    g->volatile_interned_set_misses;
+	idx->counters.volatile_interned_set_bytes =
+	    g->volatile_interned_set_bytes;
 	idx->counters.volatile_interned_table_bytes =
-	    cachetag_intern_table_bytes(idx->intern_nbuckets) +
-	    cachetag_intern_table_bytes(idx->intern_old_nbuckets);
+	    g->volatile_interned_table_bytes;
 	idx->counters.volatile_interned_migration_active =
-	    idx->intern_migration_active;
+	    g->volatile_interned_migration_active;
 	idx->counters.volatile_interned_old_table_bytes =
-	    cachetag_intern_table_bytes(idx->intern_old_nbuckets);
+	    g->volatile_interned_old_table_bytes;
 	idx->counters.volatile_interned_detached_set_bytes =
-	    idx->intern_detached_set_bytes;
+	    g->volatile_interned_detached_set_bytes;
 	idx->counters.volatile_interned_detached_table_bytes =
-	    idx->intern_detached_table_bytes;
+	    g->volatile_interned_detached_table_bytes;
 	/*
 	 * The intern_*_timing accumulators are published by the generated
 	 * fan-out in cachetag_snapshot_counters(), not copied wholesale here.
 	 */
 	idx->counters.volatile_object_count_overflow_bytes =
-	    idx->intern_overflow_sets * sizeof(struct cachetag_interned_set);
-	idx->counters.index_memory_bytes = sizeof *idx + idx->namespace_len + 1 +
-		object_bytes + count_bytes +
-		side_bytes +
-		idx->resize_detached_bytes +
-		idx->counters.volatile_interned_set_bytes +
-		idx->counters.volatile_interned_table_bytes +
-		idx->counters.volatile_interned_detached_set_bytes +
-		idx->counters.volatile_interned_detached_table_bytes +
+	    g->volatile_object_count_overflow_bytes;
+	idx->counters.index_memory_bytes = g->index_memory_bytes_partial +
 		idx->counters.purgemap_bytes;
 #else
 	idx->counters.volatile_interned_sets = 0;
@@ -1218,10 +1437,7 @@ cachetag_account_objects_locked(struct cachetag_index *idx)
 	 * accumulators live on the index, this build never writes them, and
 	 * the fields are zero from ALLOC_OBJ.
 	 */
-	idx->counters.index_memory_bytes = sizeof *idx + idx->namespace_len + 1 +
-		object_bytes + count_bytes +
-		side_bytes +
-		idx->resize_detached_bytes +
+	idx->counters.index_memory_bytes = g->index_memory_bytes_partial +
 		(idx->counters.volatile_edges -
 		idx->counters.volatile_inline_folds) * sizeof(uint64_t) +
 		idx->counters.volatile_object_count_overflow_bytes +
@@ -3292,6 +3508,8 @@ cachetag_record_sweep_purgemap(struct cachetag_index *idx,
     struct cachetag_sweep_observation *obs)
 {
 	struct cachetag_purgemap *pm;
+	struct cachetag_gauge_inputs gauge_in;
+	struct cachetag_gauges gauges;
 	size_t batch_scanned, u;
 	uint64_t batch_objects, batch_start, batch_usec, batch_usecs;
 	uint64_t gap_start, lock_start, lock_acquired, lock_released;
@@ -3422,7 +3640,9 @@ cachetag_record_sweep_purgemap(struct cachetag_index *idx,
 		obs->remaining = idx->sweep_remaining;
 		PTOK(pthread_mutex_lock(&idx->counter_mtx));
 		idx->counters.sweep_remaining = idx->sweep_remaining;
-		cachetag_account_objects_locked(idx);
+		cachetag_gauge_inputs_locked(idx, &gauge_in);
+		cachetag_gauges_compute(&gauge_in, &gauges);
+		cachetag_gauges_store_locked(idx, &gauges);
 		PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 		lock_released = cachetag_now_usec();
 		batch_usec = cachetag_elapsed_usec(lock_acquired, lock_released);
@@ -3472,7 +3692,9 @@ out:
 	obs->side_bytes_after = cachetag_side_table_bytes(idx);
 	PTOK(pthread_mutex_lock(&idx->counter_mtx));
 	idx->counters.sweep_remaining = 0;
-	cachetag_account_objects_locked(idx);
+	cachetag_gauge_inputs_locked(idx, &gauge_in);
+	cachetag_gauges_compute(&gauge_in, &gauges);
+	cachetag_gauges_store_locked(idx, &gauges);
 	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
 	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
 #if CACHE_TAG_SET_INTERNING
@@ -3698,17 +3920,23 @@ void
 cachetag_snapshot_counters(struct cachetag_index *idx,
     struct cachetag_counters *counters)
 {
+	struct cachetag_gauge_inputs gauge_in;
+	struct cachetag_gauges gauges;
 	struct cachetag_wal_stats wal;
 
+	/* Copy the object-owned inputs before doing the gauge arithmetic so a
+	 * counter snapshot never nests counter_mtx inside the request-path
+	 * obj_mtx. */
 	PTOK(pthread_mutex_lock(&idx->obj_mtx));
+	cachetag_gauge_inputs_locked(idx, &gauge_in);
+	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	cachetag_gauges_compute(&gauge_in, &gauges);
 	PTOK(pthread_mutex_lock(&idx->counter_mtx));
-	cachetag_account_objects_locked(idx);
+	cachetag_gauges_store_locked(idx, &gauges);
 	*counters = idx->counters;
-	/*
-	 * Fan the family accumulators out into the flat published struct,
-	 * still under counter_mtx and obj_mtx.  Same lock scope and the same
-	 * words as the wholesale substruct copies this replaced.
-	 */
+	/* Family accumulators stay structured for update sites but the VSC schema
+	 * is flat, so publish every member while counter_mtx keeps each family
+	 * internally consistent. */
 #define CACHETAG_FANOUT_LOCKWAIT_MEMBER(g, i, m)			\
 	counters->g##_obj_mtx_##m = idx->i.m;
 #define CACHETAG_FANOUT_LOCKWAIT_GROUP(g, i)				\
@@ -3729,8 +3957,8 @@ cachetag_snapshot_counters(struct cachetag_index *idx,
 	/*
 	 * Only guarded family: the intern_*_timing accumulators exist only in
 	 * a set-interning build.  Elsewhere the fields stay zero from
-	 * ALLOC_OBJ, which is what the memset()s in the non-interning branch
-	 * of cachetag_account_objects_locked() used to spell out.
+	 * ALLOC_OBJ, which is what the zeroing in the non-interning branch of
+	 * cachetag_gauges_store_locked() spells out.
 	 */
 #define CACHETAG_FANOUT_TIMING_MEMBER(g, i, m)				\
 	counters->g##_##m = idx->i.m;
@@ -3741,7 +3969,6 @@ cachetag_snapshot_counters(struct cachetag_index *idx,
 #undef CACHETAG_FANOUT_TIMING_MEMBER
 #endif
 	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
-	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
 	counters->publication_phase = __atomic_load_n(
 	    &idx->publication_gate.phase, __ATOMIC_SEQ_CST) & 1U;
 	counters->publication_readers_phase0 =
