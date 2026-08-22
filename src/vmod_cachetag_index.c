@@ -3117,6 +3117,23 @@ again:
 	}
 	r = cachetag_side_prepare_insert_locked(idx, &side_buckets,
 	    &side_reason, &detached_side_map);
+	if (r == EBUSY && idx->side_migration_active &&
+	    idx->side_migration_auto) {
+		/* Failing closed here would make attachment depend on whether the
+		 * resize worker happened to run between concurrent inserts. Advance
+		 * its bounded maintenance path and release obj_mtx between batches. */
+		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+		free(detached_side_map);
+		detached_side_map = NULL;
+		if (cachetag_resize_maintenance(idx)) {
+			PTOK(pthread_mutex_lock(&idx->obj_mtx));
+			goto again;
+		}
+	#if CACHE_TAG_SET_INTERNING
+		cachetag_intern_attach_cleanup(idx, &cleanup, candidate, 1);
+	#endif
+		return (r);
+	}
 	if (r == EAGAIN) {
 		old_side_buckets = idx->side_primary.buckets;
 		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
