@@ -3867,11 +3867,15 @@ cachetag_index_detach_all(struct cachetag_index *idx)
 	for (u = 0; u < idx->nobjects; u++)
 		cachetag_objent_dispose(idx, u);
 #endif
+	/* The index is empty from here on: detaching the segments asserts that
+	 * nothing is still indexed, so the count has to be cleared before the
+	 * call, not after it.  Taking a populated namespace cold (a VCL discard
+	 * with live volatile membership) panicked on that assert. */
+	idx->nobjects = 0;
 	ndetached_segments = cachetag_object_detach_segments_locked(idx, 0,
 	    detached_segments);
 	cachetag_side_detach_all_locked(idx, &detached_primary,
 	    &detached_retiring);
-	idx->nobjects = 0;
 	idx->capobjects = 0;
 	PTOK(pthread_mutex_lock(&idx->counter_mtx));
 	idx->counters.volatile_edges = 0;

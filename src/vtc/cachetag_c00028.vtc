@@ -1,0 +1,48 @@
+vtest "discarding a populated namespace detaches its object segments"
+
+server s1 {
+	rxreq
+	expect req.url == "/hot"
+	txresp -body "hot"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("populated", sweep_interval = 0s);
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("hot");
+		set beresp.ttl = 1h;
+	}
+} -start
+
+client c1 {
+	txreq -url "/hot"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "hot"
+} -run
+
+vinyl v1 -vcl+backend {
+	sub vcl_recv {
+		return (synth(204));
+	}
+}
+
+vinyl v1 -cliok "vcl.use vcl2"
+vinyl v1 -cliok "vcl.discard vcl1"
+
+# Cooling vcl1 takes a namespace with live volatile membership through the
+# complete detach path. The child panic this guards against made the CLI fail.
+vinyl v1 -cliok "vcl.list"
+
+server s1 -wait
