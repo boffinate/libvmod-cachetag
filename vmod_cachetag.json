@@ -5,7 +5,7 @@
         "branches": {
             "9.0": "main"
         },
-        "doc_path": "docs/vmod_cachetag.rst",
+        "doc_path": "docs/vmod_cachetag.md",
         "project": "libvmod-cachetag",
         "user": "boffinate",
         "vcc_path": "src/vmod_cachetag_core.vcc"

@@ -151,7 +151,7 @@ test -f %{buildroot}%{vinyl_vmoddir}/libvmod_cachetag.so
 # libvmod-cachetag-1.0.0.tar.gz.
 %license LICENSE
 %doc README.md
-%doc docs/vmod_cachetag.rst
+%doc docs/vmod_cachetag.md
 %{vinyl_vmoddir}/libvmod_cachetag.so
 %{_mandir}/man3/vmod_cachetag.3*
 %{_pkgdocdir}/vmod_cachetag.vcc

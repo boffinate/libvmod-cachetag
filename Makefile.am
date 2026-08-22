@@ -9,7 +9,7 @@ EXTRA_DIST = \
 	README.md \
 	USAGE.md \
 	INSTALL.md \
-	docs/vmod_cachetag.rst \
+	docs/vmod_cachetag.md \
 	patches/fellow/README.md \
 	patches/fellow/0002-add-fellow-object-attr-provider.patch \
 	patches/fellow/0003-fix-fellow-shutdown-drain-races.patch \

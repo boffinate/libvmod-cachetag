@@ -128,7 +128,7 @@ The file list was derived from the build system, not guessed:
 
 `<vmoddir>` is not hard-coded. `vinylapi.pc` defines `vmoddir=${libdir}/vinyl-cache/vmods`, and Vinyl's `vinyl.m4` resolves it with `pkg-config --define-variable=libdir=$libdir`. Both recipes therefore take `libdir` from the installed development package rather than from the packaging default, so the VMOD lands in the directory the packaged runtime actually searches, and then assert the result equals `@VINYL_VMODDIR@`.
 
-Two further files are packaged by the recipes rather than by `make install`: `README.md` and `docs/vmod_cachetag.rst` (both in `EXTRA_DIST`, so both present in the release tarball), plus `LICENSE` as the RPM `%license` file — see the gaps section.
+Two further files are packaged by the recipes rather than by `make install`: `README.md` and `docs/vmod_cachetag.md` (both in `EXTRA_DIST`, so both present in the release tarball), plus `LICENSE` as the RPM `%license` file — see the gaps section.
 
 Removed during staging: `libvmod_cachetag.la`. Static archives cannot appear, because `configure.ac` uses `LT_INIT([dlopen disable-static])`; the `*.a` sweep is belt and braces. `cachetag_wal_test` is a `check_PROGRAMS` binary and is never installed.
 
@@ -195,7 +195,7 @@ Everything that needs a Debian or RPM toolchain, or a Vinyl package to build aga
 
 ## Known gaps
 
-- **`LICENSE` is distributed** since it was added to `Makefile.am`'s `EXTRA_DIST` (2026-07-24); the spec's `%license LICENSE` builds. `USAGE.md` and `INSTALL.md` joined `EXTRA_DIST` in the public-release rewrite, so both now ship in the archive; neither is packaged. The same rewrite dropped `docs/vmod_cachetag.rst`, which both recipes do package — that made the v1.0.0 archive unbuildable as a package, and v1.0.1 restores it to `EXTRA_DIST`.
+- **`LICENSE` is distributed** since it was added to `Makefile.am`'s `EXTRA_DIST` (2026-07-24); the spec's `%license LICENSE` builds. `USAGE.md` and `INSTALL.md` joined `EXTRA_DIST` in the public-release rewrite, so both now ship in the archive; neither is packaged. The same rewrite dropped the VMOD reference document, which both recipes do package — that made the v1.0.0 archive unbuildable as a package, and v1.0.1 restores it to `EXTRA_DIST`.
 - **`Multi-Arch: same` is not set** on the Debian binary package. Whether it is correct depends on whether the Vinyl packages install VMODs under a multiarch `libdir` or a plain `/usr/lib/vinyl-cache/vmods`, which is decided by plan step 7. Revisit once that is settled; the `@VINYL_VMODDIR@` assertion in `debian/rules` will fail loudly if the assumption drifts.
 - **The maintainer address does not accept mail.** The identity was decided 2026-07-25 as `Boffinate <noreply@boffinate.com>`; it is deliberately a no-reply address, so every published package must carry a `Homepage`/`Vcs-Browser` (Debian) or `URL` (RPM) field pointing at the GitHub repository, whose issue tracker is the real support and security-report channel.
 - **No `debian/patches`.** There are no downstream patches. If one is ever needed, add `debian/patches/` with a `series` file; the source format already supports it.
