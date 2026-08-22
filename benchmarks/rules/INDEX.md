@@ -43,7 +43,7 @@ feature.
 - [BR-009](BR-009-debug-none-vtc-mode-throttle.md) — benchmark VTCs must set `-p debug=none`
 - [BR-014](BR-014-hardware-cohorts.md) — never compare across hardware cohorts or host rebuilds
 - [BR-019](BR-019-deterministic-work-volume.md) — attribution requires a deterministic work volume
-- [BR-024](BR-024-same-code-noise-floor.md) — establish a same-code (A/A) noise floor before judging deltas
+- [BR-024](BR-024-same-code-noise-floor.md) — establish a repeated same-code noise floor and complete metric-specific coverage before judging deltas
 - [BR-025](BR-025-cpu-frequency-and-power-state.md) — record CPU governor/boost state; drift is a cohort change
 - [BR-026](BR-026-campaign-scope-and-evidence-budget.md) — freeze how much evidence is enough before remote execution; do not silently promote a screen into an acceptance campaign
 

@@ -33,7 +33,12 @@ CACHE_TAG_BENCH_OBJECTS
 CACHE_TAG_BENCH_BUCKETS
 CACHE_TAG_BENCH_STORAGE
 CACHE_TAG_BENCH_HTTP_TIMEOUT
-CACHE_TAG_BENCH_RESIDENCY_VALIDATE_OBJECTS'
+CACHE_TAG_BENCH_RESIDENCY_VALIDATE_OBJECTS
+CACHE_TAG_BENCH_PERF_STAT
+CACHE_TAG_BENCH_PERF_STAT_RUNS
+CACHE_TAG_BENCH_PERF_STAT_WORKLOAD
+CACHE_TAG_BENCH_PERF_STAT_EVENTS
+CACHE_TAG_BENCH_STALE_DELIVER'
 
 printf '%s\n' "$transport_names" | while IFS= read -r name; do
 	grep -F "${name}=\$(quote \"\$" "$script" >/dev/null
@@ -51,9 +56,21 @@ grep -F 'export BENCH_PERF_RECORD_CALL_GRAPH="\$CACHE_TAG_BENCH_PERF_RECORD_CALL
 grep -F 'envs="\$envs BENCH_CONCURRENT_TARGET_RPS=\$CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS"' "$script" >/dev/null
 grep -F 'envs="\$envs OBJECTS=\$CACHE_TAG_BENCH_OBJECTS"' "$script" >/dev/null
 grep -F 'envs="\$envs PERF_MODE=off"' "$script" >/dev/null
+grep -F 'export BENCH_PERF_STAT="\$CACHE_TAG_BENCH_PERF_STAT"' "$script" >/dev/null
+grep -F 'export BENCH_PERF_STAT_RUNS="\$CACHE_TAG_BENCH_PERF_STAT_RUNS"' "$script" >/dev/null
+grep -F 'export BENCH_PERF_STAT_WORKLOAD="\$CACHE_TAG_BENCH_PERF_STAT_WORKLOAD"' "$script" >/dev/null
+grep -F 'export BENCH_PERF_STAT_EVENTS="\$CACHE_TAG_BENCH_PERF_STAT_EVENTS"' "$script" >/dev/null
+grep -F 'export BENCH_STALE_DELIVER="\$CACHE_TAG_BENCH_STALE_DELIVER"' "$script" >/dev/null
+# Both perf attachments must stay single-profiler on the remote host.
+[ "$(grep -Fc 'envs="\$envs PERF_MODE=off"' "$script")" -eq 2 ]
 
 if grep -F 'CACHE_TAG_BENCH_PERF_RECORD_WORKLOAD=$(quote "$bench_workload_filter_override")' "$script" >/dev/null; then
 	echo 'perf workload transport is coupled to workload filter' >&2
+	exit 1
+fi
+
+if grep -F 'CACHE_TAG_BENCH_PERF_STAT_WORKLOAD=$(quote "$bench_perf_record_workload_override")' "$script" >/dev/null; then
+	echo 'perf stat workload transport is coupled to perf record workload' >&2
 	exit 1
 fi
 

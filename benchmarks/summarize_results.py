@@ -32,6 +32,19 @@ COMPARISON_COHORT_FIELDS = (
     "cpu_model", "cpu_topology", "cpu_smt_siblings", "cpu_scaling_governors",
     "cpu_frequency_state", "cpu_boost_state", "kernel", "nproc", "mem_total_kb",
 )
+PERF_STAT_ROW_METRICS = (
+    "vinyld_warm_instructions",
+    "vinyld_warm_cycles",
+    "vinyld_warm_task_clock_seconds",
+    "vinyld_warm_instructions_per_hit",
+    "vinyld_warm_cycles_per_hit",
+    "vinyld_warm_task_clock_seconds_per_hit",
+    "vinyld_warm_ipc",
+    "vinyld_warm_instructions_running_percent",
+    "vinyld_warm_cycles_running_percent",
+    "vinyld_warm_task_clock_running_percent",
+    "vinyld_warm_perf_stat_running_percent_min",
+)
 PURGEMAP_FELLOW_DIRECT_COUNTERS = (
     "purgemap_fellow_attr_objects_written",
     "purgemap_fellow_attr_bytes_written",
@@ -192,6 +205,75 @@ def parse_vsc_stats(path: Path) -> dict[str, int]:
     except FileNotFoundError:
         pass
     return values
+
+
+def parse_perf_stat_csv_details(path: Path) -> dict[str, dict[str, float | str]]:
+    """Read counted perf events, units and event running percentages."""
+    events: dict[str, dict[str, float | str]] = {}
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            fields = line.split(",")
+            if len(fields) < 3:
+                continue
+            event = fields[2].strip().split(":", 1)[0]
+            if not event:
+                continue
+            try:
+                count = float(fields[0].strip())
+            except ValueError:
+                continue
+            details: dict[str, float | str] = {
+                "count": count,
+                "unit": fields[1].strip(),
+            }
+            if len(fields) > 4:
+                try:
+                    details["running_percent"] = float(fields[4].strip().rstrip("%"))
+                except ValueError:
+                    pass
+            events[event] = details
+    except FileNotFoundError:
+        pass
+    return events
+
+
+def parse_perf_stat_csv(path: Path) -> dict[str, int | float]:
+    """Read a `perf stat -x ,` CSV into {event: count}.
+
+    Absent counters stay absent. `perf` writes `<not counted>` or
+    `<not supported>` in the value column when the PMU is blocked or
+    virtualised away, and those rows must not be read as zeros
+    (benchmarks/rules/BR-012: local macOS rows have no hardware counters).
+    """
+    values: dict[str, int | float] = {}
+    for event, details in parse_perf_stat_csv_details(path).items():
+        count = float(details["count"])
+        values[event] = int(count) if count.is_integer() else count
+    return values
+
+
+def perf_stat_seconds(details: dict[str, float | str] | None) -> float | None:
+    if details is None:
+        return None
+    count = float(details["count"])
+    unit = str(details.get("unit") or "").lower()
+    if unit in {"msec", "ms"}:
+        return count / 1000.0
+    if unit in {"usec", "us"}:
+        return count / 1_000_000.0
+    if unit in {"nsec", "ns"}:
+        return count / 1_000_000_000.0
+    if unit in {"sec", "seconds", "s"}:
+        return count
+    return None
+
+
+def perf_stat_running_percent(details: dict[str, float | str] | None) -> float | None:
+    if details is None or "running_percent" not in details:
+        return None
+    return float(details["running_percent"])
 
 
 def as_float(values: dict[str, str], key: str) -> float | None:
@@ -641,6 +723,15 @@ def fmt_on_off(value: float | None) -> str:
     if value is None:
         return "n/a"
     return "on" if value >= 0.5 else "off"
+
+
+def fmt_vcl_shape(value: str | None) -> str:
+    """Render BENCH_STALE_DELIVER as the VCL shape it selects."""
+    if not value:
+        return "unrecorded"
+    if value in {"1", "on", "yes", "true"}:
+        return "1 (two-call: vcl_hit + vcl_deliver)"
+    return "0 (one-call: vcl_hit)"
 
 
 def fmt_ok_fail(value: float | None) -> str:
@@ -1670,6 +1761,29 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
         warm_cache_main_cpu_seconds = as_float(
             time_values, "system_phase_warm_cache_main_cpu_seconds"
         )
+        # Optional: present only when the row ran with BENCH_PERF_STAT and the
+        # host could actually count. Missing means absent, never zero, and is
+        # never a validity failure.
+        warm_perf_stat_details = parse_perf_stat_csv_details(
+            result_dir / f"{workload}.run-{run}.warm.perf-stat.csv"
+        )
+        warm_instructions_event = warm_perf_stat_details.get("instructions")
+        warm_cycles_event = warm_perf_stat_details.get("cycles")
+        warm_task_clock_event = warm_perf_stat_details.get("task-clock")
+        warm_instructions = (
+            int(float(warm_instructions_event["count"])) if warm_instructions_event else None
+        )
+        warm_cycles = int(float(warm_cycles_event["count"])) if warm_cycles_event else None
+        warm_task_clock_seconds = perf_stat_seconds(warm_task_clock_event)
+        warm_running_percents = [
+            value
+            for value in (
+                perf_stat_running_percent(warm_instructions_event),
+                perf_stat_running_percent(warm_cycles_event),
+                perf_stat_running_percent(warm_task_clock_event),
+            )
+            if value is not None
+        ]
         live_objects = stat_suffix(stats, "n_object")
         mem_edges = cachetag_counter(stats, "volatile_edges")
         if mem_edges is None:
@@ -1943,6 +2057,29 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
             "cache_main_warm_cpu_seconds": warm_cache_main_cpu_seconds,
             "cache_main_warm_cpu_seconds_per_hit": ratio(
                 warm_cache_main_cpu_seconds, warm_hits
+            ),
+            "vinyld_warm_instructions": warm_instructions,
+            "vinyld_warm_cycles": warm_cycles,
+            "vinyld_warm_task_clock_seconds": warm_task_clock_seconds,
+            # Same denominator as cache_main_warm_cpu_seconds_per_hit, so the
+            # two warm-cost views divide by the same work volume (BR-019).
+            "vinyld_warm_instructions_per_hit": ratio(warm_instructions, warm_hits),
+            "vinyld_warm_cycles_per_hit": ratio(warm_cycles, warm_hits),
+            "vinyld_warm_task_clock_seconds_per_hit": ratio(
+                warm_task_clock_seconds, warm_hits
+            ),
+            "vinyld_warm_ipc": ratio(warm_instructions, warm_cycles),
+            "vinyld_warm_instructions_running_percent": perf_stat_running_percent(
+                warm_instructions_event
+            ),
+            "vinyld_warm_cycles_running_percent": perf_stat_running_percent(
+                warm_cycles_event
+            ),
+            "vinyld_warm_task_clock_running_percent": perf_stat_running_percent(
+                warm_task_clock_event
+            ),
+            "vinyld_warm_perf_stat_running_percent_min": (
+                min(warm_running_percents) if warm_running_percents else None
             ),
             "driver_concurrent_reads": concurrent_reads,
             "driver_concurrent_inserts": concurrent_inserts,
@@ -2429,6 +2566,17 @@ def aggregate_workload_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "driver_warm_latency_max_seconds",
             "cache_main_warm_cpu_seconds",
             "cache_main_warm_cpu_seconds_per_hit",
+            "vinyld_warm_instructions",
+            "vinyld_warm_cycles",
+            "vinyld_warm_task_clock_seconds",
+            "vinyld_warm_instructions_per_hit",
+            "vinyld_warm_cycles_per_hit",
+            "vinyld_warm_task_clock_seconds_per_hit",
+            "vinyld_warm_ipc",
+            "vinyld_warm_instructions_running_percent",
+            "vinyld_warm_cycles_running_percent",
+            "vinyld_warm_task_clock_running_percent",
+            "vinyld_warm_perf_stat_running_percent_min",
             "driver_concurrent_reads",
             "driver_concurrent_inserts",
             "driver_concurrent_purges",
@@ -2588,6 +2736,7 @@ def aggregate_workload_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             summary[field] = vals[0] if len(vals) == 1 else ",".join(vals)
         for field in numeric_fields:
             vals = [float(row[field]) for row in valid_items if row.get(field) is not None]
+            summary[field + "_observations"] = len(vals)
             summary[field + "_median"] = median(vals)
             summary[field + "_min"] = min(vals) if vals else None
             summary[field + "_max"] = max(vals) if vals else None
@@ -2647,6 +2796,15 @@ def result_data(result_dir: Path) -> dict[str, Any]:
         "hardware": hardware_fingerprint(result_dir),
         "comparison_cohort_fingerprint": metadata.get("benchmark_cohort_fingerprint")
         or remote.get("benchmark_cohort_fingerprint"),
+        # The measured VCL shape. It is inside the cohort fingerprint, so a
+        # one-call row can never merge with a two-call row; this field is what
+        # makes the difference readable instead of only enforced.
+        "bench_stale_deliver": metadata.get("bench_stale_deliver")
+        or command_env_value(remote, "BENCH_STALE_DELIVER")
+        or "",
+        "bench_perf_stat": metadata.get("bench_perf_stat")
+        or command_env_value(remote, "BENCH_PERF_STAT")
+        or "",
         "runs": {
             "pass": valid_count,
             "fail": invalid_count,
@@ -2936,6 +3094,7 @@ def sweep_configuration(result_dir: Path) -> dict[str, Any]:
     env_names = {
         "cachetag_configure_args": "CACHE_TAG_CONFIGURE_ARGS",
         "bench_set_interning": "BENCH_SET_INTERNING",
+        "bench_stale_deliver": "BENCH_STALE_DELIVER",
         "objects": "OBJECTS",
         "tags_per_object": "TAGS_PER_OBJECT",
         "bench_profile": "BENCH_PROFILE",
@@ -3120,6 +3279,9 @@ def summarize_result(result_dir: Path) -> tuple[str, str]:
         f"Path: {data['path']}",
         f"Hardware: {data['hardware']}",
         f"Runs: valid={data['runs']['valid']} invalid={data['runs']['invalid']} process_pass={data['runs']['process_pass']} process_fail={data['runs']['process_fail']} total={data['runs']['total']}",
+        f"VCL shape: stale_deliver={fmt_vcl_shape(data.get('bench_stale_deliver'))} "
+        f"perf_stat={data.get('bench_perf_stat') or 'n/a'} "
+        f"cohort={data.get('comparison_cohort_fingerprint') or 'n/a'}",
     ]
     wall = data["wall_seconds"]
     if wall["min"] is not None:
@@ -3215,6 +3377,30 @@ def summarize_result(result_dir: Path) -> tuple[str, str]:
                     f"warm_p99={fmt_float(scaled(row.get('driver_warm_latency_p99_seconds_median'), 1_000), 'ms')} "
                     f"warm_max={fmt_float(scaled(row.get('driver_warm_latency_max_seconds_median'), 1_000), 'ms')}"
                 )
+            valid_runs = row.get("valid_runs")
+            perf_parts = []
+            for label, field, scale, unit in (
+                ("instructions", "vinyld_warm_instructions", 1.0, ""),
+                ("cycles", "vinyld_warm_cycles", 1.0, ""),
+                ("task_clock", "vinyld_warm_task_clock_seconds", 1.0, "s"),
+                ("instructions/hit", "vinyld_warm_instructions_per_hit", 1.0, ""),
+                ("cycles/hit", "vinyld_warm_cycles_per_hit", 1.0, ""),
+                ("task_clock/hit", "vinyld_warm_task_clock_seconds_per_hit", 1_000_000.0, "us/hit"),
+                ("ipc", "vinyld_warm_ipc", 1.0, ""),
+                ("running_min", "vinyld_warm_perf_stat_running_percent_min", 1.0, "%"),
+            ):
+                value = row.get(field + "_median")
+                if value is None:
+                    continue
+                observations = row.get(field + "_observations")
+                coverage = f"{observations}/{valid_runs}"
+                if observations != valid_runs:
+                    coverage += " report-only"
+                perf_parts.append(
+                    f"{label}(n={coverage})={fmt_float(value * scale, unit)}"
+                )
+            if perf_parts:
+                lines.append("    warm perf stat (vinyld): " + " ".join(perf_parts))
             if row.get("cachetag_volatile_interned_sets_median") is not None:
                 lines.append(
                     "    set interning VSC: "
@@ -3528,6 +3714,17 @@ ARM_STATISTICAL_METRICS = (
     "driver_warm_latency_max_seconds",
     "cache_main_warm_cpu_seconds",
     "cache_main_warm_cpu_seconds_per_hit",
+    "vinyld_warm_instructions",
+    "vinyld_warm_cycles",
+    "vinyld_warm_task_clock_seconds",
+    "vinyld_warm_instructions_per_hit",
+    "vinyld_warm_cycles_per_hit",
+    "vinyld_warm_task_clock_seconds_per_hit",
+    "vinyld_warm_ipc",
+    "vinyld_warm_instructions_running_percent",
+    "vinyld_warm_cycles_running_percent",
+    "vinyld_warm_task_clock_running_percent",
+    "vinyld_warm_perf_stat_running_percent_min",
     "vtc_cpu_seconds",
     "vtc_cpu_seconds_per_backend_object",
     "wall_seconds",
@@ -3553,6 +3750,14 @@ ARM_METRIC_DISPLAY: dict[str, tuple[float, str]] = {
     "driver_warm_latency_p99_seconds": (1_000.0, "ms"),
     "driver_warm_latency_max_seconds": (1_000.0, "ms"),
     "cache_main_warm_cpu_seconds_per_hit": (1_000_000.0, "us/hit"),
+    "vinyld_warm_instructions_per_hit": (1.0, "instructions/hit"),
+    "vinyld_warm_cycles_per_hit": (1.0, "cycles/hit"),
+    "vinyld_warm_task_clock_seconds_per_hit": (1_000_000.0, "us/hit"),
+    "vinyld_warm_ipc": (1.0, "instructions/cycle"),
+    "vinyld_warm_instructions_running_percent": (1.0, "% running"),
+    "vinyld_warm_cycles_running_percent": (1.0, "% running"),
+    "vinyld_warm_task_clock_running_percent": (1.0, "% running"),
+    "vinyld_warm_perf_stat_running_percent_min": (1.0, "% running minimum"),
     "vtc_cpu_seconds_per_backend_object": (1_000_000.0, "us/object"),
     "vinyld_rss_max_kb": (1.0 / 1024.0, "MiB"),
     "cgroup_peak_bytes": (1.0 / (1024.0 * 1024.0), "MiB"),
@@ -3560,18 +3765,21 @@ ARM_METRIC_DISPLAY: dict[str, tuple[float, str]] = {
 }
 
 
-def arm_stat(values: list[float]) -> dict[str, float | None]:
+def arm_stat(values: list[float]) -> dict[str, float | int | None]:
     if not values:
-        return {"min": None, "median": None, "max": None}
-    return {"min": min(values), "median": median(values), "max": max(values)}
+        return {"n": 0, "min": None, "median": None, "max": None}
+    return {"n": len(values), "min": min(values), "median": median(values), "max": max(values)}
 
 
-def fmt_arm_stat(stat: dict[str, float | None], scale: float = 1.0) -> str:
+def fmt_arm_stat(
+    stat: dict[str, float | int | None], scale: float = 1.0, eligible: int | None = None
+) -> str:
+    coverage = f"{stat['n']}/{eligible}" if eligible is not None else str(stat["n"])
     if stat["median"] is None:
-        return "n/a"
+        return f"n={coverage} n/a"
     return (
-        f"{fmt_float(stat['median'] * scale)} "
-        f"[{fmt_float(stat['min'] * scale)}, {fmt_float(stat['max'] * scale)}]"
+        f"n={coverage} {fmt_float(float(stat['median']) * scale)} "
+        f"[{fmt_float(float(stat['min']) * scale)}, {fmt_float(float(stat['max']) * scale)}]"
     )
 
 
@@ -3641,6 +3849,11 @@ def render_arm_comparison(arms: dict[str, list[dict[str, Any]]]) -> str:
         for result in results
     }
     rows_by_arm: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    judged_comparison = any(
+        comparison_contract_active(Path(result["path"]))
+        for results in arms.values()
+        for result in results
+    )
     workloads: set[str] = set()
     explicit_backends_by_profile: dict[str, set[str]] = {}
     for results in arms.values():
@@ -3677,6 +3890,11 @@ def render_arm_comparison(arms: dict[str, list[dict[str, Any]]]) -> str:
             f"  {arm}: result_dirs={len(arms[arm])} "
             f"workload_runs={run_count} valid_workload_runs={valid_run_count}"
         )
+    for arm in arm_names:
+        shapes = sorted(
+            {fmt_vcl_shape(result.get("bench_stale_deliver")) for result in arms[arm]}
+        )
+        lines.append(f"  {arm} VCL shape: " + (" | ".join(shapes) if shapes else "n/a"))
     if len(hardware) == 1:
         lines.append(f"Hardware: {next(iter(hardware))}")
     else:
@@ -3695,17 +3913,38 @@ def render_arm_comparison(arms: dict[str, list[dict[str, Any]]]) -> str:
         lines.append(f"Workload: {workload}")
         for metric in ARM_STATISTICAL_METRICS:
             stats = []
+            coverage = []
             for arm in arm_names:
+                eligible_rows = rows_by_arm.get(arm, {}).get(workload, [])
                 vals = [
                     float(row[metric])
-                    for row in rows_by_arm.get(arm, {}).get(workload, [])
+                    for row in eligible_rows
                     if row.get(metric) is not None
                 ]
                 stats.append((arm, arm_stat(vals)))
+                coverage.append((arm, len(vals), len(eligible_rows)))
             if all(stat["median"] is None for _, stat in stats):
                 continue
+            if (
+                judged_comparison
+                and metric in PERF_STAT_ROW_METRICS
+                and any(observed != eligible for _, observed, eligible in coverage)
+            ):
+                rendered_coverage = " | ".join(
+                    f"{arm}={observed}/{eligible}"
+                    for arm, observed, eligible in coverage
+                )
+                lines.append(
+                    f"  WARNING: {metric} comparison withheld: judged perf stat requires every valid repetition; coverage "
+                    + rendered_coverage
+                )
+                continue
             scale, unit = ARM_METRIC_DISPLAY.get(metric, (1.0, ""))
-            rendered = [f"{arm}={fmt_arm_stat(stat, scale)}" for arm, stat in stats]
+            eligible_by_arm = {arm: eligible for arm, _, eligible in coverage}
+            rendered = [
+                f"{arm}={fmt_arm_stat(stat, scale, eligible_by_arm[arm])}"
+                for arm, stat in stats
+            ]
             delta = None
             if len(stats) == 2:
                 delta = delta_percent(stats[1][1]["median"], stats[0][1]["median"])

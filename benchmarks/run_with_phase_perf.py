@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Run a command and record perf only between driver phase markers."""
+"""Run a command and attach perf only between driver phase markers.
+
+`--mode record` samples call stacks with `perf record`; `--mode stat`
+counts inherited hardware events with `perf stat -x ,` into a CSV.
+Both attach to the same discovered target pids and are stopped with
+SIGINT at the phase end marker.
+"""
 
 from __future__ import annotations
 
@@ -95,7 +101,11 @@ def target_pids(root_pid: int, target: str) -> list[int]:
 def phase_marker_pairs(marker_dir: Path, marker_prefix: str, phase: str) -> list[tuple[Path, Path]]:
     prefixes = [marker_prefix]
     if phase == "warm":
+        # A split v1.1 workload runs the warm phase in its own driver
+        # invocation; the ordinary phased-purge workloads run it inside the
+        # load invocation, which names its markers `<workload>_load`.
         prefixes.append(f"{marker_prefix}_warm")
+        prefixes.append(f"{marker_prefix}_load")
     return [
         (
             marker_dir / f"{prefix}.{phase}.start",
@@ -156,9 +166,34 @@ def perf_record_command(
     return command
 
 
+def perf_stat_command(
+    stat_output: Path,
+    events: str,
+    scope: str,
+    pids: list[int],
+) -> list[str]:
+    """Build a CSV `perf stat` attach for the phase window.
+
+    No workload is appended: `perf stat` with a target and no command counts
+    until it is interrupted, which is how the phase end marker stops it.  The
+    counters are inherited exactly as `perf record -p` inherits them, so the
+    same `perf_event_paranoid` setting admits both.
+    """
+    command = ["perf", "stat", "-e", events]
+    if scope == "system":
+        command.append("-a")
+    else:
+        command.extend(["-p", ",".join(str(pid) for pid in pids)])
+    command.extend(["-x", ",", "-o", str(stat_output)])
+    return command
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--perf-data", required=True, type=Path)
+    parser.add_argument("--mode", choices=("record", "stat"), default="record")
+    parser.add_argument("--perf-data", type=Path)
+    parser.add_argument("--stat-output", type=Path)
+    parser.add_argument("--stat-events", default="instructions,cycles")
     parser.add_argument("--marker-dir", required=True, type=Path)
     parser.add_argument("--marker-prefix", required=True)
     parser.add_argument("--phase", default="warm")
@@ -169,6 +204,12 @@ def main() -> int:
     parser.add_argument("--poll-seconds", type=float, default=0.05)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+
+    if args.mode == "record" and args.perf_data is None:
+        parser.error("--perf-data is required for --mode record")
+    if args.mode == "stat" and args.stat_output is None:
+        parser.error("--stat-output is required for --mode stat")
+    output_path = args.perf_data if args.mode == "record" else args.stat_output
 
     command = args.command
     if command and command[0] == "--":
@@ -206,25 +247,43 @@ def main() -> int:
                 pids = target_pids(child.pid, args.target)
                 if not pids:
                     print(
-                        f"no target pids found for BENCH_PERF_RECORD_PHASE={args.phase} target={args.target}",
+                        f"no target pids found for mode={args.mode} phase={args.phase} target={args.target}",
                         file=sys.stderr,
                     )
                     missing_marker = True
             if not missing_marker:
-                perf_cmd = perf_record_command(
-                    args.perf_data,
-                    args.freq,
-                    args.call_graph,
-                    args.scope,
-                    pids,
-                )
-                print(
-                    "phase-perf "
-                    f"phase={args.phase} scope={args.scope} target={args.target} "
-                    f"call_graph={args.call_graph} data={args.perf_data}",
-                    file=sys.stderr,
-                )
-                perf_proc = subprocess.Popen(perf_cmd)
+                if args.mode == "stat":
+                    perf_cmd = perf_stat_command(
+                        args.stat_output,
+                        args.stat_events,
+                        args.scope,
+                        pids,
+                    )
+                    print(
+                        "phase-perf-stat "
+                        f"phase={args.phase} scope={args.scope} target={args.target} "
+                        f"events={args.stat_events} output={args.stat_output}",
+                        file=sys.stderr,
+                    )
+                else:
+                    perf_cmd = perf_record_command(
+                        args.perf_data,
+                        args.freq,
+                        args.call_graph,
+                        args.scope,
+                        pids,
+                    )
+                    print(
+                        "phase-perf "
+                        f"phase={args.phase} scope={args.scope} target={args.target} "
+                        f"call_graph={args.call_graph} data={args.perf_data}",
+                        file=sys.stderr,
+                    )
+                try:
+                    perf_proc = subprocess.Popen(perf_cmd)
+                except OSError as exc:
+                    print(f"perf could not be started: {exc}", file=sys.stderr)
+                    perf_proc = None
                 wait_for_any_marker([end_marker], child, args.poll_seconds)
     finally:
         if perf_proc is not None:
@@ -240,7 +299,19 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    if perf_rc != 0 and args.perf_data.exists() and args.perf_data.stat().st_size > 0:
+    if args.mode == "stat":
+        # `perf stat` is an optional measurement, not a gate. Hardware counters
+        # can be unavailable (blocked PMU, paranoid setting) and that must not
+        # fail the benchmark row; the caller decides from the CSV whether the
+        # row actually measured anything.
+        if perf_rc != 0:
+            print(
+                f"phase perf stat exited rc={perf_rc}; "
+                f"check {args.stat_output} for counted events",
+                file=sys.stderr,
+            )
+        return 0
+    if perf_rc != 0 and output_path.exists() and output_path.stat().st_size > 0:
         return 0
     return perf_rc
 

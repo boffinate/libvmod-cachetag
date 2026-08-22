@@ -102,6 +102,17 @@ def env_flag(name: str) -> bool:
     return os.getenv(name, "").lower() in {"1", "true", "yes", "on"}
 
 
+def stale_deliver_enabled() -> bool:
+    """Emit the documented two-call `stale()` shape in `vcl_deliver`.
+
+    Off by default: the frozen one-call shape calls `stale()` in `vcl_hit`
+    only.  Turning this on is a harness identity change (BR-017); the knob is
+    part of the cohort fingerprint so the two shapes can never merge into one
+    cohort.
+    """
+    return env_flag("BENCH_STALE_DELIVER")
+
+
 def fixed_tags_per_object(profile: str, configured: int) -> int:
     return FIXED_TAGS_PER_OBJECT.get(profile, configured)
 
@@ -365,29 +376,50 @@ def write_driver(
 
 
 def write_phase4_marker_snapshot(
-    f, prefix: str, marker: str, stats_filter: str, stats_suffix: str, event: str = "end"
+    f,
+    prefix: str,
+    marker: str,
+    stats_filter: str,
+    stats_suffix: str,
+    event: str = "end",
+    flush: bool = False,
 ) -> None:
     marker_path = f"/results/phase-markers/{prefix}.{marker}.{event}"
     f.write(
         f'shell "i=0; while [ $i -lt 360000 ]; do test -f {marker_path} && exit 0; '
         'i=$((i + 1)); sleep 0.01; done; echo timed out waiting for Phase 4 marker; exit 1"\n'
     )
-    write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_{stats_suffix}.stats")
+    write_stats_capture(
+        f, "v1", stats_filter, f"/results/{prefix}_{stats_suffix}.stats", flush=flush
+    )
 
 
 def write_phase5_marker_snapshot(
-    f, prefix: str, marker: str, stats_filter: str, stats_suffix: str, event: str = "end"
+    f,
+    prefix: str,
+    marker: str,
+    stats_filter: str,
+    stats_suffix: str,
+    event: str = "end",
+    flush: bool = False,
 ) -> None:
     marker_path = f"/results/phase-markers/{prefix}.{marker}.{event}"
     f.write(
         f'shell "i=0; while [ $i -lt 360000 ]; do test -f {marker_path} && exit 0; '
         'i=$((i + 1)); sleep 0.01; done; echo timed out waiting for Phase 5 marker; exit 1"\n'
     )
-    write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_{stats_suffix}.stats")
+    write_stats_capture(
+        f, "v1", stats_filter, f"/results/{prefix}_{stats_suffix}.stats", flush=flush
+    )
 
 
 def write_phase6_cycle_snapshot(
-    f, prefix: str, cycle: int, stats_filter: str, require_tripwire: bool = True
+    f,
+    prefix: str,
+    cycle: int,
+    stats_filter: str,
+    require_tripwire: bool = True,
+    flush: bool = False,
 ) -> None:
     marker = f"phase6_cycle_{cycle:02d}"
     marker_path = f"/results/phase-markers/{prefix}.{marker}.end"
@@ -399,7 +431,9 @@ def write_phase6_cycle_snapshot(
         'i=$((i + 1)); sleep 0.01; done; '
         'echo timed out waiting for Phase 6 cycle marker; exit 1"\n'
     )
-    write_stats_capture(f, "v1", f"{stats_filter} -f SMA.* -f MEMPOOL.*", stats_path)
+    write_stats_capture(
+        f, "v1", f"{stats_filter} -f SMA.* -f MEMPOOL.*", stats_path, flush=flush
+    )
     tripwire_required = require_tripwire and cycle in {1, 8}
     f.write(
         f'shell "sh /cachetag-host/benchmarks/capture_phase6_memory.sh '
@@ -466,7 +500,50 @@ def write_benchmark_teardown(
     f.write("process p_backend -stop\n")
 
 
-def write_stats_capture(f, instance: str, stats_filter: str, path: str) -> None:
+# Client names must stay short.  vtc_dump() formats its line prefix into a
+# 64-byte buffer that already carries the level lead and a tag as wide as
+# "http[%2d] ", so a name much past 40 characters makes vinyltest assert
+# mid-run instead of failing the workload cleanly.
+VSC_FLUSH_CLIENT_NAME_MAX = 24
+_vsc_flush_sequence = 0
+
+
+def reset_vsc_flush_names() -> None:
+    global _vsc_flush_sequence
+    _vsc_flush_sequence = 0
+
+
+def next_vsc_flush_client_name() -> str:
+    global _vsc_flush_sequence
+    _vsc_flush_sequence += 1
+    return f"c_vscflush_{_vsc_flush_sequence:02d}"
+
+
+def write_vsc_flush(f) -> None:
+    """Publish the CACHETAG segment before a single-shot `vinylstat -1` read.
+
+    `objects()` is a read probe and publishes synchronously, so one 204 from
+    `/__bench_objects` is enough.  Without it a capture can read a snapshot
+    that is up to one background publication interval stale, and `vinylstat -1`
+    does not retry (benchmarks/rules/BR-004).
+    """
+    f.write(
+        f"client {next_vsc_flush_client_name()} {{\n"
+        "\ttxreq -url /__bench_objects\n"
+        "\trxresp\n"
+        "\texpect resp.status == 204\n"
+        "} -run\n"
+    )
+
+
+def write_stats_capture(
+    f, instance: str, stats_filter: str, path: str, flush: bool = False
+) -> None:
+    # `flush` is only available to arms whose VCL owns a cachetag namespace.
+    # The xkey and noindex arms have no `/__bench_objects` endpoint and no
+    # CACHETAG counters to publish.
+    if flush:
+        write_vsc_flush(f)
     f.write(
         f'shell "vinylstat -1 -n ${{{instance}_name}} -f {stats_filter} '
         f'-f MAIN.n_object -f MAIN.n_lru_nuked -f MAIN.n_expired > {path}"\n'
@@ -630,6 +707,13 @@ def write_cachetag_vcl(
     f.write('\t\tset req.http.X-Bench-Cache = "hit";\n')
     f.write("\t}\n\n")
     f.write("\tsub vcl_deliver {\n")
+    if implementation == "cachetag" and stale_deliver_enabled():
+        # USAGE.md's hard-purge pattern: the same check in `vcl_hit` and
+        # `vcl_deliver`.  The doc bounds restarts with Vinyl's `max_restarts`
+        # default and adds no guard of its own, so neither does this.
+        f.write("\t\tif (tags.stale()) {\n")
+        f.write("\t\t\treturn (restart);\n")
+        f.write("\t\t}\n")
     f.write("\t\tif (req.http.X-Bench-Cache == \"hit\") {\n")
     f.write('\t\t\tset resp.http.X-Bench-Cache = "hit";\n')
     f.write("\t\t} else {\n")
@@ -751,6 +835,9 @@ def write_workload(
 ) -> None:
     prefix = f"{implementation_slug(implementation)}_{profile_slug(profile)}"
     driver_impl = implementation
+    # Only the cachetag arm owns a namespace to publish, and only its VCL has
+    # the `/__bench_objects` probe.  The xkey arm shares this function.
+    flush = implementation.startswith("cachetag")
     effective_tags = (
         0
         if profile == "untagged-fellow-load"
@@ -758,6 +845,7 @@ def write_workload(
     )
     unload_fellow_cachetag = storage_kind == "fellow" and implementation.startswith("cachetag")
     with path.open("w", encoding="ascii") as f:
+        reset_vsc_flush_names()
         f.write(
             f'vtest "{implementation} benchmark {profile_title(profile)}: '
             f'{objects} objects, {effective_tags} tags/object"\n\n'
@@ -848,7 +936,7 @@ def write_workload(
                 driver_command,
                 "none",
             )
-            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post.stats")
+            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post.stats", flush=flush)
             f.write(
                 "vinyl v1 -expect CACHETAG.vcl1_tags_bench."
                 "purgemap_fellow_attr_objects_written == 0\n"
@@ -883,14 +971,9 @@ def write_workload(
             )
             if expected_attr_bytes_raw:
                 expected_attr_bytes = int(expected_attr_bytes_raw)
-                f.write(
-                    "client c_stream6_vsc_flush {\n"
-                    "\ttxreq -url /__bench_objects\n"
-                    "\trxresp\n"
-                    "\texpect resp.status == 204\n"
-                    "} -run\n"
-                )
-            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_pre_purge.stats")
+            # The bespoke `c_stream6_vsc_flush` probe that used to sit here is
+            # subsumed by the uniform flush every capture now emits.
+            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_pre_purge.stats", flush=flush)
             if comparison_memory:
                 post_load_quiet = int(os.getenv("BENCH_MEMORY_POST_LOAD_QUIET_SECONDS", "30"))
                 confirmation_quiet = int(os.getenv("BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS", "10"))
@@ -942,7 +1025,7 @@ def write_workload(
                 f"{prefix}_purge",
                 driver_command,
             )
-            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_purge.stats")
+            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_purge.stats", flush=flush)
             if comparison_memory:
                 write_cache_main_endpoint(f, prefix, "post_invalidation")
                 write_cache_main_endpoint(f, prefix, "lifecycle")
@@ -967,11 +1050,11 @@ def write_workload(
                 ),
                 wait=False,
             )
-            write_phase4_marker_snapshot(f, prefix, "phase4_pre", stats_filter, "phase4_start", "start")
-            write_phase4_marker_snapshot(f, prefix, "phase4_pre", stats_filter, "phase4_pre")
-            write_phase4_marker_snapshot(f, prefix, "phase4_compact", stats_filter, "phase4_compact")
-            write_phase4_marker_snapshot(f, prefix, "phase4_sweep", stats_filter, "phase4_refill")
-            write_phase4_marker_snapshot(f, prefix, "phase4_post", stats_filter, "phase4_post")
+            write_phase4_marker_snapshot(f, prefix, "phase4_pre", stats_filter, "phase4_start", "start", flush=flush)
+            write_phase4_marker_snapshot(f, prefix, "phase4_pre", stats_filter, "phase4_pre", flush=flush)
+            write_phase4_marker_snapshot(f, prefix, "phase4_compact", stats_filter, "phase4_compact", flush=flush)
+            write_phase4_marker_snapshot(f, prefix, "phase4_sweep", stats_filter, "phase4_refill", flush=flush)
+            write_phase4_marker_snapshot(f, prefix, "phase4_post", stats_filter, "phase4_post", flush=flush)
             f.write("process p1 -wait\n\n")
         elif is_phase5_profile(profile):
             f.write(f'shell "rm -rf /results/phase-markers; mkdir -p /results/phase-markers"\n')
@@ -989,19 +1072,20 @@ def write_workload(
                 ),
                 wait=False,
             )
-            write_phase5_marker_snapshot(f, prefix, "phase5_hold_fetch", stats_filter, "phase5_hold_fetch_start", "start")
+            write_phase5_marker_snapshot(f, prefix, "phase5_hold_fetch", stats_filter, "phase5_hold_fetch_start", "start", flush=flush)
             if is_phase5_held_profile(profile):
                 f.write("barrier b_phase5_held sync\n")
                 f.write(f'shell "touch /results/phase-markers/{prefix}.phase5_hold.active"\n')
-                write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_phase5_hold_active.stats")
+                write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_phase5_hold_active.stats", flush=flush)
             else:
-                write_phase5_marker_snapshot(f, prefix, "phase5_hold", stats_filter, "phase5_hold_active", "active")
-            write_phase5_marker_snapshot(f, prefix, "phase5_held_load", stats_filter, "phase5_held_load_start", "start")
-            write_phase5_marker_snapshot(f, prefix, "phase5_held_load", stats_filter, "phase5_held_load_end")
+                write_phase5_marker_snapshot(f, prefix, "phase5_hold", stats_filter, "phase5_hold_active", "active", flush=flush)
+            write_phase5_marker_snapshot(f, prefix, "phase5_held_load", stats_filter, "phase5_held_load_start", "start", flush=flush)
+            write_phase5_marker_snapshot(f, prefix, "phase5_held_load", stats_filter, "phase5_held_load_end", flush=flush)
             if is_phase5_held_profile(profile):
                 if is_phase5_shutdown_profile(profile):
                     write_phase5_marker_snapshot(
-                        f, prefix, "phase5_shutdown", stats_filter, "phase5_shutdown_ready", "ready"
+                        f, prefix, "phase5_shutdown", stats_filter, "phase5_shutdown_ready", "ready",
+                        flush=flush,
                     )
                     f.write(
                         f'vinyl v1 -cliok "vcl.inline vcl2 \\\"vcl 4.1; backend none none;\\\" auto"\n'
@@ -1036,14 +1120,16 @@ def write_workload(
                     f.write("process p_backend -stop\n\n")
                     return
                 write_phase5_marker_snapshot(
-                    f, prefix, "phase5_hold_release", stats_filter, "phase5_pre_release", "start"
+                    f, prefix, "phase5_hold_release", stats_filter, "phase5_pre_release", "start",
+                    flush=flush,
                 )
                 f.write("barrier b_phase5_continue sync\n")
             else:
                 write_phase5_marker_snapshot(
-                    f, prefix, "phase5_hold_release", stats_filter, "phase5_pre_release", "start"
+                    f, prefix, "phase5_hold_release", stats_filter, "phase5_pre_release", "start",
+                    flush=flush,
                 )
-            write_phase5_marker_snapshot(f, prefix, "phase5_hold_release", stats_filter, "phase5_released")
+            write_phase5_marker_snapshot(f, prefix, "phase5_hold_release", stats_filter, "phase5_released", flush=flush)
             f.write("process p1 -wait\n\n")
         elif is_phase6_profile(profile):
             cycles = int(os.getenv("CHURN_CYCLES", "10"))
@@ -1065,7 +1151,7 @@ def write_workload(
                 wait=False,
             )
             for cycle in range(cycles):
-                write_phase6_cycle_snapshot(f, prefix, cycle, stats_filter)
+                write_phase6_cycle_snapshot(f, prefix, cycle, stats_filter, flush=flush)
             f.write("process p1 -wait\n\n")
         else:
             write_driver(
@@ -1078,7 +1164,7 @@ def write_workload(
                 driver_command,
             )
         if profile in {"populated-map-warm", "stream1-checkpoint-overlap"} and implementation.startswith("cachetag"):
-            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_lifecycle_post.stats")
+            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_lifecycle_post.stats", flush=flush)
             if storage_kind == "fellow" and cachetag_persist:
                 f.write(
                     f'shell "sh /cachetag-host/benchmarks/capture_persistence_files.sh '
@@ -1096,28 +1182,12 @@ def write_workload(
                 f.write("vinyl v1 -expect CACHETAG.vcl1_tags_bench.persist_checkpoint_entries == 0\n")
             elif expectation:
                 raise SystemExit("BENCH_STREAM1_EXPECT_CHECKPOINT must be initial-only, retained, or unset")
-        if is_phase5_profile(profile) and not is_phase5_shutdown_profile(profile):
-            f.write(
-                "client c_phase5_vsc_flush {\n"
-                "\ttxreq -url /__bench_objects\n"
-                "\trxresp\n"
-                "\texpect resp.status == 204\n"
-                "} -run\n"
-            )
-        if is_phase6_profile(profile):
-            f.write(
-                "client c_phase6_vsc_flush {\n"
-                "\ttxreq -url /__bench_objects\n"
-                "\trxresp\n"
-                "\texpect resp.status == 204\n"
-                "} -run\n"
-            )
         phase6_stats_filter = (
             f"{stats_filter} -f SMA.* -f MEMPOOL.*"
             if is_phase6_profile(profile)
             else stats_filter
         )
-        write_stats_capture(f, "v1", phase6_stats_filter, f"/results/{prefix}_post.stats")
+        write_stats_capture(f, "v1", phase6_stats_filter, f"/results/{prefix}_post.stats", flush=flush)
         if profile == "phase4-sweep-latency" and implementation.startswith("cachetag"):
             f.write("vinyl v1 -expect CACHETAG.vcl1_tags_bench.purgemap_entries == 0\n")
             f.write("vinyl v1 -expect CACHETAG.vcl1_tags_bench.purgemap_auto_reclaim_passes >= 1\n")
@@ -1249,6 +1319,7 @@ def write_noindex_workload(
     shutdown_drain_seconds: float,
 ) -> None:
     with path.open("w", encoding="ascii") as f:
+        reset_vsc_flush_names()
         f.write(f'vtest "no-index request baseline: {objects} objects"\n\n')
         write_backend(f, backend_body_bytes, backend_command, backend_host, backend_port)
         write_allocator_environment(f)
@@ -1462,6 +1533,7 @@ def write_fellow_restart_workload(
     if restart_profile == "fellow-restart-hot-purge":
         sweep_interval = "0s"
     with path.open("w", encoding="ascii") as f:
+        reset_vsc_flush_names()
         f.write(
             f'vtest "persistent cachetag Fellow {profile_title(restart_profile)}: '
             f'{objects} objects, {effective_tags} tags/object, {tag_profile}, '
@@ -1499,7 +1571,7 @@ def write_fellow_restart_workload(
             f"{prefix}_load",
             driver_command,
         )
-        write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_load.stats")
+        write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_load.stats", flush=True)
         if not allow_lru_nuked:
             f.write("vinyl v1 -expect n_lru_nuked == 0\n")
             f.write("vinyl v1 -expect CACHETAG.vcl1_tags_bench.volatile_objects == 0\n")
@@ -1508,9 +1580,9 @@ def write_fellow_restart_workload(
         f.write("vinyl v1 -stop\n")
         f.write('shell "vinyladm -n ${v1_name} panic.clear || true"\n')
         f.write("vinyl v1 -start\n")
-        write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_restart.stats")
+        write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_restart.stats", flush=True)
         if restart_profile == "fellow-restart-idle-memory":
-            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post.stats")
+            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post.stats", flush=True)
             write_benchmark_teardown(f, shutdown_drain_seconds)
             return
         if restart_profile == "fellow-restart-first-touch":
@@ -1523,8 +1595,8 @@ def write_fellow_restart_workload(
                 f"{prefix}_first_touch",
                 driver_command,
             )
-            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_first_touch.stats")
-            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post.stats")
+            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_first_touch.stats", flush=True)
+            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post.stats", flush=True)
             write_benchmark_teardown(f, shutdown_drain_seconds)
             return
         if restart_profile == "fellow-restart-hot-purge":
@@ -1543,15 +1615,15 @@ def write_fellow_restart_workload(
                 f"{prefix}_cold_purge",
                 driver_command,
             )
-        write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_cold_purge.stats")
+        write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_cold_purge.stats", flush=True)
         if restart_profile == "fellow-restart-hot-purge":
             write_client_purge(
                 f,
                 "c_hot_purge",
                 tag_profile,
             )
-            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_hot_purge.stats")
-        write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post.stats")
+            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_hot_purge.stats", flush=True)
+        write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post.stats", flush=True)
         write_benchmark_teardown(f, shutdown_drain_seconds)
 
 

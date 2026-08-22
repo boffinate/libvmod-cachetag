@@ -328,6 +328,29 @@ Environment:
                         Optional workload basename to profile while still
                         running the rest normally (default: empty)
   BENCH_PERF_FREQ       perf record frequency (default: 99)
+  BENCH_PERF_STAT       1/on/true to count warm-phase events in the
+                        vinyld process across the warm phase of the selected
+                        runs, required to fail if perf cannot count, off/0 to
+                        disable (default: off). Mutually exclusive with
+                        BENCH_PERF_RECORD. The phase is always warm and the
+                        target always vinyld.
+  BENCH_PERF_STAT_RUNS  Number of runs per workload to count, or all. Judged
+                        contracts require all (default: all)
+  BENCH_PERF_STAT_WORKLOAD
+                        Optional workload basename to count while still
+                        running the rest normally (default: empty)
+  BENCH_PERF_STAT_EVENTS
+                        perf stat event list (default:
+                        instructions,cycles,task-clock)
+                        Writes /results/<workload>.run-<N>.warm.perf-stat.csv,
+                        or a .warm.perf-stat.unavailable marker when no event
+                        was counted
+  BENCH_STALE_DELIVER   1 to emit the documented two-call shape, adding
+                        if (tags.stale()) { return (restart); } to vcl_deliver
+                        on the cachetag arm; 0 for the one-call shape with the
+                        check in vcl_hit only (default: 0). This changes the
+                        measured VCL, so it is part of the benchmark cohort
+                        fingerprint (benchmarks/rules/BR-017)
 EOF
 }
 
@@ -567,6 +590,11 @@ bench_perf_record_call_graph=${BENCH_PERF_RECORD_CALL_GRAPH:-fp}
 bench_perf_record_runs=${BENCH_PERF_RECORD_RUNS:-1}
 bench_perf_record_workload=${BENCH_PERF_RECORD_WORKLOAD:-}
 bench_perf_freq=${BENCH_PERF_FREQ:-99}
+bench_perf_stat=${BENCH_PERF_STAT:-off}
+bench_perf_stat_runs=${BENCH_PERF_STAT_RUNS:-all}
+bench_perf_stat_workload=${BENCH_PERF_STAT_WORKLOAD:-}
+bench_perf_stat_events=${BENCH_PERF_STAT_EVENTS:-instructions,cycles,task-clock}
+bench_stale_deliver=${BENCH_STALE_DELIVER:-0}
 bench_build_cflags=${BENCH_BUILD_CFLAGS:--O2 -g}
 bench_build_cppflags=${BENCH_BUILD_CPPFLAGS:-}
 bench_build_ldflags=${BENCH_BUILD_LDFLAGS:-}
@@ -634,6 +662,37 @@ case "$bench_buddy_reserve_chunks" in
 esac
 case "$bench_hot_set_objects" in
 	''|*[!0-9]*) echo "BENCH_HOT_SET_OBJECTS must be a non-negative integer" >&2; exit 2 ;;
+esac
+case "$bench_stale_deliver" in
+	0|1) ;;
+	*) echo "BENCH_STALE_DELIVER must be 0 or 1" >&2; exit 2 ;;
+esac
+case "$bench_perf_stat" in
+	0|off|no|false|1|yes|true|on|required) ;;
+	*) echo "BENCH_PERF_STAT must be 0/off or 1/on or required" >&2; exit 2 ;;
+esac
+case "$bench_perf_stat_runs" in
+	all) ;;
+	""|0|*[!0-9]*) echo "BENCH_PERF_STAT_RUNS must be all or a positive integer" >&2; exit 2 ;;
+	*) ;;
+esac
+[ -n "$bench_perf_stat_events" ] || { echo "BENCH_PERF_STAT_EVENTS must not be empty" >&2; exit 2; }
+case "$benchmark_contract:$bench_perf_stat" in
+	comparison-v1:1|comparison-v1:yes|comparison-v1:true|comparison-v1:on|comparison-v1:required|interning-screen-v1:1|interning-screen-v1:yes|interning-screen-v1:true|interning-screen-v1:on|interning-screen-v1:required)
+		[ "$bench_perf_stat_runs" = all ] || { echo "$benchmark_contract requires BENCH_PERF_STAT_RUNS=all" >&2; exit 2; }
+		;;
+esac
+# Both wrappers own the same vinyltest invocation and would attach two
+# profilers to one vinyld. Refuse rather than silently dropping one.
+case "$bench_perf_record:$bench_perf_stat" in
+	1:*|yes:*|true:*|on:*|required:*)
+		case "$bench_perf_stat" in
+			1|yes|true|on|required)
+				echo "BENCH_PERF_RECORD and BENCH_PERF_STAT are mutually exclusive" >&2
+				exit 2
+				;;
+		esac
+		;;
 esac
 case "$vtc_quiet" in
 	0|1) ;;
@@ -928,6 +987,11 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "BENCH_PERF_RECORD_RUNS=$bench_perf_record_runs" \
 	-e "BENCH_PERF_RECORD_WORKLOAD=$bench_perf_record_workload" \
 	-e "BENCH_PERF_FREQ=$bench_perf_freq" \
+	-e "BENCH_PERF_STAT=$bench_perf_stat" \
+	-e "BENCH_PERF_STAT_RUNS=$bench_perf_stat_runs" \
+	-e "BENCH_PERF_STAT_WORKLOAD=$bench_perf_stat_workload" \
+	-e "BENCH_PERF_STAT_EVENTS=$bench_perf_stat_events" \
+	-e "BENCH_STALE_DELIVER=$bench_stale_deliver" \
 	-e "BENCH_BUILD_CFLAGS=$bench_build_cflags" \
 	-e "BENCH_BUILD_CPPFLAGS=$bench_build_cppflags" \
 	-e "BENCH_BUILD_LDFLAGS=$bench_build_ldflags" \
@@ -1341,6 +1405,12 @@ benchmark_cohort_fingerprint=$(
 		printf "%s\n" "$BENCH_VINYL_CPUSET_CPUS" "$BENCH_DRIVER_CPUSET_CPUS" "$BENCH_BACKEND_CPUSET_CPUS"
 		printf "%s\n" "$BENCH_DRIVER_GOMAXPROCS" "$BENCH_BACKEND_GOMAXPROCS" "$BENCH_DRIVER_GOGC" "$BENCH_BACKEND_GOGC" "$BENCH_DRIVER_GOMEMLIMIT" "$BENCH_BACKEND_GOMEMLIMIT"
 		printf "%s\n" "$BENCH_VINYL_THREAD_POOL_MAX" "$BENCH_VINYL_THREAD_POOLS"
+		# The measured VCL is part of the cohort: a one-call row and a
+		# two-call row must never merge (benchmarks/rules/BR-017).
+		printf "bench_stale_deliver=%s\n" "$BENCH_STALE_DELIVER"
+		# Counter attachment changes the measured process. Keep selection and
+		# event sets inside the judged cohort identity (BR-017/BR-024).
+		printf "bench_perf_stat_contract=%s|%s|%s|%s\n" "$BENCH_PERF_STAT" "$BENCH_PERF_STAT_RUNS" "$BENCH_PERF_STAT_WORKLOAD" "$BENCH_PERF_STAT_EVENTS"
 	} | sha256sum | awk "{print \$1}"
 )
 metadata_fixture_manifest=none
@@ -1505,6 +1575,11 @@ fi
 	printf "bench_perf_record_runs=%s\n" "$BENCH_PERF_RECORD_RUNS"
 	printf "bench_perf_record_workload=%s\n" "$BENCH_PERF_RECORD_WORKLOAD"
 	printf "bench_perf_freq=%s\n" "$BENCH_PERF_FREQ"
+	printf "bench_perf_stat=%s\n" "$BENCH_PERF_STAT"
+	printf "bench_perf_stat_runs=%s\n" "$BENCH_PERF_STAT_RUNS"
+	printf "bench_perf_stat_workload=%s\n" "$BENCH_PERF_STAT_WORKLOAD"
+	printf "bench_perf_stat_events=%s\n" "$BENCH_PERF_STAT_EVENTS"
+	printf "bench_stale_deliver=%s\n" "$BENCH_STALE_DELIVER"
 	printf "bench_build_cflags=%s\n" "$BENCH_BUILD_CFLAGS"
 	printf "bench_build_cppflags=%s\n" "$BENCH_BUILD_CPPFLAGS"
 	printf "bench_build_ldflags=%s\n" "$BENCH_BUILD_LDFLAGS"
@@ -1575,6 +1650,34 @@ perf_record_enabled() {
 	esac
 }
 
+perf_stat_enabled() {
+	case "$BENCH_PERF_STAT" in
+		1|yes|true|on|required) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# A CSV that names an event but counted nothing (blocked PMU, paranoid
+# setting, virtualised host) is not a measurement. Say so instead of letting
+# an empty file read as a zero.
+perf_stat_counted() {
+	test -s "$1" || return 1
+	awk -F, -v requested="$BENCH_PERF_STAT_EVENTS" "\$3 != \"\" && index(requested, \$3) > 0 && \$1 ~ /^[0-9]+([.][0-9]+)?\$/ { found = 1 } END { exit !found }" "$1"
+}
+
+write_perf_stat_unavailable() {
+	{
+		printf "workload=%s\n" "$name"
+		printf "run=%s\n" "$run"
+		printf "phase=warm\n"
+		printf "target=vinyld\n"
+		printf "requested=%s\n" "$BENCH_PERF_STAT"
+		printf "reason=%s\n" "$1"
+	} > "$2"
+	printf "WARNING: perf stat requested but unavailable for %s run %s (%s)\n" \
+		"$name" "$run" "$1" | tee -a /results/summary.txt
+}
+
 should_perf_record_run() {
 	case "$BENCH_PERF_RECORD_RUNS" in
 		all) ;;
@@ -1589,6 +1692,22 @@ should_perf_record_run() {
 	esac
 	if [ -n "$BENCH_PERF_RECORD_WORKLOAD" ] &&
 	    [ "$name" != "$BENCH_PERF_RECORD_WORKLOAD" ]; then
+		return 1
+	fi
+	return 0
+}
+
+should_perf_stat_run() {
+	case "$BENCH_PERF_STAT_RUNS" in
+		all) ;;
+		*)
+			if [ "$run" -gt "$BENCH_PERF_STAT_RUNS" ]; then
+				return 1
+			fi
+			;;
+	esac
+	if [ -n "$BENCH_PERF_STAT_WORKLOAD" ] &&
+	    [ "$name" != "$BENCH_PERF_STAT_WORKLOAD" ]; then
 		return 1
 	fi
 	return 0
@@ -1735,6 +1854,46 @@ for workload in /results/workloads/*.vtc; do
 				esac
 				save_symbol_artifacts
 				write_perf_reports "$perf_data" "$report_prefix"
+			fi
+		elif perf_stat_enabled && should_perf_stat_run; then
+			perf_stat_csv="/results/${name}.run-${run}.warm.perf-stat.csv"
+			perf_stat_marker="/results/${name}.run-${run}.warm.perf-stat.unavailable"
+			rm -f "$perf_stat_csv" "$perf_stat_marker"
+			if ! command -v perf >/dev/null 2>&1; then
+				if [ "$BENCH_PERF_STAT" = required ] || [ "$PERF_MODE" = required ]; then
+					echo "perf stat requested but perf is unavailable" >&2
+					exit 1
+				fi
+				write_perf_stat_unavailable perf_binary_missing "$perf_stat_marker"
+				python3 /cachetag-host/benchmarks/run_with_metrics.py \
+					--metrics "$timing" --phase-marker-dir /results/phase-markers \
+					--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
+					$vinyltest_command -t "$VTC_TIMEOUT" \
+					-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
+			else
+				printf "perf-stat %s run %s phase=warm target=vinyld events=%s\n" \
+					"$name" "$run" "$BENCH_PERF_STAT_EVENTS" | tee -a /results/summary.txt
+				python3 /cachetag-host/benchmarks/run_with_metrics.py \
+					--metrics "$timing" --phase-marker-dir /results/phase-markers \
+					--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
+					python3 /cachetag-host/benchmarks/run_with_phase_perf.py \
+					--mode stat \
+					--stat-output "$perf_stat_csv" \
+					--stat-events "$BENCH_PERF_STAT_EVENTS" \
+					--marker-dir /results/phase-markers \
+					--marker-prefix "$name" \
+					--phase warm \
+					--scope command \
+					--target vinyld -- \
+					$vinyltest_command -t "$VTC_TIMEOUT" \
+					-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
+				if ! perf_stat_counted "$perf_stat_csv"; then
+					if [ "$BENCH_PERF_STAT" = required ]; then
+						echo "perf stat counted no requested events for $name run $run" >&2
+						exit 1
+					fi
+					write_perf_stat_unavailable no_counted_events "$perf_stat_marker"
+				fi
 			fi
 		else
 			python3 /cachetag-host/benchmarks/run_with_metrics.py \

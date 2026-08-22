@@ -1,23 +1,13 @@
 # BR-024: Establish a same-code noise floor before judging any delta
 
-**Rule:** Before attributing a performance delta to a code change, know the
-same-code (A/A) variance of that benchmark shape on that host — from repeated
-identical rows or an explicit A/A pair — and treat any delta smaller than
-roughly twice that variance as noise, not a finding. Report spread (min/max or
-percentiles across repetitions), never a bare median of few runs.
+**Rule:** Before attributing a performance delta to a code change, know the same-code (A/A) variance of that benchmark shape on that host from repeated identical rows or an explicit A/A sequence, and treat any delta smaller than roughly twice that variance as noise, not a finding. Report spread (min/max or percentiles across repetitions), never a bare median of few runs. For every judged metric, report its own observation count against eligible repetitions (`n/eligible`); the metric may support a floor or delta only when every eligible repetition in its declared scope produced that measurement under the same instrumentation and repetition positions.
 
-**Why:** General benchmarking practice, adopted after this project measured the
-cost of ignoring it: pre-determinism churn rows showed ±14–18% same-code CPU
-variance, and an instrumentation-only change "measured" −18.6% CPU — larger
-than the real deltas under judgment
-(`devdocs/docs/archived/churn-benchmark-determinism-plan-2026-07-04.md`). BR-019 fixed
-the workload-side variance; this rule covers the residual host/system variance
-that determinism cannot remove.
+**Why:** General benchmarking practice, adopted after this project measured the cost of ignoring it: pre-determinism churn rows showed ±14–18% same-code CPU variance, and an instrumentation-only change "measured" −18.6% CPU — larger than the real deltas under judgment (`devdocs/docs/archived/churn-benchmark-determinism-plan-2026-07-04.md`). BR-019 fixed the workload-side variance; this rule covers the residual host/system variance that determinism cannot remove. A later audit also found a perfect first-repetition confound in a warm-hit campaign: the optional counter ran on only repetition 1 while ordinary CPU medians used all three. Metric-specific coverage prevents a single capture from masquerading as a repeated median or a reusable sub-percent floor.
 
-**Comply by:** Running `RUNS=3` minimum for any judged row; when a campaign
-introduces a new shape/host/scale, running one A/A pair first and recording the
-observed floor in the campaign note; phrasing conclusions as "delta X against a
-same-code floor of Y".
+**Comply by:** Running `RUNS=3` minimum for any judged row; collecting each judged metric on every repetition in its declared workload scope; preserving identical instrumentation and repetition positions across compared arms; reporting metric-specific `n/eligible` and spread; and, when a campaign introduces a new shape, host or scale, running repeated same-code observations before the B/P decision sequence and recording the observed floor in the campaign note. Phrase conclusions as "delta X against a same-code floor of Y". A two-point A/A pair is the minimum historical compatibility case, not sufficient evidence for a new sub-percent claim without additional repeated same-code observations or an explicit temporal control.
 
-**Tripwire:** None — design/judgment rule; repeated-row spread is visible in the
-summarizer's per-workload medians and wall-second distribution.
+Missing, blocked or unsupported counter events are absent, never zero. Partial optional telemetry may remain in an otherwise valid development artifact, but it is report-only: the summarizer must withhold a judged delta or same-code floor for that metric.
+
+The twice-the-observed-floor decision bar is a statistical guard, not an operation-amplification factor. This rule does not prescribe any standing K multiplier; a K=32 or similar repeated-operation shape belongs only to the campaign that defines and validates that specific diagnostic benchmark.
+
+**Tripwire:** Judged `perf stat` collection requires `BENCH_PERF_STAT_RUNS=all`. The summarizer displays per-arm observation counts and withholds judged perf-stat comparisons when any arm has fewer observations than valid eligible repetitions. Other metric families remain a design/judgment check until they gain equivalent mechanical coverage gates.

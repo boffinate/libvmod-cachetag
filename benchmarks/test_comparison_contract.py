@@ -9,12 +9,17 @@ import json
 from pathlib import Path
 
 from summarize_results import (
+    aggregate_workload_rows,
     arm_workload_keys,
     cache_main_capture_pss_kb,
     comparison_arm_cohort_validity,
     comparison_contract_validity,
+    fmt_vcl_shape,
+    parse_perf_stat_csv,
     render_arm_comparison,
+    sweep_configuration,
     workload_driver_values,
+    workload_rows,
 )
 
 
@@ -185,7 +190,7 @@ class ComparisonContractTest(unittest.TestCase):
         }
         rendered = render_arm_comparison(arms)
         self.assertIn("workload_runs=2 valid_workload_runs=1", rendered)
-        self.assertIn("cache_main_post_load_pss_kb (MiB): C=0.10 [0.10, 0.10]", rendered)
+        self.assertIn("cache_main_post_load_pss_kb (MiB): C=n=1/1 0.10 [0.10, 0.10]", rendered)
 
     def test_zero_pss_rejects_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -349,6 +354,317 @@ class ComparisonContractTest(unittest.TestCase):
             (root / "metadata.env").write_text("benchmark_contract=development-v1\n", encoding="utf-8")
             valid, reason = comparison_contract_validity(root, "development", 1, {}, {}, {})
         self.assertEqual((valid, reason), (1, "not_applicable"))
+
+
+class WarmPerfStatTest(unittest.TestCase):
+    """BENCH_PERF_STAT is optional telemetry, never a gate."""
+
+    # Borrow the complete result fixture without re-running its assertions.
+    fingerprint = ComparisonContractTest.fingerprint
+    write_valid_fixture = ComparisonContractTest.write_valid_fixture
+
+    COUNTED = (
+        "# started on Thu Aug 20 07:36:28 2026\n"
+        "\n"
+        "1200000000,,instructions,1000000000,100.00,0.80,insn per cycle\n"
+        "1500000000,,cycles,1000000000,100.00,1.500,GHz\n"
+        "22500.000,msec,task-clock,1000000000,99.50,0.375,CPUs utilized\n"
+    )
+    BLOCKED = (
+        "# started on Thu Aug 20 07:36:28 2026\n"
+        "\n"
+        "<not supported>,,instructions,0,0.00\n"
+        "<not counted>,,cycles,0,0.00\n"
+    )
+
+    def write_run(self, root: Path) -> None:
+        driver, time_values, _ = self.write_valid_fixture(root)
+        time_values["exit_code"] = "0"
+        (root / "fixture.run-1.time").write_text(
+            "\n".join(f"{k}={v}" for k, v in time_values.items()) + "\n", encoding="utf-8"
+        )
+        (root / "fixture.run-1.driver").write_text(
+            "\n".join(f"{k}={v}" for k, v in driver.items()) + "\n", encoding="utf-8"
+        )
+
+    def row(self, root: Path) -> dict:
+        rows = workload_rows(root)
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def test_csv_header_and_blocked_counters_are_not_zeros(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "counted.csv").write_text(self.COUNTED, encoding="utf-8")
+            (root / "blocked.csv").write_text(self.BLOCKED, encoding="utf-8")
+            self.assertEqual(
+                parse_perf_stat_csv(root / "counted.csv"),
+                {"instructions": 1200000000, "cycles": 1500000000, "task-clock": 22500.0},
+            )
+            self.assertEqual(parse_perf_stat_csv(root / "blocked.csv"), {})
+            self.assertEqual(parse_perf_stat_csv(root / "absent.csv"), {})
+
+    def test_counted_events_divide_by_the_warm_hit_denominator(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.write_run(root)
+            (root / "fixture.run-1.warm.perf-stat.csv").write_text(
+                self.COUNTED, encoding="utf-8"
+            )
+            row = self.row(root)
+        self.assertEqual(row["vinyld_warm_instructions"], 1200000000)
+        self.assertEqual(row["vinyld_warm_cycles"], 1500000000)
+        self.assertEqual(row["vinyld_warm_task_clock_seconds"], 22.5)
+        # driver_warm_hits=9 is the same denominator the warm CPU metric uses.
+        self.assertAlmostEqual(row["vinyld_warm_instructions_per_hit"], 1200000000 / 9)
+        self.assertAlmostEqual(row["vinyld_warm_cycles_per_hit"], 1500000000 / 9)
+        self.assertAlmostEqual(row["vinyld_warm_task_clock_seconds_per_hit"], 22.5 / 9)
+        self.assertEqual(row["vinyld_warm_instructions_running_percent"], 100.0)
+        self.assertEqual(row["vinyld_warm_cycles_running_percent"], 100.0)
+        self.assertEqual(row["vinyld_warm_task_clock_running_percent"], 99.5)
+        self.assertEqual(row["vinyld_warm_perf_stat_running_percent_min"], 99.5)
+        self.assertAlmostEqual(row["cache_main_warm_cpu_seconds_per_hit"], 0.5 / 9)
+
+    def test_absent_csv_leaves_the_metric_absent_and_the_row_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.write_run(root)
+            absent = self.row(root)
+            (root / "fixture.run-1.warm.perf-stat.csv").write_text(
+                self.COUNTED, encoding="utf-8"
+            )
+            counted = self.row(root)
+        self.assertIsNone(absent["vinyld_warm_instructions"])
+        self.assertIsNone(absent["vinyld_warm_cycles"])
+        self.assertIsNone(absent["vinyld_warm_instructions_per_hit"])
+        # The knob is optional telemetry: present or absent, it must not move
+        # the validity verdict in either direction.
+        self.assertEqual(
+            absent["comparison_contract_validity_reason"],
+            counted["comparison_contract_validity_reason"],
+        )
+        self.assertEqual(absent["overall_valid"], counted["overall_valid"])
+        self.assertNotIn("perf", absent["comparison_contract_validity_reason"])
+
+    def test_counted_events_reach_the_workload_medians(self) -> None:
+        rows = [
+            {
+                "workload": "cachetag_low_fanout_unique", "run": run, "overall_valid": 1,
+                "implementation": "cachetag", "profile": "low_fanout_unique",
+                "vinyld_warm_instructions": value,
+                "vinyld_warm_cycles": value * 2,
+                "vinyld_warm_instructions_per_hit": value / 10.0,
+                "vinyld_warm_cycles_per_hit": value / 5.0,
+                "vinyld_warm_task_clock_seconds_per_hit": value / 1000.0,
+                "vinyld_warm_ipc": 0.5 + run / 10.0,
+            }
+            for run, value in ((1, 1000.0), (2, 2000.0), (3, 3000.0))
+        ]
+        summary = aggregate_workload_rows(rows)[0]
+        self.assertEqual(summary["vinyld_warm_instructions_median"], 2000.0)
+        self.assertEqual(summary["vinyld_warm_cycles_median"], 4000.0)
+        self.assertEqual(summary["vinyld_warm_instructions_per_hit_median"], 200.0)
+        self.assertEqual(summary["vinyld_warm_cycles_per_hit_median"], 400.0)
+        self.assertEqual(summary["vinyld_warm_task_clock_seconds_per_hit_median"], 2.0)
+        self.assertEqual(summary["vinyld_warm_ipc_median"], 0.7)
+        self.assertEqual(summary["vinyld_warm_instructions_per_hit_observations"], 3)
+        self.assertEqual(summary["vinyld_warm_cycles_per_hit_observations"], 3)
+        self.assertEqual(summary["vinyld_warm_ipc_observations"], 3)
+        self.assertEqual(summary["vinyld_warm_instructions_min"], 1000.0)
+        self.assertEqual(summary["vinyld_warm_instructions_max"], 3000.0)
+
+    def test_metric_observation_count_exposes_partial_perf_stat_repetition_coverage(self) -> None:
+        rows = [
+            {
+                "workload": "cachetag_low_fanout_unique", "run": run, "overall_valid": 1,
+                "implementation": "cachetag", "profile": "low_fanout_unique",
+                "vinyld_warm_instructions_per_hit": 1000.0 if run == 1 else None,
+                "cache_main_warm_cpu_seconds_per_hit": 0.1 + run,
+            }
+            for run in (1, 2, 3)
+        ]
+        summary = aggregate_workload_rows(rows)[0]
+        self.assertEqual(summary["valid_runs"], 3)
+        self.assertEqual(summary["vinyld_warm_instructions_per_hit_observations"], 1)
+        self.assertEqual(summary["cache_main_warm_cpu_seconds_per_hit_observations"], 3)
+
+    def test_absent_counters_leave_no_median(self) -> None:
+        rows = [{
+            "workload": "cachetag_low_fanout_unique", "run": 1, "overall_valid": 1,
+            "implementation": "cachetag", "profile": "low_fanout_unique",
+            "vinyld_warm_instructions": None,
+            "vinyld_warm_cycles": None,
+            "vinyld_warm_instructions_per_hit": None,
+        }]
+        summary = aggregate_workload_rows(rows)[0]
+        self.assertIsNone(summary["vinyld_warm_instructions_median"])
+        self.assertIsNone(summary["vinyld_warm_instructions_per_hit_median"])
+
+    def test_arm_comparison_reports_instructions_per_hit(self) -> None:
+        base = {
+            "implementation": "cachetag",
+            "workload": "cachetag_low_fanout_unique",
+            "profile": "low_fanout_unique",
+            "overall_valid": 1,
+        }
+        arms = {
+            "baseline": [{
+                "hardware": "test", "path": "/does/not/exist",
+                "comparison_cohort_fingerprint": None, "bench_stale_deliver": "0",
+                "workloads": [{**base, "vinyld_warm_instructions_per_hit": 1000.0}],
+            }],
+            "patched": [{
+                "hardware": "test", "path": "/does/not/exist",
+                "comparison_cohort_fingerprint": None, "bench_stale_deliver": "0",
+                "workloads": [{**base, "vinyld_warm_instructions_per_hit": 1100.0}],
+            }],
+        }
+        rendered = render_arm_comparison(arms)
+        self.assertIn("vinyld_warm_instructions_per_hit (instructions/hit):", rendered)
+        self.assertIn("baseline=n=1", rendered)
+        self.assertIn("delta=10.00%", rendered)
+
+    def test_judged_arm_comparison_withholds_partial_perf_stat_metric(self) -> None:
+        base = {
+            "implementation": "cachetag",
+            "workload": "cachetag_low_fanout_unique",
+            "profile": "low_fanout_unique",
+            "overall_valid": 1,
+        }
+        with tempfile.TemporaryDirectory() as left, tempfile.TemporaryDirectory() as right:
+            left_path, right_path = Path(left), Path(right)
+            for path in (left_path, right_path):
+                (path / "metadata.env").write_text(
+                    "benchmark_contract=comparison-v1\n", encoding="utf-8"
+                )
+            arms = {
+                "baseline": [{
+                    "hardware": "test", "path": str(left_path),
+                    "comparison_cohort_fingerprint": "same", "bench_stale_deliver": "1",
+                    "workloads": [
+                        {**base, "run": 1, "vinyld_warm_instructions_per_hit": 1000.0},
+                        {**base, "run": 2, "vinyld_warm_instructions_per_hit": None},
+                    ],
+                }],
+                "patched": [{
+                    "hardware": "test", "path": str(right_path),
+                    "comparison_cohort_fingerprint": "same", "bench_stale_deliver": "1",
+                    "workloads": [
+                        {**base, "run": 1, "vinyld_warm_instructions_per_hit": 900.0},
+                        {**base, "run": 2, "vinyld_warm_instructions_per_hit": None},
+                    ],
+                }],
+            }
+            rendered = render_arm_comparison(arms)
+        self.assertIn(
+            "comparison withheld: judged perf stat requires every valid repetition",
+            rendered,
+        )
+        self.assertIn("baseline=1/2", rendered)
+        self.assertIn("patched=1/2", rendered)
+        self.assertNotIn("vinyld_warm_instructions_per_hit (instructions/hit):", rendered)
+
+    def test_judged_arm_comparison_checks_each_perf_event_coverage(self) -> None:
+        base = {
+            "implementation": "cachetag",
+            "workload": "cachetag_low_fanout_unique",
+            "profile": "low_fanout_unique",
+            "overall_valid": 1,
+        }
+        with tempfile.TemporaryDirectory() as left, tempfile.TemporaryDirectory() as right:
+            left_path, right_path = Path(left), Path(right)
+            for path in (left_path, right_path):
+                (path / "metadata.env").write_text(
+                    "benchmark_contract=comparison-v1\n", encoding="utf-8"
+                )
+            arms = {
+                arm: [{
+                    "hardware": "test", "path": str(path),
+                    "comparison_cohort_fingerprint": "same", "bench_stale_deliver": "1",
+                    "workloads": [
+                        {
+                            **base,
+                            "run": run,
+                            "vinyld_warm_instructions_per_hit": instruction_base + run,
+                            "vinyld_warm_cycles_per_hit": 2000.0 if run == 1 else None,
+                        }
+                        for run in (1, 2)
+                    ],
+                }]
+                for arm, path, instruction_base in (
+                    ("baseline", left_path, 1000.0),
+                    ("patched", right_path, 900.0),
+                )
+            }
+            rendered = render_arm_comparison(arms)
+        self.assertIn(
+            "vinyld_warm_instructions_per_hit (instructions/hit): baseline=n=2/2",
+            rendered,
+        )
+        self.assertIn(
+            "vinyld_warm_cycles_per_hit comparison withheld: judged perf stat requires every valid repetition",
+            rendered,
+        )
+        self.assertIn("baseline=1/2", rendered)
+
+    def test_blocked_counters_leave_the_metric_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.write_run(root)
+            baseline = self.row(root)
+            (root / "fixture.run-1.warm.perf-stat.csv").write_text(
+                self.BLOCKED, encoding="utf-8"
+            )
+            blocked = self.row(root)
+        self.assertIsNone(blocked["vinyld_warm_instructions"])
+        self.assertIsNone(blocked["vinyld_warm_cycles"])
+        self.assertEqual(
+            blocked["comparison_contract_validity_reason"],
+            baseline["comparison_contract_validity_reason"],
+        )
+
+
+class StaleDeliverReportingTest(unittest.TestCase):
+    """The measured VCL shape must be readable, not only fingerprinted."""
+
+    def test_shape_label_distinguishes_one_call_from_two_call(self) -> None:
+        self.assertIn("two-call", fmt_vcl_shape("1"))
+        self.assertIn("one-call", fmt_vcl_shape("0"))
+        self.assertEqual(fmt_vcl_shape(""), "unrecorded")
+        self.assertEqual(fmt_vcl_shape(None), "unrecorded")
+
+    def test_shape_splits_the_sweep_match_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            one_call = root / "one"
+            two_call = root / "two"
+            for directory, value in ((one_call, "0"), (two_call, "1")):
+                directory.mkdir()
+                (directory / "metadata.env").write_text(
+                    f"bench_stale_deliver={value}\n", encoding="utf-8"
+                )
+            identities = {
+                dict(sweep_configuration(directory)["match_identity"])["bench_stale_deliver"]
+                for directory in (one_call, two_call)
+            }
+        self.assertEqual(identities, {"0", "1"})
+
+    def test_arm_comparison_renders_each_arm_shape(self) -> None:
+        arms = {
+            "one-call": [{
+                "hardware": "test", "path": "/does/not/exist",
+                "comparison_cohort_fingerprint": None, "bench_stale_deliver": "0",
+                "workloads": [],
+            }],
+            "two-call": [{
+                "hardware": "test", "path": "/does/not/exist",
+                "comparison_cohort_fingerprint": None, "bench_stale_deliver": "1",
+                "workloads": [],
+            }],
+        }
+        rendered = render_arm_comparison(arms)
+        self.assertIn("one-call VCL shape: 0 (one-call: vcl_hit)", rendered)
+        self.assertIn("two-call VCL shape: 1 (two-call: vcl_hit + vcl_deliver)", rendered)
 
 
 if __name__ == "__main__":
