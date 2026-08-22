@@ -21,6 +21,18 @@ $Method BOOL .test_abort_next_sweep()
 
 Abort the next purge-map sweep after certificate start for regression tests.
 
+$Method BOOL .test_hold_next_purge_publish()
+
+Pause the next purge after its registration sequence moves but before its purge-map entry is published.
+
+$Method BOOL .test_wait_purge_publish_held(INT timeout_ms)
+
+Wait up to ``timeout_ms`` for a purge paused by ``test_hold_next_purge_publish()``.
+
+$Method BOOL .test_release_purge_publish()
+
+Release a purge paused by ``test_hold_next_purge_publish()``.
+
 $Method BOOL .test_force_next_attach_slot_overflow()
 
 Make the next volatile attachment take the side-slot overflow path for regression tests.

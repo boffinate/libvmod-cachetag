@@ -139,6 +139,8 @@ VTC_TESTS_CORE = \
 	vtc/cachetag_c00022.vtc \
 	vtc/cachetag_c00023.vtc \
 	vtc/cachetag_c00024.vtc \
+	vtc/cachetag_c00026.vtc \
+	vtc/cachetag_c00027.vtc \
 	vtc/cachetag_c00028.vtc \
 	vtc/cachetag_r00001.vtc \
 	vtc/cachetag_r00002.vtc \
@@ -147,6 +149,7 @@ VTC_TESTS_CORE = \
 	vtc/cachetag_r00005.vtc \
 	vtc/cachetag_r00006.vtc \
 	vtc/cachetag_r00008.vtc \
+	vtc/cachetag_r00009.vtc \
 	vtc/cachetag_pm00000.vtc \
 	vtc/cachetag_pm00001.vtc \
 	vtc/cachetag_pm00002.vtc \
@@ -189,7 +192,8 @@ VTC_TESTS_TEST_HOOKS = \
 	vtc/cachetag_pm00028.vtc \
 	vtc/cachetag_pm00035.vtc \
 	vtc/cachetag_pm00036.vtc \
-	vtc/cachetag_pm00037.vtc
+	vtc/cachetag_pm00037.vtc \
+	vtc/cachetag_pm00038.vtc
 
 VTC_TESTS_SET_INTERNING_TEST_HOOKS = \
 	vtc/cachetag_pm00030.vtc \

@@ -676,6 +676,11 @@
 	:level:	info
 	:oneliner:	stale() positive results
 
+.. vinyl_vsc:: stale_memo_hits
+	:type:	counter
+	:level:	info
+	:oneliner:	stale() calls answered by the per-request memo
+
 .. vinyl_vsc:: purgemap_entries
 	:type:	gauge
 	:level:	info

@@ -101,19 +101,23 @@ scripts/test-fellow-with-vinyl-cache.sh ../vinyl-cache
 ```
 
 For `CACHE_TAG_CHECK_TARGET=check` with the default diagnostic-surface build,
-expect the standalone WAL test, the counter-surface parity check, and the 56
-storage-agnostic VTCs in `VTC_TESTS` (16 `c`, 7 `r`, 33 `pm`) to pass:
+expect the standalone WAL test, the counter-surface parity check, and the 61
+storage-agnostic VTCs in `VTC_TESTS` (19 `c`, 8 `r`, 34 `pm`) to pass:
 
 ```text
-# TOTAL: 58
-# PASS:  58
+# TOTAL: 63
+# PASS:  63
 # FAIL:  0
 # ERROR: 0
 ```
 
 With `CACHE_TAG_CONFIGURE_ARGS=""` (production surface: no demo diagnostics,
-no test hooks) only the core VTCs run, and the expected total is 39 (the WAL
-test, the counter-surface parity check, and 37 VTCs: 15 `c`, 7 `r`, 15 `pm`).
+no test hooks) only the core VTCs run, and the expected total is 43 (the WAL
+test, the counter-surface parity check, and 41 VTCs: 18 `c`, 8 `r`, 15 `pm`).
+
+The Fellow matrix contains 47 Cachetag VTCs after adding the four second-call
+memo lifecycle and race cases. This curation did not execute that matrix; its
+next run must confirm all 47 before release acceptance.
 
 For the default `distcheck`, expect:
 

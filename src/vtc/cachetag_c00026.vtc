@@ -1,0 +1,169 @@
+vtest "stale() memo is per namespace and survives a VCL discard with a live memo"
+
+# Two checks in one shape: (1) two namespaces used by the same request keep
+# independent memos, and (2) a request parked with memos already filled can
+# still call stale() after its VCL lost the race with a reload and discard.
+# A memo that outlived its namespace's index, or that leaked across
+# namespaces, would fail the body or counter assertions below.
+
+barrier b_hit sock 2
+barrier b_deliver sock 2
+barrier b_release sock 2
+
+server s1 {
+	rxreq
+	expect req.url == "/both"
+	txresp -body "body-both"
+
+	rxreq
+	expect req.url == "/slow"
+	txresp -body "body-slow"
+
+	rxreq
+	expect req.url == "/second"
+	txresp -body "body-second"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags_a = cachetag.namespace("alpha");
+		new tags_b = cachetag.namespace("beta");
+	}
+
+	sub vcl_backend_response {
+		tags_a.add(bereq.url);
+		tags_b.add(bereq.url);
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags_a.stale()) {
+			return (restart);
+		}
+		if (tags_b.stale()) {
+			return (restart);
+		}
+		if (req.url == "/slow" && req.http.X-Park == "1") {
+			# Park with both memos filled: the discard below lands
+			# while this request still has to call stale() again.
+			vtc.barrier_sync("${b_hit_sock}");
+		}
+	}
+
+	sub vcl_deliver {
+		if (tags_a.stale()) {
+			set resp.http.Stale-A = "1";
+		} else if (req.url == "/slow") {
+			set resp.http.Stale-A = "0";
+		}
+		if (tags_b.stale()) {
+			set resp.http.Stale-B = "1";
+		} else if (req.url == "/slow") {
+			set resp.http.Stale-B = "0";
+		}
+		if (req.url == "/slow" && req.http.X-Park == "1") {
+			# Hold the discarded VCL request after both memo hits so its
+			# still-live VSC segment can prove those calls used the memos.
+			vtc.barrier_sync("${b_deliver_sock}");
+			vtc.barrier_sync("${b_release_sock}");
+		}
+	}
+} -start
+
+# Warm the object (a miss reaches only vcl_deliver), then replay it as a
+# two-call hit: each namespace fills its own memo at vcl_hit and answers the
+# deliver-phase call from it.
+client c_both_warm {
+	txreq -url "/both"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "body-both"
+} -run
+
+client c_both {
+	txreq -url "/both"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "body-both"
+	expect resp.http.Stale-A == <undef>
+	expect resp.http.Stale-B == <undef>
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_calls == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_memo_hits == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_b_beta.stale_calls == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_b_beta.stale_memo_hits == 1
+
+# Cache /slow, then replay it parked inside vcl_hit with both memos live.
+client c_slow_warm {
+	txreq -url "/slow"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c_slow {
+	txreq -url "/slow" -hdr "X-Park: 1"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "body-slow"
+	expect resp.http.Stale-A == 0
+	expect resp.http.Stale-B == 0
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new fresh = cachetag.namespace("gamma");
+	}
+
+	sub vcl_backend_response {
+		fresh.add(bereq.url);
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (fresh.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_deliver {
+		if (fresh.stale()) {
+			set resp.http.Stale-C = "1";
+		}
+	}
+}
+
+vinyl v1 -cliok "vcl.use vcl2"
+vinyl v1 -cliok "vcl.discard vcl1"
+
+barrier b_hit sync
+barrier b_deliver sync
+
+vinyl v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_calls == 6
+vinyl v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_memo_hits == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_b_beta.stale_calls == 6
+vinyl v1 -expect CACHETAG.vcl1_tags_b_beta.stale_memo_hits == 2
+
+barrier b_release sync
+client c_slow -wait
+
+# vcl1 cools only after the parked request drains; the memo objects die with
+# their request tasks, never touching the torn-down index.
+vinyl v1 -cliok "vcl.list"
+
+client c_second {
+	txreq -url "/second"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "body-second"
+	expect resp.http.Stale-C == <undef>
+} -run
+
+# A miss never reaches vcl_hit, so the fresh namespace sees exactly the
+# deliver-phase call.
+vinyl v1 -expect CACHETAG.vcl2_fresh_gamma.stale_calls == 1

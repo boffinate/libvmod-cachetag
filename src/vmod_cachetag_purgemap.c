@@ -56,6 +56,10 @@ struct cachetag_purgemap {
 	size_t nentry;
 	size_t ntombstone;
 	uint64_t seq;
+	/* Last seq whose purge-map update is fully visible. Unlike seq, this is
+	 * a completion token for stale() memo validation, not the registration
+	 * linearisation point. */
+	uint64_t memo_seq;
 	uint64_t hard_floor;
 	uint64_t soft_floor;
 };
@@ -385,6 +389,68 @@ cachetag_purgemap_retire_after_commit(struct cachetag_index *idx,
 	    cachetag_purgemap_table_bytes(tbl));
 	free(tbl);
 }
+
+#if CACHE_TAG_TEST_HOOKS
+int
+cachetag_test_hold_next_purge_publish(struct cachetag_index *idx)
+{
+
+	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
+	__atomic_store_n(&idx->test_release_purge_publish, 0,
+	    __ATOMIC_RELEASE);
+	__atomic_store_n(&idx->test_hold_next_purge_publish, 1,
+	    __ATOMIC_RELEASE);
+	return (1);
+}
+
+int
+cachetag_test_wait_purge_publish_held(struct cachetag_index *idx,
+    uint64_t timeout_ms)
+{
+	uint64_t deadline;
+
+	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
+	deadline = cachetag_now_usec() + timeout_ms * 1000;
+	while (!__atomic_load_n(&idx->test_purge_publish_held,
+	    __ATOMIC_ACQUIRE)) {
+		if (cachetag_now_usec() >= deadline)
+			return (0);
+		VTIM_sleep(0.001);
+	}
+	return (1);
+}
+
+int
+cachetag_test_release_purge_publish(struct cachetag_index *idx)
+{
+
+	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
+	if (!__atomic_load_n(&idx->test_purge_publish_held,
+	    __ATOMIC_ACQUIRE))
+		return (0);
+	__atomic_store_n(&idx->test_release_purge_publish, 1,
+	    __ATOMIC_RELEASE);
+	return (1);
+}
+
+static void
+cachetag_test_pause_purge_publish(struct cachetag_index *idx)
+{
+	uint64_t deadline;
+
+	if (!__atomic_exchange_n(&idx->test_hold_next_purge_publish, 0,
+	    __ATOMIC_ACQ_REL))
+		return;
+	__atomic_store_n(&idx->test_purge_publish_held, 1, __ATOMIC_RELEASE);
+	deadline = cachetag_now_usec() + 5000000;
+	while (!__atomic_load_n(&idx->test_release_purge_publish,
+	    __ATOMIC_ACQUIRE) && cachetag_now_usec() < deadline)
+		VTIM_sleep(0.001);
+	__atomic_store_n(&idx->test_purge_publish_held, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&idx->test_release_purge_publish, 0,
+	    __ATOMIC_RELEASE);
+}
+#endif
 
 static struct cachetag_purgemap_table *
 cachetag_purgemap_prune_rollback_locked(struct cachetag_index *idx,
@@ -967,6 +1033,17 @@ cachetag_purgemap_seq(struct cachetag_index *idx)
 }
 
 uint64_t
+cachetag_purgemap_memo_seq(struct cachetag_index *idx)
+{
+	struct cachetag_purgemap *pm;
+
+	pm = cachetag_purgemap_data(idx);
+	if (pm == NULL)
+		return (0);
+	return (__atomic_load_n(&pm->memo_seq, __ATOMIC_ACQUIRE));
+}
+
+uint64_t
 cachetag_purgemap_entry_count(struct cachetag_index *idx)
 {
 	struct cachetag_purgemap *pm;
@@ -1452,6 +1529,9 @@ cachetag_purge(struct cachetag_index *idx, const char *key,
 		return (-4);
 	}
 	__atomic_store_n(&pm->seq, seq, __ATOMIC_RELEASE);
+#if CACHE_TAG_TEST_HOOKS
+	cachetag_test_pause_purge_publish(idx);
+#endif
 	cachetag_purgemap_apply_upsert_locked(pm, fold, seq, mode, &created);
 	cachetag_purgemap_retire_after_commit(idx, retired);
 	retired = NULL;
@@ -1459,6 +1539,10 @@ cachetag_purge(struct cachetag_index *idx, const char *key,
 	if (mode == TAG_PURGE_HARD)
 		PTOK(pthread_cond_signal(&idx->sweep_cond));
 	cachetag_purgemap_retire_after_commit(idx, retired);
+	/* seq moved before the entry so registrations linearise correctly.
+	 * Publish the memo token only after the complete map mutation: an acquire
+	 * load of memo_seq can then certify the probe result it accompanies. */
+	__atomic_store_n(&pm->memo_seq, seq, __ATOMIC_RELEASE);
 	PTOK(pthread_mutex_unlock(&idx->purge_mtx));
 	(void)created;
 	cachetag_purgemap_account(idx, pm, 0, 0);
@@ -1569,6 +1653,22 @@ cachetag_purgemap_replay(struct cachetag_index *idx,
 	if (r == 0)
 		cachetag_purgemap_account(idx, pm, 0, 0);
 	return (r);
+}
+
+void
+cachetag_purgemap_replay_complete(struct cachetag_index *idx)
+{
+	struct cachetag_purgemap *pm;
+	uint64_t seq;
+
+	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
+	pm = cachetag_purgemap_data(idx);
+	if (pm == NULL)
+		return;
+	PTOK(pthread_mutex_lock(&idx->purge_mtx));
+	seq = __atomic_load_n(&pm->seq, __ATOMIC_ACQUIRE);
+	__atomic_store_n(&pm->memo_seq, seq, __ATOMIC_RELEASE);
+	PTOK(pthread_mutex_unlock(&idx->purge_mtx));
 }
 
 int

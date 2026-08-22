@@ -1087,6 +1087,12 @@ cachetag_note_stale_detected(struct cachetag_index *idx)
 	cachetag_counter_add(idx, &idx->counters.stale_detected, 1);
 }
 
+void
+cachetag_note_stale_memo_hit(struct cachetag_index *idx)
+{
+	cachetag_counter_add(idx, &idx->counters.stale_memo_hits, 1);
+}
+
 static size_t cachetag_object_low_water_target_locked(
     const struct cachetag_index *);
 static size_t cachetag_side_low_water_target_locked(
@@ -4765,6 +4771,7 @@ cachetag_persist_replay(struct cachetag_index *idx)
 	if (r == 0 && cachetag_wal_recovery_checkpoint_due(idx->wal))
 		r = cachetag_purgemap_checkpoint(idx, 1);
 	if (r == 0) {
+		cachetag_purgemap_replay_complete(idx);
 		PTOK(pthread_mutex_lock(&idx->replay_mtx));
 		idx->replay_done = 1;
 		PTOK(pthread_mutex_unlock(&idx->replay_mtx));

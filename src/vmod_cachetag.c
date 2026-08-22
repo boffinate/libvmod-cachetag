@@ -1642,21 +1642,86 @@ cachetag_pending_probe(void *priv, struct objcore *oc,
 	return (r);
 }
 
+/*
+ * Per-request memo for the documented two-call stale() contract: vcl_hit and
+ * vcl_deliver call .stale() on the same object within one request task, and
+ * the second call reuses the first call's answer while the namespace's fully
+ * published purge-map sequence has not moved. The memo holds no objcore
+ * reference: it never dereferences the pointer, only compares it, and dies
+ * with the request workspace.
+ */
+struct cachetag_stale_memo {
+	const struct objcore *oc;
+	uint64_t seq_seen;
+	unsigned magic;
+#define TAG_STALE_MEMO_MAGIC 0x6b7b5f27
+	int result;
+};
+
+_Static_assert(sizeof(struct cachetag_stale_memo) == 24,
+    "stale() request-workspace memo must remain 24 bytes");
+
 VCL_BOOL v_matchproto_(td_cachetag_namespace_stale)
 vmod_namespace_stale(VRT_CTX, struct vmod_cachetag_namespace *ns)
 {
+	struct cachetag_stale_memo *memo;
 	struct objcore *oc = NULL;
+	struct vmod_priv *priv;
+	uint64_t seq_seen;
 	int r;
 
 	CHECK_OBJ_NOTNULL(ctx, VRT_CTX_MAGIC);
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	if (ctx->req != NULL)
 		oc = ctx->req->objcore;
+	if (oc == NULL) {
+		r = cachetag_stale(cachetag_ctx_worker(ctx), ns->index, oc,
+		    cachetag_pending_probe, ns);
+		cachetag_vsc_note_change(ns);
+		return (r);
+	}
+	priv = VRT_priv_task(ctx, ns);
+	if (priv != NULL && priv->priv != NULL) {
+		CAST_OBJ_NOTNULL(memo, priv->priv, TAG_STALE_MEMO_MAGIC);
+		/* The dying check gates the memo: a sweep or expiry can kill
+		 * the object without moving the purge sequence, and the second
+		 * call must still flip. A dying object falls through to the
+		 * full path, which owns that branch. */
+		if (memo->oc == oc && !(oc->flags & OC_F_DYING) &&
+		    memo->seq_seen ==
+		    cachetag_purgemap_memo_seq(ns->index)) {
+			cachetag_note_stale_call(ns->index);
+			cachetag_note_stale_memo_hit(ns->index);
+			cachetag_vsc_note_change(ns);
+			return (memo->result);
+		}
+	}
+	/* Capture the last fully published purge before probing. A purge that is
+	 * already linearised for registrations but has not published its map entry
+	 * still carries the older completion token, so its eventual publication
+	 * invalidates this answer on the next call. */
+	seq_seen = cachetag_purgemap_memo_seq(ns->index);
 	r = cachetag_stale(cachetag_ctx_worker(ctx), ns->index, oc,
 	    cachetag_pending_probe, ns);
-	if (r && oc != NULL) {
+	if (r) {
 		HSH_Kill(oc);
 		cachetag_death(ns->index, oc);
+	}
+	if (priv != NULL) {
+		if (priv->priv == NULL) {
+			memo = WS_Alloc(ctx->ws, sizeof *memo);
+			if (memo != NULL) {
+				INIT_OBJ(memo, TAG_STALE_MEMO_MAGIC);
+				priv->priv = memo;
+			}
+		} else
+			CAST_OBJ_NOTNULL(memo, priv->priv,
+			    TAG_STALE_MEMO_MAGIC);
+		if (memo != NULL) {
+			memo->oc = oc;
+			memo->seq_seen = seq_seen;
+			memo->result = r;
+		}
 	}
 	cachetag_vsc_note_change(ns);
 	return (r);
@@ -1756,6 +1821,39 @@ vmod_namespace_test_abort_next_sweep(VRT_CTX,
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	return (cachetag_test_abort_next_sweep(ns->index));
+}
+
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_hold_next_purge_publish)
+vmod_namespace_test_hold_next_purge_publish(VRT_CTX,
+    struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_test_hold_next_purge_publish(ns->index));
+}
+
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_wait_purge_publish_held)
+vmod_namespace_test_wait_purge_publish_held(VRT_CTX,
+    struct vmod_cachetag_namespace *ns, VCL_INT timeout_ms)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (timeout_ms <= 0 || timeout_ms > 60000)
+		return (0);
+	return (cachetag_test_wait_purge_publish_held(ns->index,
+	    (uint64_t)timeout_ms));
+}
+
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_release_purge_publish)
+vmod_namespace_test_release_purge_publish(VRT_CTX,
+    struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_test_release_purge_publish(ns->index));
 }
 
 VCL_BOOL v_matchproto_(td_cachetag_namespace_test_force_next_attach_slot_overflow)

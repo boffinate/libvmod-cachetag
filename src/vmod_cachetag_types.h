@@ -80,7 +80,7 @@ _Static_assert(sizeof(struct cachetag_counters) ==
     "struct cachetag_counters is not a flat uint64_t table");
 
 /* Deliberate-change tripwire: bump only with a schema change. */
-_Static_assert(CACHETAG_COUNTER_FIELDS == 244,
+_Static_assert(CACHETAG_COUNTER_FIELDS == 245,
     "counter count changed: update cachetag.vsc, cachetag_counters.h and this assert together");
 
 #endif

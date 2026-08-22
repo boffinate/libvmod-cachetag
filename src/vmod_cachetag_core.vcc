@@ -119,6 +119,13 @@ Return true if the current hit/delivery object has a later hard purge, or is
 already leaving the hash. A true result marks the object for removal. A soft
 purge reduces matching objects once and returns false.
 
+The documented contract calls ``stale()`` in both ``vcl_hit`` and
+``vcl_deliver``. The second call for the same object is answered from a
+per-request memo while the namespace's fully published purge-map sequence has
+not moved and the object is not leaving the hash; a purge or kill between the
+two calls forces a full recheck. ``stale_calls`` counts every call either way;
+the ``stale_memo_hits`` counter reports how many calls the memo answered.
+
 $Restrict vcl_hit vcl_deliver
 
 $Method INT .pending()

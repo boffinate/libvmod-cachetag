@@ -255,17 +255,21 @@ else
 			src/vtc/cachetag_c00015.vtc
 			src/vtc/cachetag_c00018.vtc
 			src/vtc/cachetag_c00019.vtc
-			src/vtc/cachetag_c00021.vtc
-			src/vtc/cachetag_c00022.vtc
-			src/vtc/cachetag_c00023.vtc
-			src/vtc/cachetag_r00001.vtc
+				src/vtc/cachetag_c00021.vtc
+				src/vtc/cachetag_c00022.vtc
+				src/vtc/cachetag_c00023.vtc
+				src/vtc/cachetag_c00026.vtc
+				src/vtc/cachetag_c00027.vtc
+				src/vtc/cachetag_r00001.vtc
 			src/vtc/cachetag_r00002.vtc
 			src/vtc/cachetag_r00003.vtc
 			src/vtc/cachetag_r00004.vtc
 			src/vtc/cachetag_r00005.vtc
-			src/vtc/cachetag_r00006.vtc
-			src/vtc/cachetag_r00008.vtc
-		"
+				src/vtc/cachetag_r00006.vtc
+				src/vtc/cachetag_r00008.vtc
+				src/vtc/cachetag_r00009.vtc
+				src/vtc/cachetag_pm00038.vtc
+			"
 	fi
 	tests=""
 	for t in $common_tests; do

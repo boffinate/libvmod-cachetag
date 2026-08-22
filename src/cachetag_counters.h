@@ -327,6 +327,8 @@
 	    "stale() calls")                                                  \
 	CT(stale_detected, counter, info,                                     \
 	    "stale() positive results")                                       \
+	CT(stale_memo_hits, counter, info,                                    \
+	    "stale() calls answered by the per-request memo")                 \
 	CT(purgemap_entries, gauge, info,                                     \
 	    "Live purge-map entries")                                         \
 	CT(purgemap_table_slots, gauge, diag,                                 \

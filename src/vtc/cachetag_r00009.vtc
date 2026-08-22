@@ -1,0 +1,252 @@
+vtest "stale() per-request memo: reuse, and recompute when the sequence moves"
+
+# The memo must answer the second stale() call of a request only while the
+# namespace's fully published purge-map sequence is unchanged. Cases 2 and 3
+# park a request inside vcl_hit with its memo already filled, publish a purge
+# from another connection only after the fill is signalled, and then release:
+# a memo that masked the purge would answer from the stale entry and fail the
+# assertions. Case 4 changes only the object's dying state. Sweeping is
+# disabled because a hard purge signals the sweeper, and a sweep killing the
+# object mid-test would bypass the path under test.
+
+server s1 -repeat 6 {
+	rxreq
+	expect req.url == "/case1"
+	txresp -body "fresh-case1"
+
+	rxreq
+	expect req.url == "/case2"
+	txresp -body "stale-case2"
+
+	rxreq
+	expect req.url == "/case2"
+	txresp -body "refetched-case2"
+
+	rxreq
+	expect req.url == "/case3"
+	txresp -body "soft-case3"
+
+	rxreq
+	expect req.url == "/case4"
+	txresp -body "dying-case4"
+
+	rxreq
+	expect req.url == "/case4"
+	txresp -body "refetched-case4"
+} -start
+
+# b_memoN: the request has called stale() once and filled its memo.
+# b_holdN: hold the request while the main thread purges, then release.
+barrier b_memo1 sock 2
+barrier b_hold1 sock 2
+barrier b_memo2 sock 2
+barrier b_hold2 sock 2
+barrier b_memo3 sock 2
+barrier b_hold3 sock 2
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default",
+		    sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			if (req.http.X-Soft == "1") {
+				set req.http.purged =
+				    tags.purge(req.http.X-Key, mode = soft);
+			} else {
+				set req.http.purged =
+				    tags.purge(req.http.X-Key);
+			}
+			return (synth(200));
+		}
+		if (req.method == "HASH-PURGE") {
+			return (purge);
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add(bereq.http.X-Key);
+		set beresp.ttl = 1h;
+		set beresp.grace = 2h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+		if (req.url == "/case2" && req.http.X-Park == "1") {
+			vtc.barrier_sync("${b_memo1_sock}");
+			vtc.barrier_sync("${b_hold1_sock}");
+		}
+		if (req.url == "/case3" && req.http.X-Park == "1") {
+			vtc.barrier_sync("${b_memo2_sock}");
+			vtc.barrier_sync("${b_hold2_sock}");
+		}
+		if (req.url == "/case4" && req.http.X-Park == "1") {
+			vtc.barrier_sync("${b_memo3_sock}");
+			vtc.barrier_sync("${b_hold3_sock}");
+		}
+	}
+
+	sub vcl_deliver {
+		if (tags.stale()) {
+			set resp.http.Stale = "1";
+		} else {
+			set resp.http.Stale = "0";
+		}
+		set resp.http.Obj-TTL = obj.ttl;
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+
+	sub vcl_purge {
+		return (synth(200));
+	}
+} -start
+
+# Case 1: warm the object, then replay it as a two-call hit. The
+# deliver-phase call must come from the memo.
+client c1a {
+	txreq -url "/case1" -hdr "X-Key: memo-plain"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "fresh-case1"
+} -run
+
+client c1b {
+	txreq -url "/case1" -hdr "X-Key: memo-plain"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "fresh-case1"
+	expect resp.http.Stale == "0"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_calls == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_memo_hits == 1
+
+# Case 2: hard purge lands strictly between the two calls. The
+# deliver-phase call must recompute and return true, and the killed object
+# must be gone for the next request.
+client c2a {
+	txreq -url "/case2" -hdr "X-Key: memo-hard"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "stale-case2"
+} -run
+
+client c2b {
+	txreq -url "/case2" -hdr "X-Key: memo-hard" -hdr "X-Park: 1"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.Stale == "1"
+} -start
+
+barrier b_memo1 sync
+
+client c_purge1 {
+	txreq -req PURGE -url "/" -hdr "X-Key: memo-hard"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+} -run
+
+barrier b_hold1 sync
+client c2b -wait
+
+client c2c {
+	txreq -url "/case2" -hdr "X-Key: memo-hard"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "refetched-case2"
+} -run
+
+# Case 3: soft purge between the two calls. The recomputed answer is still
+# false, but the object must have been reduced: TTL <= 0 proves the
+# deliver-phase call really probed instead of replaying the memo.
+client c3a {
+	txreq -url "/case3" -hdr "X-Key: memo-soft"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "soft-case3"
+} -run
+
+client c3b {
+	txreq -url "/case3" -hdr "X-Key: memo-soft" -hdr "X-Park: 1"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.Stale == "0"
+	expect resp.http.Obj-TTL <= 0.5
+} -start
+
+barrier b_memo2 sync
+
+client c_purge2 {
+	txreq -req PURGE -url "/" -hdr "X-Key: memo-soft" -hdr "X-Soft: 1"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+} -run
+
+barrier b_hold2 sync
+client c3b -wait
+
+# Case 4: Vinyl's built-in hash purge marks the parked objcore dying without
+# moving cachetag's purge sequence. The dying gate must reject the otherwise
+# valid memo and the deliver-phase call must flip to true.
+client c4a {
+	txreq -url "/case4" -hdr "X-Key: memo-dying"
+	rxresp
+	expect resp.status == 200
+} -run
+
+client c4b {
+	txreq -url "/case4" -hdr "X-Key: memo-dying" -hdr "X-Park: 1"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.Stale == "1"
+} -start
+
+barrier b_memo3 sync
+
+client c_hash_purge {
+	txreq -req HASH-PURGE -url "/case4"
+	rxresp
+	expect resp.status == 200
+} -run
+
+barrier b_hold3 sync
+client c4b -wait
+
+client c4c {
+	txreq -url "/case4" -hdr "X-Key: memo-dying"
+	rxresp
+	expect resp.status == 200
+} -run
+
+# A second two-call hit on /case1: the deliver-phase call must come from the
+# memo again. (A post-soft-purge replay of /case3 would not be deterministic
+# here: the reduction dropped its TTL to zero, so the lookup may legitimately
+# go to the backend instead.)
+client c1c {
+	txreq -url "/case1" -hdr "X-Key: memo-plain"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "fresh-case1"
+	expect resp.http.Stale == "0"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_calls == 16
+vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_detected >= 1
+vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_memo_hits == 2
+# /case1 twice-requested but one object, the refetched /case2, /case3, and the
+# refetched /case4. Both killed originals must be gone; with sweeping disabled
+# nothing else may have removed membership behind the test's back.
+vinyl v1 -expect CACHETAG.vcl1_tags_default.volatile_objects == 4

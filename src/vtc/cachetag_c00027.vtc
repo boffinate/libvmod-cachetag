@@ -1,0 +1,108 @@
+vtest "stale() memo task scope across restart and ESI subrequests"
+
+# Restart rolls back task privates before changing the looked-up object, so the
+# restarted lookup must fill a fresh memo. ESI creates a distinct request task;
+# both the parent and fragment should independently fill and hit their memos.
+
+server s1 {
+	rxreq
+	expect req.url == "/restart-a"
+	txresp -body "restart-a"
+
+	rxreq
+	expect req.url == "/restart-b"
+	txresp -body "restart-b"
+
+	rxreq
+	expect req.url == "/page"
+	txresp -body {<esi:include src="/fragment"/>}
+
+	rxreq
+	expect req.url == "/fragment"
+	txresp -body "fragment"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("task_scope");
+	}
+
+	sub vcl_recv {
+		if (req.restarts > 0 && req.http.X-Restart == "1") {
+			set req.url = "/restart-b";
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add(bereq.url);
+		set beresp.ttl = 1h;
+		if (bereq.url == "/page") {
+			set beresp.do_esi = true;
+		}
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+		if (req.url == "/restart-a" && req.http.X-Restart == "1" &&
+		    req.restarts == 0) {
+			return (restart);
+		}
+	}
+
+	sub vcl_deliver {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+} -start
+
+client c_restart_a_warm {
+	txreq -url "/restart-a"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "restart-a"
+} -run
+
+client c_restart_b_warm {
+	txreq -url "/restart-b"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "restart-b"
+} -run
+
+client c_restart {
+	txreq -url "/restart-a" -hdr "X-Restart: 1"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "restart-b"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_calls == 5
+vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_memo_hits == 1
+
+client c_page_warm {
+	txreq -url "/page"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "fragment"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_calls == 7
+vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_memo_hits == 1
+
+client c_page_hit {
+	txreq -url "/page"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "fragment"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_calls == 11
+vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_detected == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_memo_hits == 3
+
+server s1 -wait

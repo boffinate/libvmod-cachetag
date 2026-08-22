@@ -80,6 +80,8 @@ int cachetag_attach(struct cachetag_index *, struct objcore *,
     const struct cachetag_registration_snapshot *, unsigned,
     enum cachetag_purge_mode *);
 void cachetag_death(struct cachetag_index *, struct objcore *);
+void cachetag_note_stale_call(struct cachetag_index *);
+void cachetag_note_stale_memo_hit(struct cachetag_index *);
 
 int cachetag_purge(struct cachetag_index *, const char *,
     enum cachetag_purge_mode);
@@ -90,6 +92,7 @@ int cachetag_stale(struct worker *, struct cachetag_index *, struct objcore *,
 uint64_t cachetag_object_count(struct cachetag_index *);
 uint64_t cachetag_edge_count(struct cachetag_index *);
 uint64_t cachetag_purgemap_seq(struct cachetag_index *);
+uint64_t cachetag_purgemap_memo_seq(struct cachetag_index *);
 uint64_t cachetag_purgemap_entry_count(struct cachetag_index *);
 uint64_t cachetag_purgemap_slot_count(struct cachetag_index *);
 uint64_t cachetag_purgemap_byte_count(struct cachetag_index *);
@@ -106,6 +109,11 @@ int cachetag_test_fail_next_key_purge_wal(struct cachetag_index *);
 int cachetag_test_fail_next_persist_prepare(struct cachetag_index *);
 int cachetag_test_side_initial_buckets(struct cachetag_index *, uint32_t);
 int cachetag_test_abort_next_sweep(struct cachetag_index *);
+#if CACHE_TAG_TEST_HOOKS
+int cachetag_test_hold_next_purge_publish(struct cachetag_index *);
+int cachetag_test_wait_purge_publish_held(struct cachetag_index *, uint64_t);
+int cachetag_test_release_purge_publish(struct cachetag_index *);
+#endif
 int cachetag_test_force_next_attach_slot_overflow(struct cachetag_index *);
 int cachetag_test_fail_next_object_segment_alloc(struct cachetag_index *);
 #if CACHE_TAG_SET_INTERNING
@@ -137,6 +145,7 @@ int cachetag_decode_key_purge_record(const void *, uint64_t, uint64_t *,
     uint64_t *, enum cachetag_purge_mode *, uint64_t *);
 int cachetag_persist_replay(struct cachetag_index *);
 int cachetag_purgemap_checkpoint(struct cachetag_index *, int);
+void cachetag_purgemap_replay_complete(struct cachetag_index *);
 int cachetag_purgemap_probe_snapshots(struct cachetag_index *,
     const struct cachetag_registration_snapshot *, unsigned,
     enum cachetag_purge_mode *);

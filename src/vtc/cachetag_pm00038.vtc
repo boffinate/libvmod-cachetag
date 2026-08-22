@@ -1,0 +1,132 @@
+vtest "stale() memo rejects a purge whose sequence moved before entry publication"
+
+# Hold a hard purge in the existing publication window: pm->seq has moved but
+# the matching purge-map entry is not visible. The first stale() call must fill
+# a false memo there. Once the purge publishes, the second call must invalidate
+# that memo and return true.
+
+barrier b_memo sock 2
+barrier b_hold sock 2
+
+server s1 {
+	rxreq
+	expect req.url == "/victim"
+	txresp -body "old"
+
+	rxreq
+	expect req.url == "/victim"
+	txresp -body "new"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("publish_gap", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "ARM") {
+			set req.http.result = tags.test_hold_next_purge_publish();
+			return (synth(200));
+		}
+		if (req.method == "WAIT") {
+			set req.http.result = tags.test_wait_purge_publish_held(5000);
+			return (synth(200));
+		}
+		if (req.method == "RELEASE") {
+			set req.http.result = tags.test_release_purge_publish();
+			return (synth(200));
+		}
+		if (req.method == "PURGE") {
+			set req.http.result = tags.purge("victim", hard);
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("victim");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+		if (req.http.X-Park == "1") {
+			vtc.barrier_sync("${b_memo_sock}");
+			vtc.barrier_sync("${b_hold_sock}");
+		}
+	}
+
+	sub vcl_deliver {
+		if (req.method == "GET") {
+			if (tags.stale()) {
+				set resp.http.Stale = "1";
+			} else {
+				set resp.http.Stale = "0";
+			}
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_warm {
+	txreq -url "/victim"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "old"
+} -run
+
+client c_arm {
+	txreq -req ARM
+	rxresp
+	expect resp.http.result == true
+} -run
+
+client c_purge {
+	txreq -req PURGE
+	rxresp
+	expect resp.http.result == -1
+} -start
+
+client c_wait {
+	txreq -req WAIT
+	rxresp
+	expect resp.http.result == true
+} -run
+
+client c_hit {
+	txreq -url "/victim" -hdr "X-Park: 1"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.Stale == "1"
+} -start
+
+barrier b_memo sync
+
+client c_release {
+	txreq -req RELEASE
+	rxresp
+	expect resp.http.result == true
+} -run
+
+client c_purge -wait
+barrier b_hold sync
+client c_hit -wait
+
+client c_refetch {
+	txreq -url "/victim"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "new"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_publish_gap.stale_calls == 4
+vinyl v1 -expect CACHETAG.vcl1_tags_publish_gap.stale_detected == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_publish_gap.stale_memo_hits == 0

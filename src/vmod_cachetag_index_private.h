@@ -191,6 +191,11 @@ struct cachetag_index {
 	unsigned test_fail_next_key_purge_wal;
 	unsigned test_fail_next_persist_prepare;
 	unsigned test_abort_next_sweep;
+#if CACHE_TAG_TEST_HOOKS
+	unsigned test_hold_next_purge_publish;
+	unsigned test_purge_publish_held;
+	unsigned test_release_purge_publish;
+#endif
 	unsigned test_force_next_attach_slot_overflow;
 	unsigned test_fail_next_object_segment_alloc;
 	unsigned test_fail_next_side_migration_alloc;
@@ -267,6 +272,7 @@ int cachetag_purgemap_checkpoint_begin(struct cachetag_index *,
     const struct cachetag_wal_checkpoint_meta *);
 int cachetag_purgemap_checkpoint_entry(struct cachetag_index *,
     const struct cachetag_wal_checkpoint_entry *);
+void cachetag_purgemap_replay_complete(struct cachetag_index *);
 void *cachetag_purgemap_sweep_thread(struct worker *, void *);
 void cachetag_purgemap_destroy(struct cachetag_index *);
 
