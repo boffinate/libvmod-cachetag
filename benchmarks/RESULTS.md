@@ -1,153 +1,115 @@
-# Cachetag Benchmark Results
+# Cachetag benchmark results
 
-Last updated: 2026-07-17
+Last updated: 2026-08-20
 
-We compared Default cachetag, in-memory `xkey`, Buddy cachetag, and persistent Fellow cachetag on 10 million objects with four low-fanout tags per object. Default cachetag used 833.18 MiB of tracked index memory versus `xkey`’s 4.55 GiB—an 82.13% reduction—and its median load rate was 14.83% higher.
+Rules reviewed: BR-001..BR-026; applicable: BR-001, BR-002, BR-004, BR-007, BR-008, BR-011, BR-013, BR-014, BR-016, BR-017, BR-018, BR-019, BR-020, BR-021, BR-023, BR-024, BR-025 and BR-026. The wall-CPU claims comply; the optional `perf stat` evidence is retrospectively partial and report-only under the strengthened BR-024 coverage rule.
 
-Every reported run completed the workload with 50,000/50,000 residency hits, no warm misses or errors, no LRU nukes, and no swap. The in-memory figures are achieved rates at the 24-client calibration peak, not saturated throughput or capacity; Fellow was IO-limited.
+Cachetag used less process memory than xkey in all three static in-memory workloads tested. The difference was largest when tags were mostly unique and smallest when 4 KiB object bodies dominated the cache footprint. Cachetag also used slightly less `cache-main` CPU to load and index the fixed population. On warm hits the two are now indistinguishable at the resolution of this measurement: cachetag's remaining median gap to xkey is 0.45–1.09%, below the run-to-run noise floor on every workload.
 
-| Lane | Observed load RPS median (min–max) | Observed warm RPS median (min–max) | Membership evidence |
-| --- | ---: | ---: | --- |
-| Default cachetag | 80,175.81 (79,937.80–80,450.17) | 188,030.94 (187,790.55–188,791.28) | 833.18 MiB tracked, 87.37 bytes/object |
-| Default in-memory `xkey` | 69,819.34 (69,555.03–69,963.03) | 191,756.85 (190,336.09–192,582.72) | 4.55 GiB tracked, 488.96 bytes/object |
-| Buddy cachetag | 78,330.06 (78,055.06–78,737.78) | 189,878.34 (188,282.09–191,917.46) | 833.18 MiB tracked, 87.37 bytes/object |
-| Persistent Fellow cachetag | 19,815.28 (19,630.68–19,914.72) | 82,464.79 (78,259.23–84,931.05) | 80 persistent attribute bytes/object; zero volatile cachetag objects/edges |
+These results describe synthetic workloads on one server cohort. They do not show maximum throughput, production traffic, invalidation cost, long-running lifecycle behaviour, or performance with Fellow or Buddy storage.
 
-The tables below preserve earlier campaigns and workload shapes as historical context. Use the section above for the current README's 10M comparison.
+## Results
 
-## How To Read
+### Process memory after load
 
-`no-index` is the storage-only speed and memory baseline, with no tag index. `xkey` is the existing in-memory tag-index baseline. `cachetag` is the VMOD being tested. In the FDO-direct Fellow path, cachetag doesn’t rebuild an in-memory object-membership index after a restart or first touch. Higher RPS is better; lower memory use and latency are better. `n/a` means that the lane does not exist or was not run in that matrix.
+The memory measure is confirmation PSS for the provenanced Vinyl `cache-main` process after loading 100,000 objects, draining pending attachment work and waiting for a quiescent endpoint. It is a common whole-process measure; implementation-specific counters are not used for the comparison.
 
-## Load / Attach RPS
+| Workload | Cachetag median PSS (min–max) | xkey median PSS (min–max) | Cachetag difference |
+| --- | ---: | ---: | ---: |
+| Mostly unique tags, 2-byte body | 108.954 MiB (108.895–109.116) | 188.421 MiB (188.387–188.499) | 42.18% lower |
+| Mostly shared tags, 2-byte body | 109.108 MiB (108.963–109.199) | 144.004 MiB (143.853–144.066) | 24.23% lower |
+| Moderate sharing, 4 KiB body | 511.785 MiB (511.721–511.831) | 550.168 MiB (549.982–550.325) | 6.98% lower |
 
-Cold load/attach path. These rows are clean unless the source cell carries an explicit caveat.
+The 2-byte lanes isolate index and object-metadata costs. They are not a model of a typical cached response. The 4 KiB lane puts the index difference in the context of ordinary object data: cachetag saved about 38.4 MiB across 100,000 objects, but the proportional difference fell to 6.98% of total process PSS.
 
-| Backend | Scale | Profile | `no-index` | `xkey` | `cachetag` | Source |
-| --- | ---: | --- | ---: | ---: | ---: | --- |
-| Buddy | 100k | `extreme-high-fanout` | n/a | 73,001 | 73,107 | `buddy-local-cost-attach-100k` |
-| Buddy | 100k | `low-fanout-unique` | n/a | 71,020 | 72,964 | `buddy-local-cost-attach-100k` |
-| Default | 100k | `extreme-high-fanout` | n/a | 74,243 | 74,713 | `local-cost-attach-100k` |
-| Default | 100k | `low-fanout-unique` | n/a | 71,942 | 74,694 | `local-cost-attach-100k` |
-| Default | 1M | `extreme-high-fanout` | n/a | 74,891 | 74,796 | `local-cost-attach-1m` |
-| Default | 1M | `low-fanout-unique` | n/a | 71,558 | 74,912 | `local-cost-attach-1m` |
-| Default | 10M | `low-fanout-unique` | n/a | 66,117 | 71,025 | `lowfanout-10m` |
-| Fellow persistent | 100k | `low-fanout-unique`, full-shape | n/a | n/a | 194 | `fellow-local-cost-100k`; anomalously slow |
-| Fellow persistent | 1M | `low-fanout-unique`, full-shape | n/a | n/a | 18,928 | `fellow-local-cost-1m`; clean 2026-07-08 rerun, IO-limited |
+These absolute PSS values come from `vinyltest`, whose child process uses its non-production `abort:true,junk:true` allocator configuration. The within-cohort comparison is valid; the absolute totals should not be treated as a production sizing guide.
 
-## Warm-Hit RPS
+### CPU for the fixed load and attachment work
 
-Warm-hit path. Default/Buddy rows are separate warm matrices except 10M low-fanout, which includes warm in the low-fanout matrix. These rows are clean unless the source cell carries an explicit caveat.
+The load measure covers the exact 100,000-object workload and cachetag's pending-attachment drain. Values are phase-aligned CPU consumed by `cache-main`, not whole-container CPU or requests per second.
 
-| Backend | Scale | Profile | `no-index` | `xkey` | `cachetag` | Source |
-| --- | ---: | --- | ---: | ---: | ---: | --- |
-| Buddy | 100k | `extreme-high-fanout` | n/a | 166,119 | 167,554 | `buddy-local-cost-warm-100k` |
-| Buddy | 100k | `low-fanout-unique` | n/a | 166,482 | 168,744 | `buddy-local-cost-warm-100k` |
-| Default | 100k | `extreme-high-fanout` | n/a | 165,167 | 166,791 | `local-cost-warm-100k` |
-| Default | 100k | `low-fanout-unique` | n/a | 166,596 | 168,345 | `local-cost-warm-100k` |
-| Default | 1M | `extreme-high-fanout` | n/a | 164,970 | 167,578 | `local-cost-warm-1m` |
-| Default | 1M | `low-fanout-unique` | n/a | 165,903 | 168,107 | `local-cost-warm-1m` |
-| Default | 10M | `low-fanout-unique` | n/a | 167,250 | 166,595 | `lowfanout-10m` |
-| Fellow persistent | 100k | `low-fanout-unique`, full-shape | n/a | n/a | 37,629 | `fellow-local-cost-100k`; anomalous load row |
-| Fellow persistent | 1M | `low-fanout-unique`, full-shape | n/a | n/a | 43,478 | `fellow-local-cost-1m`; clean 2026-07-08 rerun, IO-limited |
+| Workload | Cachetag median (min–max) | xkey median (min–max) | Cachetag difference |
+| --- | ---: | ---: | ---: |
+| Mostly unique tags | 330.87 µs/object (330.57–332.06) | 341.40 µs/object (337.37–345.57) | 3.09% lower |
+| Mostly shared tags | 328.31 µs/object (327.05–329.12) | 331.05 µs/object (330.68–333.93) | 0.83% lower |
+| Moderate sharing, 4 KiB body | 349.39 µs/object (347.99–353.86) | 355.99 µs/object (354.48–357.59) | 1.86% lower |
 
-## Low-Fanout Memory
+Cachetag's median pending drain was 0.151–0.197 ms, compared with 6.4–7.7 seconds for the fixed load. The drain was included in the measurement, but was not a material part of the result.
 
-The tracked-memory column is `tracked_memory_bytes`; bytes per object is that value divided by the number of loaded objects. RSS is the highest `vinyld` resident set observed in the row. Cgroup peak covers the whole container, so it often reflects storage and object-body memory as well as the VMOD index.
+### CPU for warm hits
 
-| Backend | Scale | `cachetag` tracked | `cachetag` bytes/object | `xkey` tracked | `xkey` bytes/object | `cachetag` RSS | `xkey` RSS | Source |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Default | 100k | 11.57 MiB | 121 | 46.64 MiB | 489 | 132.80 MiB | 162.24 MiB | `local-cost-attach-100k` |
-| Default | 1M | 99.75 MiB | 105 | 466.32 MiB | 489 | 1,013.40 MiB | 1.38 GiB | `local-cost-attach-1m` |
-| Default | 10M | 1.01 GiB | 108 | 4.55 GiB | 489 | 9.61 GiB | 14.19 GiB | `lowfanout-10m` |
-| Buddy | 100k | 11.57 MiB | 121 | 54.93 MiB | 576 | 150.00 MiB | 179.27 MiB | `buddy-local-cost-attach-100k` |
+Superseded on 2026-08-20 by the `step-4-vsc-publish-policy-decision-v1` campaign, which re-measured warm-hit CPU on a new cohort with the **two-call VCL shape** that `USAGE.md` documents: `tags.stale()` in `vcl_hit` *and* in `vcl_deliver`. The earlier table below the fold measured a one-call shape and is retained as supersession history, not mixed in here. The two shapes are not comparable and the harness refuses to merge them: the VCL shape is folded into every row's cohort fingerprint.
 
-## Fanout Stress
+Warm traffic was offered at 5,000 requests per second for 60 seconds, below the demonstrated driver and server knee. The useful comparison is CPU per successful hit, not achieved rate or maximum throughput. Figures are medians of two physical rows per cachetag arm and four per xkey arm, each of three repetitions.
 
-Cachetag continues to use less tracked memory in the high-fanout rows. The 5M fanout stress row passed all nine runs. After relaxing the remote RAM-headroom guard, the 10M fanout/attach row also passed all nine runs.
+| Workload | Cachetag median | xkey median | Residual gap | Noise floor (2 × A/A) |
+| --- | ---: | ---: | ---: | ---: |
+| Mostly unique tags | 74.005 µs/hit (73.43–74.58) | 73.670 µs/hit (72.95–73.99) | 0.45% | 1.383% |
+| Mostly shared tags | 74.525 µs/hit (73.84–75.21) | 73.720 µs/hit (72.90–74.06) | 1.09% | 1.748% |
+| Moderate sharing, 4 KiB body | 73.900 µs/hit (73.33–74.47) | 73.510 µs/hit (73.09–74.99) | 0.53% | 3.959% |
 
-| Matrix | Runs | Lane | Load RPS | Warm RPS | Tracked memory | RSS | Cgroup peak |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `fanout-100k` | 9/9 | `no-index` | 78,007 | 169,112 | n/a | 110.15 MiB | 243.65 MiB |
-| `fanout-100k` | 9/9 | `xkey` | 73,881 | 166,592 | 28.23 MiB | 141.73 MiB | 249.46 MiB |
-| `fanout-100k` | 9/9 | `cachetag` | 73,907 | 165,503 | 14.90 MiB | 135.50 MiB | 243.65 MiB |
-| `fanout-1m` | 9/9 | `no-index` | 78,810 | 169,335 | n/a | 901.00 MiB | 1.41 GiB |
-| `fanout-1m` | 9/9 | `xkey` | 74,243 | 166,523 | 282.29 MiB | 1.20 GiB | 1.58 GiB |
-| `fanout-1m` | 9/9 | `cachetag` | 73,795 | 166,648 | 131.84 MiB | 1.02 GiB | 1.41 GiB |
-| `fanout-5m` | 9/9 | `no-index` | 76,829 | 169,597 | n/a | 4.31 GiB | 6.95 GiB |
-| `fanout-5m` | 9/9 | `xkey` | 72,564 | 164,977 | 1.38 GiB | 5.92 GiB | 7.75 GiB |
-| `fanout-5m` | 9/9 | `cachetag` | 72,318 | 166,272 | 700.28 MiB | 5.07 GiB | 6.95 GiB |
-| `fanout-attach-10m` | 9/9 | `cachetag` | 71,860 | n/a | 1.01 GiB | 9.61 GiB | 13.51 GiB |
-| `fanout-attach-10m` | 9/9 | `xkey` | 70,910 | n/a | 2.76 GiB | 11.81 GiB | 15.28 GiB |
+**No directional claim is made from this table.** On every workload the residual gap is smaller than twice the same-code xkey A/A spread, which is the campaign's own bar for calling a difference real. Post-change cachetag warm-hit CPU is indistinguishable from xkey's at this resolution; the medians are reported so the figures are on record, not because the ordering means anything.
 
-## Historical Fellow Attach Memory
+Those are the current cachetag figures, which include the VSC publish policy. The same campaign measured the immediately preceding cachetag tree on identical hardware, harness and VCL, which is what the publish policy changed:
 
-These attach-only rows predate FDO-direct. They show the cost of the old persistent resident index and should not support current Fellow-direct claims.
+| Workload | Cachetag before the publish policy | Cachetag after | xkey | Gap to xkey, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| Mostly unique tags | 75.235 µs/hit | 74.005 µs/hit | 73.670 µs/hit | 2.13% → 0.45% |
+| Mostly shared tags | 75.135 µs/hit | 74.525 µs/hit | 73.720 µs/hit | 1.92% → 1.09% |
+| Moderate sharing, 4 KiB body | 74.660 µs/hit | 73.900 µs/hit | 73.510 µs/hit | 1.56% → 0.53% |
 
-| Matrix | Runs | Lane | Load RPS | Tracked memory | Bytes/object | RSS | Cgroup peak |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `fellow-storage-attach-100k` | 3/3 | storage only | 17,156 | n/a | n/a | 70.48 MiB | 174.14 MiB |
-| `fellow-volatile-attach-100k` | 3/3 | volatile `cachetag` | 17,088 | 37.59 MiB | 394 | 130.23 MiB | 245.85 MiB |
-| `fellow-persistent-attach-100k` | 3/3 | persistent `cachetag` | 15,881 | 37.59 MiB | 394 | 142.07 MiB | 288.09 MiB |
-| `fellow-storage-attach-1m` | 3/3 | storage only | 16,786 | n/a | n/a | 442.08 MiB | 826.34 MiB |
-| `fellow-volatile-attach-1m` | 3/3 | volatile `cachetag` | 16,609 | 352.26 MiB | 369 | 826.58 MiB | 1.19 GiB |
-| `fellow-persistent-attach-1m` | 3/3 | persistent `cachetag` | 15,349 | 352.26 MiB | 369 | 903.50 MiB | 1.51 GiB |
-| `fellow-storage-attach-5m` | 1/1 | storage only | 16,337 | n/a | n/a | 2.04 GiB | 3.64 GiB |
-| `fellow-volatile-attach-5m` | 1/1 | volatile `cachetag` | 15,863 | 1.73 GiB | 372 | 3.84 GiB | 5.48 GiB |
-| `fellow-persistent-attach-5m` | 1/1 | persistent `cachetag` | 15,048 | 1.73 GiB | 372 | 4.55 GiB | 7.37 GiB |
-| `fellow-fanout-storage-attach-100k` | 3/3 | fanout storage only | 17,148 | n/a | n/a | 70.75 MiB | 172.42 MiB |
-| `fellow-fanout-volatile-attach-100k` | 3/3 | fanout volatile `cachetag` | 17,110 | 14.90 MiB | 156 | 99.36 MiB | 210.68 MiB |
-| `fellow-fanout-persistent-attach-100k` | 3/3 | fanout persistent `cachetag` | 15,928 | 14.90 MiB | 156 | 118.17 MiB | 255.23 MiB |
+What is and is not claimed here. The **improvement** from the publish policy is directional on the mostly-unique workload, where it measured 1.670% against a 1.383% bar with both bracketed comparisons agreeing; on the other two workloads it is below the wall-CPU noise floor and no directional claim is made. The **before** gap to xkey exceeds the floor on the two 2-byte workloads and not on the 4 KiB one. The **after** gap is below the floor everywhere, as the table above says.
 
-## Historical Fellow Full-Shape And Shutdown
+Warm-phase instructions per hit were lower by 1.37–1.55% in both physical before/after brackets on all three workloads. This is supporting mechanism evidence only: `perf stat` ran on repetition 1 of each three-repetition row (`n=1/3`), and repetition 1 was systematically hotter than later repetitions. The resulting 0.010–0.171% two-point A/A spreads are not reusable noise floors and do not support a judged instruction-count claim under BR-024. The harness now requires complete repetition coverage before reporting such a comparison.
 
-The 2026-07-08 rerun separates benchmark results from VTC acceptance. `fellow-local-cost-1m` passed for the pre-FDO-direct path. The shutdown probes loaded every requested object and captured memory and load metrics without driver errors, but their VTCs failed during post-load teardown. Their numbers are useful samples, not clean benchmark passes. Use the 2026-07-10 B1 notes for current Fellow-direct claims.
+All rows met the frozen offered-load and scheduling gates. Median achieved rates were about 4,950–4,960 requests per second with no request errors. Because the campaign deliberately ran below saturation, these figures do not establish either implementation's throughput capacity.
 
-| Matrix | Runs | Load RPS | Warm RPS | Tracked memory | Bytes/object | RSS | Cgroup peak | Caveat |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| `fellow-local-cost-100k` | 3/3 | 194 | 37,629 | 37.59 MiB | 394 | n/a | n/a | anomalously slow load; use as diagnosis input |
-| `fellow-local-cost-1m` | 3/3 | 18,928 | 43,478 | 352.26 MiB | 369 | 903.14 MiB | 1.52 GiB | clean 2026-07-08 rerun; IO-limited |
-| `fellow-shutdown-5m` | 0/1 | 17,724 | n/a | 1.73 GiB | 372 | 4.36 GiB | 7.19 GiB | driver completed with zero errors; VTC failed after stats capture during teardown |
-| `fellow-shutdown-10m` | 0/1 | 15,016 | n/a | 3.43 GiB | 369 | 8.64 GiB | 14.33 GiB | driver completed with zero errors; VTC failed after stats capture during teardown |
+Latency differences were small and inconsistent. Neither campaign authorised a directional latency claim, so none is made here.
 
-## Fellow FDO-Direct Restart
+## Workloads
 
-Use the `post_restart` and `post_first_touch` VMOD counters to assess the accepted 2026-07-10 FDO-direct restart results, rather than the old replay and hydration counters. On restart, cachetag doesn’t replay objects one at a time, read cachetag FDOs before traffic, or rebuild resident membership. On first touch, Fellow loads its usual disk-object metadata and cachetag reads the serialized envelope directly.
+Every lane loaded 100,000 objects with four tags per object and 400,000 object-tag relationships. Warm access was deterministic and uniform-cyclic.
 
-| Shape | Baseline post-restart obj/edges/rev | FDO-direct post-restart obj/edges/rev | FDO-direct after 10% touch obj/edges/rev | Object/index bytes before -> after |
-| --- | ---: | ---: | ---: | --- |
-| 100k-t5 | 100,000 / 500,000 / 4,000,000 | 0 / 0 / 0 | 0 / 0 / 0 | 2,300,792 + 9,830,400 -> 43,648 + 0 |
-| 100k-t6 | 100,000 / 600,000 / 4,800,000 | 0 / 0 / 0 | 0 / 0 / 0 | 10,689,440 + 9,830,400 -> 43,648 + 0 |
-| 100k-t20 | 100,000 / 2,000,000 / 16,000,000 | 0 / 0 / 0 | 0 / 0 / 0 | 10,689,440 + 9,830,400 -> 43,648 + 0 |
-| 1m-t5 | 1,000,000 / 5,000,000 / 40,000,000 | 0 / 0 / 0 | 0 / 0 / 0 | 8,592,248 + 96,000,000 -> 43,648 + 0 |
-| 1m-t6 | 1,000,000 / 6,000,000 / 48,000,000 | 0 / 0 / 0 | 0 / 0 / 0 | 75,701,152 + 96,000,000 -> 43,648 + 0 |
-| 1m-t20 | 1,000,000 / 20,000,000 / 160,000,000 | 0 / 0 / 0 | 0 / 0 / 0 | 75,701,152 + 96,000,000 -> 43,648 + 0 |
+- **Mostly unique tags:** 400,000 distinct tags, each attached to one object; 100,000 distinct tag sets; 2-byte bodies. This is deliberately adverse to xkey's per-key index.
+- **Mostly shared tags:** four distinct tags, each attached to all 100,000 objects; one shared tag set; 2-byte bodies. This is deliberately favourable to xkey's key-head amortisation.
+- **Moderate sharing, 4 KiB body:** 100,000 distinct tags with fanout four; 100,000 distinct tag sets; 4,096-byte bodies. This tests whether the memory difference remains meaningful when object data forms most of the cache footprint.
 
-The later 1% and 100% patched first-touch gates also passed for 100k and 1M t5/t6/t20. At both `post_restart` and `post_first_touch`, every row reported `mem_objects=0`, `mem_edges=0`, and `mem_reverse_bytes=0`. Attribute-read failures, invalid attributes, and store-invariant failures were all zero. See the `2026-07-10 FDO-direct B1 remote slice` baseline (`devdocs/benchmarks/baselines/2026-07-10-purgemap-fdo-direct-b1-remote-51.158.37.2.md`) for the full table.
+These bounds are sensitivity tests, not samples of production traffic. The planned CMS-derived workload was not run because the canonical ordered payload, redistribution basis and expected fingerprints were unavailable. No access pattern or purge history was inferred from the incomplete fixture.
 
-## Eviction And Churn
+## Comparison method
 
-The maintenance rows passed cleanly. Churn rows are useful memory-pressure signals because they create and retire many tag generations.
+The admitted `reset-in-memory-cachetag-xkey-synthetic-decision-v1.1` campaign ran on 18 August 2026 on one Scaleway `EM-B220E-NVMe` server with an AMD EPYC 7232P, 64 GiB RAM and no swap activity.
 
-| Matrix | Runs | Lane | Load RPS | Tracked memory | RSS | Cgroup peak |
-| --- | --- | --- | ---: | ---: | ---: | ---: |
-| `eviction-100k` | 6/6 | `cachetag_eviction` | 59,904 | 17.38 MiB | 146.66 MiB | 258.95 MiB |
-| `eviction-100k` | 6/6 | `noindex_load` | 78,984 | n/a | 109.86 MiB | 258.95 MiB |
-| `eviction-1m` | 6/6 | `cachetag_eviction` | 59,656 | 143.58 MiB | 697.45 MiB | 1.13 GiB |
-| `eviction-1m` | 6/6 | `noindex_load` | 79,445 | n/a | 901.00 MiB | 1.27 GiB |
-| `churn-deterministic-full-100k` | 2/2 | `cachetag` | 69,942 | 63.05 MiB | 580.80 MiB | 804.11 MiB |
-| `churn-deterministic-full-100k` | 2/2 | `xkey` | 66,370 | 171.68 MiB | 594.21 MiB | 821.30 MiB |
-| `churn-deterministic-incremental-100k` | 2/2 | `cachetag` | 70,072 | 63.40 MiB | 362.62 MiB | 575.28 MiB |
-| `churn-deterministic-incremental-100k` | 2/2 | `xkey` | 67,089 | 228.91 MiB | 755.30 MiB | 982.35 MiB |
-| `churn-deterministic-incremental-100k` | 3/3 | `cachetag` | 71,452 | 25.08 MiB | 295.28 MiB | 588.60 MiB |
-| `churn-deterministic-incremental-100k` | 3/3 | `xkey` | 67,688 | 228.91 MiB | 763.41 MiB | 989.40 MiB |
+The comparison used cachetag commit `2a4bc91f84e4c099812a339eeda11b375365a1f9`, Vinyl commit `61f45d6740f8818e07dffee6edf8b433e93b81fb`, and unmodified xkey 0.28.0 source from varnish-modules commit `7abe0e2a59a685b4ea8626ff1a3fe9c60a037368`. The xkey arm is an unsupported third-party build for Vinyl Cache; these results do not characterise xkey on a supported Varnish release.
 
-## Failed Or Partial Current Rows
+Both VMODs were rebuilt for every physical row under the same explicit optimisation policy. The campaign retained source, image, compiler, linker, command and binary provenance. The unmodified upstream xkey suite passed 14/14 on supported Varnish, the Vinyl xkey contract suite passed, and the cachetag suite passed 54/54.
 
-These are the only failed or partial rows after the 2026-07-08 Buddy/Fellow rerun. Don’t replace them with older passing data without rerunning the benchmark.
+There were 24 valid judged rows: three cachetag repetitions and five xkey repetitions for each workload. The first two xkey rows established the same-code noise floor. Rows then alternated between implementations, used a fresh Vinyl process and fresh build, and were accepted only when provenance, CPU placement, work volume, residency, memory stability, process identity, power state, pacing, CPU telemetry, errors, eviction, expiry and swap checks passed. All 24 rows passed. A direction was reported only when all three bracketed comparisons agreed and the median difference exceeded twice the xkey A/A spread.
 
-| Matrix | Result | Likely limit | Failure signal / caveat |
-| --- | --- | --- | --- |
-| `sanity-10k` | 6/7 | IO limited | `cachetag_concurrent.run-1.time` failed; driver recorded zero HTTP errors; log only captured top-level VTC `FAILED exit=2` |
-| `fellow-shutdown-5m` | 0/1 | IO limited | driver loaded all 5M objects with zero errors and stats were captured; top-level VTC failed after data capture during post-load teardown |
-| `fellow-shutdown-10m` | 0/1 | IO limited | driver loaded all 10M objects with zero errors and stats were captured; top-level VTC failed after data capture during post-load teardown |
+The earlier v1.0 execution is excluded. Its scheduling-lag threshold contradicted the calibration evidence and therefore could not support a judged comparison.
+
+## Scope still to test
+
+This campaign measured static-population foreground cost only. It did not exercise hard or soft purge, concurrent invalidation, refill, deferred reclamation, bounded churn, or memory behaviour over a long purge history. Those require a separately frozen invalidation and lifecycle campaign. Persistent Fellow and Buddy storage also require their own comparisons and should not be mixed with these in-memory results.
+
+The comparison was frozen as a synthetic decision round before remote execution. Its 24 judged rows used fixed workload fingerprints, fresh arm builds, interleaved execution, three repetitions per row, explicit process identity and placement, quiescent memory endpoints, and fail-closed workload and residency gates. Raw campaign artifacts are retained outside this repository.
+
+## Supersession history
+
+### Warm-hit CPU, one-call VCL shape, 2026-08-18 (superseded)
+
+The `reset-in-memory-cachetag-xkey-synthetic-decision-v1.1` campaign measured warm-hit CPU with `tags.stale()` called once, in `vcl_hit` only. `USAGE.md` documents a two-call contract, so that shape understated cachetag's per-hit cost by roughly half of the VMOD's contribution. The 2026-08-20 campaign re-measured on the documented shape and on a different server; under BR-014 the two sets are from different hardware cohorts and must not be compared with each other. The superseded table, verbatim:
+
+| Workload | Cachetag median (min–max) | xkey median (min–max) | Cachetag difference |
+| --- | ---: | ---: | ---: |
+| Mostly unique tags | 79.599 µs/hit (79.52–80.32) | 77.792 µs/hit (77.24–79.61) | 2.32% higher |
+| Mostly shared tags | 79.336 µs/hit (78.82–79.60) | 78.103 µs/hit (77.32–79.57) | 1.58% higher |
+| Moderate sharing, 4 KiB body | 80.891 µs/hit (80.38–81.98) | 79.733 µs/hit (79.61–81.90) | 1.45% higher |
+
+The memory and load-CPU results above still come from that 2026-08-18 campaign and its cohort; the 2026-08-20 campaign made no memory claim and is not a substitute for them.
+
+### The 2026-08-20 campaign
+
+`step-4-vsc-publish-policy-decision-v1`, run on a Scaleway `AS -2014TP-HTR` (`em-elastic-bose`) with an AMD EPYC 7232P, 64 GiB RAM, no swap, all governors `performance` and boost enabled. Three arms were rebuilt fresh for every physical row: pinned xkey 0.28.0, the immediately preceding Cachetag counter-surface tree, and the periodic VSC publisher candidate. Both Cachetag arms were production-surface builds with set interning disabled and `-O2 -g`, and ran a byte-identical frozen harness against the same Vinyl build.
+
+The campaign produced 24 valid judged rows plus one profiling capture, with no replacements. The decision rests on the request-path mechanism disappearing from the profile, no warm-p99 regression, load CPU improving in all three lanes, and wall CPU improving beyond the frozen noise bar on the mostly-unique lane. The other two wall-CPU lanes and the partial instruction counters are not directional claims. Raw campaign artifacts are retained outside this repository.
