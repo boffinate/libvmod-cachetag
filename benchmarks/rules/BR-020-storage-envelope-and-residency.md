@@ -8,9 +8,8 @@ fails at 64g (`buddywhen_mmap` `ENOMEM` at child startup). The `eviction`
 profile is a cost measurement only — invalid for memory-efficiency claims.
 
 **Why:** Silent early eviction changes both the memory curve and the purge work
-under measurement; the 64g envelope failure and the residency requirement are
-recorded in `devdocs/docs/archived/20260714_1319_status_purge-reclamation-post-phase4.md` and
-`devdocs/docs/archived/benchmarking-plan.md`.
+under measurement. The 64g startup failure and silent early-eviction incidents
+established both constraints.
 
 **Comply by:** Validating residency (`BENCH_VALIDATE_RESIDENCY`) or asserting
 `n_lru_nuked=0` before purge in non-pressure lanes; recording any new envelope

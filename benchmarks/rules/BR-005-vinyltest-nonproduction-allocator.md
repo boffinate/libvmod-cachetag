@@ -8,8 +8,7 @@ recommendation must be sanity-checked with a non-junk launch.
 **Why:** `junk:true` memsets every freed allocation (debug feature), inflating
 mass-free costs and dirtying pages in every benchmark arm. Discovered during the
 2026-07-15 allocator probes: the effective config recorded on the no-purge row
-was `abort:true,junk:true,dirty_decay_ms:-1,muzzy_decay_ms:-1`
-(`devdocs/docs/archived/20260715_0835_report_phase6-allocator-probes-remote.md`). Comparisons
+was `abort:true,junk:true,dirty_decay_ms:-1,muzzy_decay_ms:-1`. Comparisons
 *between* arms remain valid because the base is uniform.
 
 **Comply by:** Treating cross-arm deltas as the primary signal; labelling absolute

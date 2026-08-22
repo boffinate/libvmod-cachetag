@@ -10,9 +10,7 @@ later confirmation rows confirm or reject them and never silently move the bar.
 
 **Why:** Percentile-only reads hid the shape of the Phase 4 tails; the 190 ms
 refill convoy and the jemalloc cycle-6 tail both required raw-sample and
-attribution analysis to classify correctly
-(`devdocs/docs/archived/20260714_0928_note_phase4-low-water-rearm-remote.md`,
-`devdocs/docs/archived/20260715_0835_report_phase6-allocator-probes-remote.md`).
+attribution analysis to classify correctly.
 
 **Comply by:** Citing the budget by name in every gate judgment; using the
 `latency_samples.tsv`/attribution artifacts for tail claims; recording

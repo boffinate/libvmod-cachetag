@@ -13,13 +13,12 @@ side of the window.
 
 **Why:** VSC values used to update only on VMOD calls. The `pm00018` VTC waited on
 `sweep_remaining==2` mid-pass and failed because the counter is not externally
-observable during a synchronous compact
-(`devdocs/docs/archived/20260713_0816_diagnostic_phase4_sweep_latency.md`); a
-`vinyl -expect` after `delay` read a stale snapshot during Phase 4/6 work.
+observable during a synchronous compact; a `vinyl -expect` after `delay` read a
+stale snapshot during Phase 4/6 work.
 Related: point-in-time gauges (e.g. `reclaim_pending`) can legitimately go
 non-zero between the flush probe and the `vinylstat` read — judge teardown from
 reader counts, acquire/release balance, and exact-retirement gates, not a lone
-gauge (`devdocs/docs/archived/20260714_1355_note_phase5-held-publication.md`).
+gauge.
 
 This rule was rewritten on 2026-08-20 when the publish policy changed from
 publishing on every VMOD call to the background-thread-plus-read-probe policy

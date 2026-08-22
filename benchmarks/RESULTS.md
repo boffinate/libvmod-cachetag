@@ -38,7 +38,7 @@ Cachetag's median pending drain was 0.151–0.197 ms, compared with 6.4–7.7 se
 
 ### CPU for warm hits
 
-Superseded on 2026-08-20 by the `step-4-vsc-publish-policy-decision-v1` campaign, which re-measured warm-hit CPU on a new cohort with the **two-call VCL shape** that `USAGE.md` documents: `tags.stale()` in `vcl_hit` *and* in `vcl_deliver`. The earlier table below the fold measured a one-call shape and is retained as supersession history, not mixed in here. The two shapes are not comparable and the harness refuses to merge them: the VCL shape is folded into every row's cohort fingerprint.
+Superseded on 2026-08-20 by the `step-4-vsc-publish-policy-decision-v1` campaign, which re-measured warm-hit CPU on a new cohort with the **two-call VCL shape** that [`docs/usage.md`](../docs/usage.md) documents: `tags.stale()` in `vcl_hit` *and* in `vcl_deliver`. The earlier table below the fold measured a one-call shape and is retained as supersession history, not mixed in here. The two shapes are not comparable and the harness refuses to merge them: the VCL shape is folded into every row's cohort fingerprint.
 
 Warm traffic was offered at 5,000 requests per second for 60 seconds, below the demonstrated driver and server knee. The useful comparison is CPU per successful hit, not achieved rate or maximum throughput. Figures are medians of two physical rows per cachetag arm and four per xkey arm, each of three repetitions.
 
@@ -98,7 +98,7 @@ The comparison was frozen as a synthetic decision round before remote execution.
 
 ### Warm-hit CPU, one-call VCL shape, 2026-08-18 (superseded)
 
-The `reset-in-memory-cachetag-xkey-synthetic-decision-v1.1` campaign measured warm-hit CPU with `tags.stale()` called once, in `vcl_hit` only. `USAGE.md` documents a two-call contract, so that shape understated cachetag's per-hit cost by roughly half of the VMOD's contribution. The 2026-08-20 campaign re-measured on the documented shape and on a different server; under BR-014 the two sets are from different hardware cohorts and must not be compared with each other. The superseded table, verbatim:
+The `reset-in-memory-cachetag-xkey-synthetic-decision-v1.1` campaign measured warm-hit CPU with `tags.stale()` called once, in `vcl_hit` only. [`docs/usage.md`](../docs/usage.md) documents a two-call contract, so that shape understated cachetag's per-hit cost by roughly half of the VMOD's contribution. The 2026-08-20 campaign re-measured on the documented shape and on a different server; under BR-014 the two sets are from different hardware cohorts and must not be compared with each other. The superseded table, verbatim:
 
 | Workload | Cachetag median (min–max) | xkey median (min–max) | Cachetag difference |
 | --- | ---: | ---: | ---: |

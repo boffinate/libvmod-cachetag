@@ -8,7 +8,7 @@ engine's own mapping(s) versus non-storage process memory first.
 arena, which read as a containment failure until full smaps proved the arena
 mapping fixed at exactly 4,194,304 kB across every cycle; the residue was
 non-arena process memory — a separate whole-process sizing caveat, not a Buddy
-defect (`devdocs/docs/archived/20260715_0835_report_phase6-allocator-probes-remote.md`).
+defect.
 
 **Comply by:** Capturing full `smaps` (not just `smaps_rollup`) at the endpoints
 that matter; reporting the engine mapping bound and the non-engine residue as

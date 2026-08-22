@@ -178,7 +178,6 @@ fi
 
 tar -C /cachetag-host \
 	--exclude=.git \
-	--exclude=devdocs \
 	--exclude=Makefile \
 	--exclude=Makefile.in \
 	--exclude=aclocal.m4 \

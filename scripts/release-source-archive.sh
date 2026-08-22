@@ -454,9 +454,8 @@ cat > "$work_dir/container/profile.sh" <<'CONTAINER_PROFILE'
 # The two profiles are two separate literal flag lists. The production branch
 # never derives its arguments from the diagnostic list, so a diagnostic-only
 # option such as --disable-stack-protector cannot leak into a production build.
-# See devdocs/docs/20260724_2033_note_step-6-build-profiles.md for why the production
-# profile states the hardening flags explicitly instead of relying on Vinyl's
-# --enable-stack-protector, which is a no-op without --enable-developer-warnings.
+# The production profile states the hardening flags explicitly because Vinyl's
+# --enable-stack-protector is a no-op without --enable-developer-warnings.
 
 declare -a vinyl_configure_args
 profile_cppflags=""
@@ -586,7 +585,6 @@ mkdir -p "$cachetag_src" "$run_out"
 #
 tar -C /cachetag-host \
 	--exclude=.git \
-	--exclude=devdocs \
 	--exclude=Makefile \
 	--exclude=Makefile.in \
 	--exclude=aclocal.m4 \

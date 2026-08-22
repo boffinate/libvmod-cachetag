@@ -10,7 +10,7 @@ noise, not a cost.
 
 **Why:** Phase 4 local smokes repeatedly swapped and were downgraded; a Phase 5
 cap row showed control 37.11% vs held 20.85% CPU — opposite the expected
-direction, n=1, no counter support (`devdocs/docs/archived/20260714_1355_note_phase5-held-publication.md`).
+direction, n=1, no counter support.
 
 **Comply by:** Checking the summarizer's `Swap:`, `Likely limit:` and warning
 lines before quoting any number from a row; requiring per-process CPU or driver

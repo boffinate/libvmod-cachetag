@@ -8,10 +8,8 @@ no edge counters); and report xkey's post-purge `g_bytes=0` separately from
 cachetag's retained/reusable structures — different lifecycle strategies, not
 identical memory states.
 
-**Why:** Each of these misreadings appeared during the memory-profiling
-campaigns (`devdocs/docs/archived/benchmarking-plan.md`,
-`devdocs/docs/archived/fellow-xkey-memory-profiling-plan-2026-06-25.md`,
-`devdocs/docs/archived/2026-07-08-purgemap-cutover-benchmark-plan.md`).
+**Why:** Each of these misreadings occurred during earlier memory, Fellow and
+purge-map comparison campaigns.
 
 **Comply by:** Writing comparison sentences that name the baseline and the
 lifecycle difference; checking tag-shape driver output before claiming a

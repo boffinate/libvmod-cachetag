@@ -7,8 +7,7 @@ acceptance evidence for a different candidate.
 
 **Why:** The request-epoch-lease and seal-publication change invalidated
 otherwise-valid Stage B rows; the first 10M pair was rejected because harness
-identity changed
-(`devdocs/docs/archived/20260713_1456_diagnostic_phase4-attributable-latency-verification.md`).
+identity changed.
 The Phase 10 decision record likewise forbids citing pre-change artifacts as
 final evidence for a changed path.
 

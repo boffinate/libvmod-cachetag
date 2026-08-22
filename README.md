@@ -25,7 +25,7 @@ See [our installation guide](docs/install.md).
 
 ## Quickstart VCL
 
-Check out our [usage guide](docs/usage.md) for more datils, but this gives you an idea of what's involved:
+Check out our [usage guide](docs/usage.md) for more details, but this gives you an idea of what's involved:
 
 ```vcl
 import cachetag;
@@ -84,7 +84,7 @@ I also needed a persistent on-disk cache for a project, which meant cache taggin
 <a name="optimize-cachetag"></a>
 ## Help me optimize cachetag for your workloads
 
-There are design decisions I can't settle without data from more real-world deployments, because the site I use cachetag for *may be very different from most*. 
+There are design decisions I can't settle without data from more real-world deployments, because the site I use cachetag for *may be very different from most*.
 
 For example: string interning. If many objects share the same tag set (as my site does), interning those sets cuts memory usage. If most workloads carry unique tag sets, interning *raise*s memory. Is it a good change to Cachetag? Benchmarks can't answer this, only real traffic data can.
 

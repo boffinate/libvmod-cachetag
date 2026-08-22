@@ -8,8 +8,7 @@ do not exist in its own arm's source.
 the patched VMOD and emitted patched-only counters
 (`purgemap_auto_reclaim_passes`, `sweep_obj_mtx_hold_usec`) in a "baseline" row;
 it had to be excluded from every comparison. A Default-storage cache reused for
-a Buddy row produced a void `pass=0 fail=0 total=0` result
-(`devdocs/docs/archived/2026-07-12-purge-reclamation-remote-rerun-51.159.203.250.md`).
+a Buddy row produced a void `pass=0 fail=0 total=0` result.
 
 **Comply by:** Rebuilding on every arm or storage-kind switch; spot-checking one
 arm-distinguishing counter's presence/absence per arm before accepting a

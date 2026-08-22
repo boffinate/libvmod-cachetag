@@ -40,6 +40,5 @@ vmod_vcs_version.txt
 
 benchmarks/results/
 benchmarks/remote-results/
-devdocs/
 
 .DS_Store

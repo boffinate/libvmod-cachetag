@@ -10,8 +10,7 @@ only).
 **Why:** Before the 2026-07-04 determinism rework, same-code variance was
 ±14–18% CPU and an instrumentation-only change "measured" −18.6% CPU / −21.5%
 RSS — larger than the −4%/+31% deltas actually under judgment. TTL races and the
-expiry-thread-dependent compact path meant each run did different work
-(`devdocs/docs/archived/churn-benchmark-determinism-plan-2026-07-04.md`).
+expiry-thread-dependent compact path meant each run did different work.
 
 **Comply by:** Using the deterministic churn lanes for attribution; checking the
 per-cycle backend-object assertions passed; quoting legacy-lane figures only as

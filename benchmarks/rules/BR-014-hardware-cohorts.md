@@ -6,7 +6,7 @@ mid-campaign as a cohort change, even at the same IP.
 
 **Why:** Identical code measured 86.1 s vs 74.2 s (a 14% swing) across two
 sessions when the rented host was rebuilt mid-day on 2026-07-03, poisoning the
-Proposal 4+6 attribution (`devdocs/docs/archived/churn-benchmark-determinism-plan-2026-07-04.md`).
+Proposal 4+6 attribution.
 
 **Comply by:** Rerunning both arms in one session on one host for any comparison;
 checking the summarizer's hardware fingerprint groups before combining rows.

@@ -76,5 +76,3 @@ Current patch shape:
   `7be4126892dbc58a03f701632e076f312e0332ed`;
 - keep cachetag envelope format and validation entirely in the VMOD;
 - preserve the attribute through normal FDO persistence and materialization.
-
-See `libvmod-cachetag/devdocs/docs/archived/2026-07-10-purgemap-fdo-direct-fellow-plan.md`.

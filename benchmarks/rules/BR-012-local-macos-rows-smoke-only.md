@@ -6,8 +6,7 @@ validation only.
 
 **Why:** macOS virtualization and OrbStack filesystem noise distort wall time,
 hardware perf counters are blocked (`perf_event_status=unavailable`), and local
-ARM64 allocator/RSS behavior differs from the Linux benchmark hosts
-(`devdocs/docs/archived/benchmarking-plan.md`, `benchmarks/README.md` Large Runs).
+ARM64 allocator/RSS behavior differs from the Linux benchmark hosts.
 
 **Comply by:** Running performance rows on the remote Linux host via
 `scripts/remote-benchmark.sh`; when a local row must be cited, labelling it

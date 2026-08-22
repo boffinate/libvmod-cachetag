@@ -7,9 +7,8 @@ explicitly to study host-state accumulation.
 **Why:** Sequential arm ordering produced position-correlated tail spikes that
 manufactured an apparent regression in whichever arm ran last: the 190 ms P3
 refill convoy landed in the last patched row, and a reversed-order campaign
-moved the worst tail with the position, not the arm
-(`devdocs/docs/archived/20260714_0928_note_phase4-low-water-rearm-remote.md`; protocol recorded
-in `benchmarks/README.md` at commit `c26451e`).
+moved the worst tail with the position, not the arm. The interleaving protocol is
+now enforced by campaign design.
 
 **Comply by:** Ordering campaign rows `B,P,B,P` in the campaign note's command
 list; recording the actual execution order in the note so reviewers can check it.

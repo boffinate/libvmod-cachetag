@@ -20,9 +20,7 @@
 #
 # cachetag declares "$ABI strict" in src/vmod_cachetag.vcc, so a built VMOD
 # belongs to exactly one Vinyl Cache build, not to a release series. The
-# packaging plan (devdocs/docs/20260724_1526_plan_binary-packaging-and-distribution.md,
-# "Phase 0: define the release contract" -> "Configure-time checks") therefore
-# requires configure to fail immediately when the package version or the ABI
+# release contract therefore requires configure to fail immediately when the package version or the ABI
 # differs from the release compatibility manifest. Native packaging recipes
 # under packaging/ are expected to pass
 #

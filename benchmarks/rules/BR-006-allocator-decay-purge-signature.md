@@ -10,8 +10,7 @@ nothing on-CPU.
 Default-storage cycle-6 tail as a suspected cachetag defect. It was jemalloc
 dirty-page decay purging during the post-pressure mass free: disabling decay
 removed it, a no-index control reproduced it without cachetag, and Buddy (no
-per-object heap frees) never showed it
-(`devdocs/docs/archived/20260715_0835_report_phase6-allocator-probes-remote.md`).
+per-object heap frees) never showed it.
 
 Related caveats: purging can spill past the tail cycle (the no-index control
 showed a 15.5 ms cycle-7 max) because the ~10 s dirty decay outlasts the 6 s

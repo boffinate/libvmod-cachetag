@@ -24,9 +24,9 @@ how to run the harness; the rules directory documents how not to be fooled by it
 
 ## Reset comparison readiness
 
-The reset cachetag/xkey comparison is not ready for remote execution. Its versioned [preflight manifest](../devdocs/benchmarks/20260818_0900_manifest_reset-in-memory-cachetag-xkey-v0.1.md) makes missing calibration fields fail closed and records the required local and remote gates. `cms-trace-static-v1` has no executable public payload or expected fingerprints yet; its test fixture is for loader regression only. Do not run it as a benchmark substitute or infer request-access or purge history from its static regeneration data.
+The reset cachetag/xkey comparison is not ready for remote execution. The harness requires missing calibration fields to fail closed. `cms-trace-static-v1` has no executable public payload or expected fingerprints yet; its test fixture is for loader regression only. Do not run it as a benchmark substitute or infer request-access or purge history from its static regeneration data.
 
-Generic harness output, including local Docker/OrbStack output, does not reopen the reset programme or establish a comparative claim. Follow the manifest and [the programme](../devdocs/benchmarks/defensible-benchmarks.md) before any remote calibration or cachetag versus xkey judgment.
+Generic harness output, including local Docker/OrbStack output, does not establish a comparative claim. Before any remote calibration or cachetag versus xkey judgment, freeze the claim, fixture fingerprints, calibration fields, comparison rows, repetition policy and judgment budget in the external campaign record.
 
 ## Quick Run
 

@@ -32,8 +32,6 @@ Use the structure `YYYYMMDD_HHMM_[type]_[description].md`, where `[type]` is `no
   artifacts. Do not commit them.
 - Because this is a research project keep a diagnostic log of what you discover and changes you make, to refer back to later. This is different to Git commit messages because it records failures as well as successes, benchmark data, options tried, so in future we know if we have tried something before and what the outcome was.
 - Backwards compatibility is not needed; there are no users of this project yet
-- At the start of a performance or benchmarking session, read `devdocs/docs/agent-session-brief.md` before loading broader benchmark history.
-- "At the start of a performance or benchmarking session" means once per logical agent session, not before every performance-related follow-up turn. Simple transcription, archival, rename, or move requests do not require rereading benchmark documents, reinterpreting evidence, running tests, or adding process metadata. When asked to save prior text, preserve that text with only the requested naming or path adjustments unless broader revision is explicitly requested.
 - Before designing or interpreting any benchmark, read `benchmarks/rules/INDEX.md`
   (one interpretation rule per file, each with its motivating incident). Campaign
   notes and reports must open with a `Rules reviewed: ...` line citing the

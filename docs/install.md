@@ -96,7 +96,7 @@ sub vcl_deliver {
 }
 ```
 
-Add your authenticated purge endpoint in `vcl_recv` and call `tags.purge()` or `tags.purge_header()`. [USAGE](USAGE.md) has a complete example with an ACL and `PURGE` handling.
+Add your authenticated purge endpoint in `vcl_recv` and call `tags.purge()` or `tags.purge_header()`. [The usage guide](usage.md) has a complete example with an ACL and `PURGE` handling.
 
 ## Buddy storage
 

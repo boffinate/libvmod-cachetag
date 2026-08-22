@@ -1,6 +1,6 @@
 # Benchmark fixtures
 
-`cms-trace-static-v1` is reserved for the exact public, anonymised ordered CMS population described in `devdocs/benchmarks/defensible-benchmarks.md`. Its manifest records the reported aggregate claims but intentionally has no payload or fingerprint yet. The loader rejects it, rather than generating an approximation, until all of the following are supplied:
+`cms-trace-static-v1` is reserved for an exact public, anonymised ordered CMS population. Its manifest records the reported aggregate claims but intentionally has no payload or fingerprint yet. The loader rejects it, rather than generating an approximation, until all of the following are supplied:
 
 - the redistributable anonymised ordered object/tag payload, or a public deterministic transformation with its input and transformation hashes;
 - a reviewed anonymisation and redistribution basis;

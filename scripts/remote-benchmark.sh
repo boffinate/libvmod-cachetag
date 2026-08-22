@@ -602,7 +602,6 @@ sync_checkout() {
 	rsync -a --delete \
 		--exclude='.codex' \
 		--exclude='.agents' \
-		--exclude='devdocs' \
 		--exclude='.libs' \
 		--exclude='.deps' \
 		--exclude='autom4te.cache' \
@@ -619,16 +618,13 @@ sync_checkout() {
 		--exclude='libvmod-cachetag-*.tar.gz' \
 		"$repo_dir/" "$target:$resolved_remote_dir/libvmod-cachetag/"
 	rsync -a --delete \
-		--exclude='devdocs' \
 		"$workspace_dir/vinyl-cache/" "$target:$resolved_remote_dir/vinyl-cache/"
 	if [ -d "$workspace_dir/varnish-modules" ]; then
 		rsync -a --delete \
-			--exclude='devdocs' \
 			"$workspace_dir/varnish-modules/" "$target:$resolved_remote_dir/varnish-modules/"
 	fi
 	if [ -d "$workspace_dir/slash" ]; then
 		rsync -a --delete \
-			--exclude='devdocs' \
 			--exclude='.libs' \
 			--exclude='.deps' \
 			--exclude='autom4te.cache' \

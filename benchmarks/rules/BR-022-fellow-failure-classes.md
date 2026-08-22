@@ -10,11 +10,9 @@ close-time fix; and `fellow_persistent_purgemap_resident_zero` barrier-skips are
 expected on the FDO-direct path — zero post-restart VMOD membership is the
 designed state, not data loss.
 
-**Why:** Each class has already consumed a diagnosis cycle
-(`devdocs/docs/archived/2026-07-10-fellow-purgemap-1m-churn-timeout-briefing.md`,
-`devdocs/docs/archived/fellow-xkey-memory-profiling-plan-2026-06-25.md`).
+**Why:** Each class has already consumed a full diagnosis cycle.
 
-**Comply by:** Matching the failure signature against this list and the Fellow
-briefing docs before opening a new investigation.
+**Comply by:** Matching the failure signature against this list before opening a
+new investigation.
 
 **Tripwire:** None — diagnosis-time rule.

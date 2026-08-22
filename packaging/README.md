@@ -2,7 +2,7 @@
 
 ## Status: built, tested, and published once as an experimental pre-release
 
-Both recipes are built in clean rooms by the sibling `vcache-packaging` repository's CI — Debian 13 amd64 under pbuilder, EL9 x86_64 under Mock — installed into fresh containers, and exercised there. The v1.0.0 pre-release of 2026-07-26 was cut from the trunk cohort `vinyl-9.0.0-4b7e68292979`; the current release-track cohort is `vinyl-9.0.1-ac4f719c16f4` (Vinyl 9.0.1, cachetag 1.0.1, minted 2026-07-28). They are Phase 3 of the binary packaging and distribution plan (`devdocs/docs/20260724_1526_plan_binary-packaging-and-distribution.md`).
+Both recipes are built in clean rooms by the sibling `vcache-packaging` repository's CI — Debian 13 amd64 under pbuilder, EL9 x86_64 under Mock — installed into fresh containers, and exercised there. The v1.0.0 pre-release of 2026-07-26 was cut from the trunk cohort `vinyl-9.0.0-4b7e68292979`; the current release-track cohort is `vinyl-9.0.1-ac4f719c16f4` (Vinyl 9.0.1, cachetag 1.0.1, minted 2026-07-28). Together they form the current binary packaging workflow.
 
 The blocker that held this directory at "never been built" until 2026-07-25 was never in this repository: cachetag declares `$ABI strict` and must be compiled against an installed `vinyl-cache-dev` / `vinyl-cache-devel` package, and Vinyl Cache 9 has no distribution packages anywhere. Step 7 of the plan — minimal Vinyl 9 Debian and RPM packages with strict-ABI virtual provides — supplied them, and both lanes now build cachetag against the installed development package of a Vinyl built in the same run. Do not "fix" a build failure by pointing these recipes at an unpackaged Vinyl prefix; that defeats the entire point of the exercise.
 
@@ -195,7 +195,7 @@ Everything that needs a Debian or RPM toolchain, or a Vinyl package to build aga
 
 ## Known gaps
 
-- **`LICENSE` is distributed** since it was added to `Makefile.am`'s `EXTRA_DIST` (2026-07-24); the spec's `%license LICENSE` builds. `USAGE.md` and `INSTALL.md` joined `EXTRA_DIST` in the public-release rewrite, so both now ship in the archive; neither is packaged. The same rewrite dropped the VMOD reference document, which both recipes do package — that made the v1.0.0 archive unbuildable as a package, and v1.0.1 restores it to `EXTRA_DIST`.
+- **`LICENSE` is distributed** since it was added to `Makefile.am`'s `EXTRA_DIST` (2026-07-24); the spec's `%license LICENSE` builds. `docs/usage.md` and `docs/install.md` ship in the archive but are not packaged. The VMOD reference document also ships in the archive because both recipes package it.
 - **`Multi-Arch: same` is not set** on the Debian binary package. Whether it is correct depends on whether the Vinyl packages install VMODs under a multiarch `libdir` or a plain `/usr/lib/vinyl-cache/vmods`, which is decided by plan step 7. Revisit once that is settled; the `@VINYL_VMODDIR@` assertion in `debian/rules` will fail loudly if the assumption drifts.
 - **The maintainer address does not accept mail.** The identity was decided 2026-07-25 as `Boffinate <noreply@boffinate.com>`; it is deliberately a no-reply address, so every published package must carry a `Homepage`/`Vcs-Browser` (Debian) or `URL` (RPM) field pointing at the GitHub repository, whose issue tracker is the real support and security-report channel.
 - **No `debian/patches`.** There are no downstream patches. If one is ever needed, add `debian/patches/` with a `series` file; the source format already supports it.

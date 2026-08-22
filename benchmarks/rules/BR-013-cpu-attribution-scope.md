@@ -7,11 +7,9 @@ stacks — use the opt-in `perf record` wrapper for hot-path attribution, and
 validate off-CPU tooling (e.g. `offcputime-bpfcc`) on the host before treating
 its output as load-bearing.
 
-**Why:** Driver work is a large share of tree CPU on load-heavy profiles
-(`devdocs/docs/archived/benchmarking-plan.md`); the Phase 4 host `offcputime-bpfcc`
-attempt produced empty output, and tiny load windows (`OBJECTS=100`, ~21 ms)
-produced no usable perf samples
-(`devdocs/docs/archived/cachetag-cold-load-differential-profiling-plan-2026-06-23.md`).
+**Why:** Driver work is a large share of tree CPU on load-heavy profiles. The
+Phase 4 host `offcputime-bpfcc` attempt produced empty output, and tiny load
+windows (`OBJECTS=100`, ~21 ms) produced no usable perf samples.
 
 **Comply by:** Citing per-process/cgroup attribution (tracked `vinyld` fields,
 `perf record` on the target process) for VMOD cost claims; smoke-testing any
