@@ -7,8 +7,9 @@ SUBDIRS = src
 EXTRA_DIST = \
 	LICENSE \
 	README.md \
-	USAGE.md \
-	INSTALL.md \
+	docs/usage.md \
+	docs/install.md \
+	docs/testing.md \
 	docs/vmod_cachetag.md \
 	patches/fellow/README.md \
 	patches/fellow/0002-add-fellow-object-attr-provider.patch \

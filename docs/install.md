@@ -1,6 +1,8 @@
 # Installing cachetag
 
-`cachetag` is an experimental VMOD for a compatible Vinyl Cache development build. It uses Vinyl's private cache APIs, so build it against the same Vinyl prefix that will run it. This guide covers Vinyl's Default storage and Slash's Buddy and Fellow storage engines.
+Cachetag builds against Vinyl Cache internals: `cache/cache.h`, the object event subscription API, `HSH_Kill`, `EXP_Reduce`, and fields of `struct objcore` - just like `xkey`. So when you upgrade Vinyl Cache you'll want to rebuild Cachetag.
+
+This guide covers Vinyl's Default storage and Slash's Buddy and Fellow storage engines.
 
 The commands use `/opt/vinyl` as the installation prefix. Change it to match your setup.
 
