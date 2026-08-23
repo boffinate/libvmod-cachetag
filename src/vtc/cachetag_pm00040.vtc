@@ -1,0 +1,148 @@
+vtest "membership allocation faults are mode-specific and fail closed"
+
+server s1 -repeat 4 {
+	rxreq
+	txresp -body "object"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new direct = cachetag.namespace("fault_direct", sweep_interval = 0s,
+		    interning = false);
+		new interned = cachetag.namespace("fault_interned", sweep_interval = 0s,
+		    interning = true);
+	}
+
+	sub vcl_recv {
+		if (req.method == "REJECT_INTERN_ON_DIRECT") {
+			set req.http.fail_set = direct.test_fail_next_intern_alloc();
+			set req.http.initial_buckets = direct.test_intern_initial_buckets(8);
+			set req.http.fail_table = direct.test_fail_next_intern_table_alloc();
+			set req.http.migration = direct.test_intern_migration_active();
+			set req.http.worker_hold = direct.test_intern_worker_hold(true);
+			set req.http.migrate = direct.test_intern_migrate_buckets(1);
+			set req.http.active_buckets = direct.test_intern_active_buckets();
+			set req.http.old_buckets = direct.test_intern_old_buckets();
+			return (synth(200));
+		}
+		if (req.method == "REJECT_DIRECT_ON_INTERNED") {
+			set req.http.result = interned.test_fail_next_direct_alloc();
+			return (synth(200));
+		}
+		if (req.method == "ARM_DIRECT") {
+			set req.http.result = direct.test_fail_next_direct_alloc();
+			return (synth(200));
+		}
+		if (req.method == "STATS") {
+			set req.http.direct_objects = direct.objects();
+			set req.http.direct_edges = direct.edges();
+			set req.http.interned_objects = interned.objects();
+			set req.http.interned_edges = interned.edges();
+			return (synth(200));
+		}
+		if (req.http.Load) {
+			set req.hash_always_miss = true;
+		}
+	}
+
+	sub vcl_hash {
+		if (req.http.Load) {
+			hash_data(req.xid);
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.http.Mode == "interned") {
+			interned.add_header("intern-a,intern-b");
+		} else {
+			direct.add_header("direct-a,direct-b");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		set resp.http.fail_set = req.http.fail_set;
+		set resp.http.initial_buckets = req.http.initial_buckets;
+		set resp.http.fail_table = req.http.fail_table;
+		set resp.http.migration = req.http.migration;
+		set resp.http.worker_hold = req.http.worker_hold;
+		set resp.http.migrate = req.http.migrate;
+		set resp.http.active_buckets = req.http.active_buckets;
+		set resp.http.old_buckets = req.http.old_buckets;
+		set resp.http.direct_objects = req.http.direct_objects;
+		set resp.http.direct_edges = req.http.direct_edges;
+		set resp.http.interned_objects = req.http.interned_objects;
+		set resp.http.interned_edges = req.http.interned_edges;
+		return (deliver);
+	}
+} -start
+
+client c_reject_wrong_modes {
+	txreq -req REJECT_INTERN_ON_DIRECT
+	rxresp
+	expect resp.http.fail_set == false
+	expect resp.http.initial_buckets == false
+	expect resp.http.fail_table == false
+	expect resp.http.migration == 0
+	expect resp.http.worker_hold == false
+	expect resp.http.migrate == 0
+	expect resp.http.active_buckets == 0
+	expect resp.http.old_buckets == 0
+
+	txreq -url "/direct-after-reject" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -req REJECT_DIRECT_ON_INTERNED
+	rxresp
+	expect resp.http.result == false
+
+	txreq -url "/interned-after-reject" -hdr "Load: 1" -hdr "Mode: interned"
+	rxresp
+	expect resp.status == 200
+
+	txreq -req STATS
+	rxresp
+	expect resp.http.direct_objects == 1
+	expect resp.http.direct_edges == 2
+	expect resp.http.interned_objects == 1
+	expect resp.http.interned_edges == 2
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_direct_fault_direct.volatile_interned_sets == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_fault_direct.volatile_interned_table_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_interned_fault_interned.volatile_interned_sets == 1
+vinyl v1 -expect CACHETAG.vcl1_interned_fault_interned.volatile_interned_set_refs == 1
+
+client c_direct_fault {
+	txreq -req ARM_DIRECT
+	rxresp
+	expect resp.http.result == true
+
+	txreq -url "/direct-fail" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -req STATS
+	rxresp
+	expect resp.http.direct_objects == 1
+	expect resp.http.direct_edges == 2
+
+	txreq -url "/direct-retry" -hdr "Load: 1"
+	rxresp
+	expect resp.status == 200
+
+	txreq -req STATS
+	rxresp
+	expect resp.http.direct_objects == 2
+	expect resp.http.direct_edges == 4
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_direct_fault_direct.volatile_attach_failures == 1
+vinyl v1 -expect CACHETAG.vcl1_direct_fault_direct.volatile_interned_sets == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_fault_direct.volatile_interned_table_bytes == 0
+
+server s1 -wait

@@ -267,6 +267,7 @@ else
 				src/vtc/cachetag_r00006.vtc
 				src/vtc/cachetag_r00008.vtc
 				src/vtc/cachetag_r00009.vtc
+				src/vtc/cachetag_pm00039.vtc
 				src/vtc/cachetag_pm00038.vtc
 			"
 	fi
@@ -302,6 +303,7 @@ else
 		$cachetag_src/src/vtc/cachetag_p00020.vtc
 		$cachetag_src/src/vtc/cachetag_p00021.vtc
 		$cachetag_src/src/vtc/cachetag_p00022.vtc
+		$cachetag_src/src/vtc/cachetag_p00023.vtc
 		$cachetag_src/src/vtc/cachetag_p00090.vtc
 		$cachetag_src/src/vtc/cachetag_x00000.vtc"
 fi

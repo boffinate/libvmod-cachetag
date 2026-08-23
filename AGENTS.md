@@ -82,7 +82,7 @@ make check-with-vinyl-cache VINYL_CACHE_SRC=../vinyl-cache
 3. Installs Vinyl into `/tmp/vinyl-prefix`.
 4. Copies this VMOD source into `/tmp/cachetag-src`, excluding ignored build
    artifacts.
-5. Runs `./bootstrap --prefix=/tmp/vinyl-prefix` with `CACHE_TAG_CONFIGURE_ARGS`, which defaults to `--enable-demo-diagnostics --enable-test-hooks` so the full diagnostic VCL surface the suite expects is built. Set `CACHE_TAG_CONFIGURE_ARGS=""` to build and test the production surface instead; the VTC lists in `src/Makefile.am` shrink to the core tests automatically.
+5. Runs `./bootstrap --prefix=/tmp/vinyl-prefix` with `CACHE_TAG_CONFIGURE_ARGS`, which defaults to `--enable-demo-diagnostics --enable-test-hooks` so the full diagnostic VCL surface the suite expects is built. Set `CACHE_TAG_CONFIGURE_ARGS=""` to build and test the production surface instead; the VTC lists in `src/Makefile.am` omit tests for the gated methods automatically.
 6. Runs `make`.
 7. Runs `make distcheck` by default, or `CACHE_TAG_CHECK_TARGET` when set. `distcheck` reconfigures with the same diagnostic flags as the outer build (`DISTCHECK_CONFIGURE_FLAGS` propagation in `Makefile.am`/`configure.ac`).
 
@@ -98,24 +98,18 @@ SIGKILL VTC lists:
 scripts/test-fellow-with-vinyl-cache.sh ../vinyl-cache
 ```
 
-For `CACHE_TAG_CHECK_TARGET=check` with the default diagnostic-surface build,
-expect the standalone WAL test, the counter-surface parity check, and the 61
-storage-agnostic VTCs in `VTC_TESTS` (19 `c`, 8 `r`, 34 `pm`) to pass:
+For `CACHE_TAG_CHECK_TARGET=check` with the default diagnostic-surface build, expect the standalone WAL test, the counter-surface parity check, and the 118 storage-agnostic VTCs in `VTC_TESTS` (37 `c`, 16 `r`, 65 `pm`) to pass. The checked-in core cases use the default direct representation, 40 generated core copies explicitly select interning, and seven generated test-hook copies exercise shared allocation and structural failures in interning mode:
 
 ```text
-# TOTAL: 63
-# PASS:  63
+# TOTAL: 120
+# PASS:  120
 # FAIL:  0
 # ERROR: 0
 ```
 
-With `CACHE_TAG_CONFIGURE_ARGS=""` (production surface: no demo diagnostics,
-no test hooks) only the core VTCs run, and the expected total is 43 (the WAL
-test, the counter-surface parity check, and 41 VTCs: 18 `c`, 8 `r`, 15 `pm`).
+With `CACHE_TAG_CONFIGURE_ARGS=""` (production surface: no demo diagnostics, no test hooks) only the production-surface VTCs run, and the expected total is 86 (the WAL test, the counter-surface parity check, and 84 VTCs: 36 `c`, 16 `r`, 32 `pm`).
 
-The Fellow matrix contains 47 Cachetag VTCs after adding the four second-call
-memo lifecycle and race cases. This curation did not execute that matrix; its
-next run must confirm all 47 before release acceptance.
+The Fellow matrix contains 49 Cachetag VTCs after adding the four second-call memo lifecycle and race cases, the mixed runtime-membership-mode smoke case, and the persistent opposite-mode reload case. The 2026-08-23 run stopped at the existing `cachetag_c00026.vtc`: its delivery-side release barrier refused the parked request in two attempts, without a Vinyl panic. The new mixed-mode case, persistent opposite-mode reload case, and persistent/SIGKILL tail pass when run separately. Fix the deterministic barrier failure and confirm all 49 before release acceptance.
 
 For the default `distcheck`, expect:
 

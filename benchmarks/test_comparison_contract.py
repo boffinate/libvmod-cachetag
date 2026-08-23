@@ -14,6 +14,7 @@ from summarize_results import (
     cache_main_capture_pss_kb,
     comparison_arm_cohort_validity,
     comparison_contract_validity,
+    controlled_perf_validity,
     fmt_vcl_shape,
     parse_perf_stat_csv,
     render_arm_comparison,
@@ -56,7 +57,7 @@ class ComparisonContractTest(unittest.TestCase):
             "build_provenance_version": "3", "build_provenance_mode": "strict",
             "build_provenance_eligible": "1",
             "cachetag_dirty_state": "clean", "vinyl_dirty_state": "clean", "xkey_dirty_state": "clean",
-            "docker_image_id": "sha256:image", "bench_set_interning": "0",
+            "docker_image_id": "sha256:image", "code_generation": "runtime", "legacy_set_interning": "none",
             "cachetag_configure_args": "--disable-set-interning",
         }
         for key in (
@@ -129,6 +130,37 @@ class ComparisonContractTest(unittest.TestCase):
             driver, time_values, stats = self.write_valid_fixture(root)
             valid, reason = comparison_contract_validity(root, "fixture", 1, time_values, driver, stats)
         self.assertEqual((valid, reason), (1, "ok"))
+
+    def test_controlled_perf_rejects_changed_or_uncovered_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "metadata.env").write_text(
+                "bench_perf_stat_events=instructions,cycles,task-clock\n", encoding="ascii"
+            )
+            for phase in ("load", "warm"):
+                prefix = root / f"fixture.run-1.{phase}"
+                Path(str(prefix) + ".perf-stat.csv").write_text(
+                    "10,,instructions,100.00,\n20,,cycles,100.00,\n1.0,seconds,task-clock,100.00,\n",
+                    encoding="ascii",
+                )
+                Path(str(prefix) + ".handshake.env").write_text(
+                    f"handshake_schema=driver-perf-fifo-v1\nphase={phase}\nprofiler_ready_ack=1\nenable_ack=1\ndisable_ack=1\nphase_complete_ack=1\n",
+                    encoding="ascii",
+                )
+                Path(str(prefix) + ".target.env").write_text(
+                    f"identity_schema=cache-main-controlled-perf-v1\nphase={phase}\nselected_pid=1\nselected_comm=cache-main\nselected_exe=/usr/sbin/vinyld\nselected_start_time_ticks=2\nboot_id=boot\nstart_task_ids=1,2\nend_task_ids=1,2\nperf_attached_task_ids=1,2\nstart_task_count=2\nend_task_count=2\nidentity_stable=1\ntask_coverage_complete=1\ntask_set_changed=0\n",
+                    encoding="ascii",
+                )
+            self.assertEqual(controlled_perf_validity(root, "fixture", 1), (1, "ok"))
+            (root / "fixture.run-1.warm.target.env").write_text(
+                (root / "fixture.run-1.warm.target.env").read_text(encoding="ascii").replace(
+                    "task_coverage_complete=1", "task_coverage_complete=0"
+                ),
+                encoding="ascii",
+            )
+            valid, reason = controlled_perf_validity(root, "fixture", 1)
+        self.assertEqual(valid, 0)
+        self.assertIn("controlled_perf_target_invalid:warm", reason)
 
     def test_capture_pss_and_campaign_arm_key_are_reportable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -293,6 +325,38 @@ class ComparisonContractTest(unittest.TestCase):
             valid, reason = comparison_arm_cohort_validity(arms)
         self.assertEqual((valid, reason), (0, "cohort_fingerprint_changed_across_arms"))
 
+    def test_decision_cohort_allows_legacy_and_runtime_but_requires_shared_runtime_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            arms = {}
+            for name, generation, binary, effective in (
+                ("D1", "legacy", "legacy-direct", "0"), ("R0-1", "runtime", "candidate", "0"),
+                ("I1", "legacy", "legacy-interned", "1"), ("R1-1", "runtime", "candidate", "1"),
+                ("D2", "legacy", "legacy-direct", "0"), ("R0-2", "runtime", "candidate", "0"),
+                ("I2", "legacy", "legacy-interned", "1"), ("R1-2", "runtime", "candidate", "1"),
+            ):
+                path = root / name
+                path.mkdir()
+                (path / "metadata.env").write_text(
+                    f"benchmark_contract=runtime-interning-decision-v1\ndecision_cohort_fingerprint=cohort\n",
+                    encoding="ascii",
+                )
+                arms[name] = [{
+                    "path": str(path), "comparison_cohort_fingerprint": name,
+                    "bench_code_generation": generation, "bench_effective_set_interning": effective,
+                    "cachetag_binary_sha256": binary, "matrix": f"runtime-interning-decision-{name.lower()}",
+                }]
+            self.assertEqual(comparison_arm_cohort_validity(arms), (1, "ok"))
+            arms["R1-2"][0]["cachetag_binary_sha256"] = "candidate-changed"
+            self.assertEqual(
+                comparison_arm_cohort_validity(arms), (0, "runtime_r0_r1_binary_hash_changed")
+            )
+            arms["R1-2"][0]["cachetag_binary_sha256"] = "candidate"
+            arms["R1-2"][0]["matrix"] = "runtime-interning-decision-r0-2"
+            self.assertEqual(
+                comparison_arm_cohort_validity(arms), (0, "decision_row_matrix_label_mismatch")
+            )
+
     def test_interning_screen_is_comparison_active_without_xkey_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -301,18 +365,18 @@ class ComparisonContractTest(unittest.TestCase):
             metadata.write_text(
                 metadata.read_text(encoding="utf-8")
                 .replace("benchmark_contract=comparison-v1", "benchmark_contract=interning-screen-v1")
-                + "run_xkey=0\nrun_noindex=0\nbench_set_interning=1\n"
-                + "cachetag_configure_args=--enable-set-interning\n",
+                + "run_xkey=0\nrun_noindex=0\nbench_code_generation=runtime\n"
+                + "bench_runtime_set_interning_requested=1\nbench_runtime_set_interning_rendered=1\n"
+                + "bench_effective_set_interning=1\ncachetag_configure_args=none\n",
                 encoding="utf-8",
             )
             provenance = root / "build-provenance.env"
             provenance.write_text(
                 provenance.read_text(encoding="utf-8")
-                .replace("build_provenance_version=3", "build_provenance_version=4")
+                .replace("build_provenance_version=3", "build_provenance_version=5")
                 .replace("xkey_dirty_state=clean", "xkey_dirty_state=not-applicable")
                 .replace("xkey_build_input_sha256=" + self.fingerprint, "xkey_build_input_sha256=none")
-                .replace("bench_set_interning=0", "bench_set_interning=1")
-                .replace("cachetag_configure_args=--disable-set-interning", "cachetag_configure_args=--enable-set-interning"),
+                .replace("cachetag_configure_args=--disable-set-interning", "cachetag_configure_args=none"),
                 encoding="utf-8",
             )
             valid, reason = comparison_contract_validity(root, "fixture", 1, time_values, driver, stats)
@@ -326,8 +390,9 @@ class ComparisonContractTest(unittest.TestCase):
             metadata.write_text(
                 metadata.read_text(encoding="utf-8")
                 .replace("benchmark_contract=comparison-v1", "benchmark_contract=interning-screen-v1")
-                + "run_xkey=1\nrun_noindex=1\nbench_set_interning=0\n"
-                + "cachetag_configure_args=--disable-set-interning\n",
+                + "run_xkey=1\nrun_noindex=1\nbench_code_generation=runtime\n"
+                + "bench_runtime_set_interning_requested=0\nbench_runtime_set_interning_rendered=0\n"
+                + "bench_effective_set_interning=0\ncachetag_configure_args=none\n",
                 encoding="utf-8",
             )
             valid, reason = comparison_contract_validity(root, "fixture", 1, time_values, driver, stats)

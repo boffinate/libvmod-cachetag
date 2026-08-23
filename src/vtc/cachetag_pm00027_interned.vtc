@@ -35,7 +35,8 @@ vinyl v1 -vcl+backend {
 
 	sub vcl_init {
 		new tags = cachetag.namespace("stream5_counts",
-		    max_keys_per_object = 300, sweep_interval = 0s);
+		    max_keys_per_object = 300, sweep_interval = 0s,
+		    interning = true);
 	}
 
 	sub vcl_recv {

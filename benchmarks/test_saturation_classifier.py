@@ -189,7 +189,9 @@ class SaturationClassifierTest(unittest.TestCase):
                         "bench_vinyl_thread_pools=2",
                         "cachetag_revision=",
                         "cachetag_configure_args=--enable-demo-diagnostics",
-                        "bench_set_interning=1",
+                        "bench_code_generation=runtime",
+                        "bench_runtime_set_interning_requested=1",
+                        "bench_effective_set_interning=1",
                         "objects=1000000",
                         "bench_storage_kind=default",
                         "bench_storage=4g",
@@ -215,7 +217,7 @@ class SaturationClassifierTest(unittest.TestCase):
         self.assertTrue(config["cachetag_source_identity_recorded"])
         self.assertIn(("cachetag_build_input_sha256", "cachetag-dirty-tree-hash"), config["build"])
         self.assertIn(("vinyl_build_input_sha256", "vinyl-dirty-tree-hash"), config["build"])
-        self.assertIn(("bench_set_interning", "1"), config["match_identity"])
+        self.assertIn(("bench_effective_set_interning", "1"), config["match_identity"])
         self.assertIn(("objects", "1000000"), config["match_identity"])
 
 

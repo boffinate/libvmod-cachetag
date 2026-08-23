@@ -9,7 +9,8 @@ vinyl v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
-		new tags = cachetag.namespace("intern_alloc_fail", sweep_interval = 0s);
+		new tags = cachetag.namespace("intern_alloc_fail", sweep_interval = 0s,
+		    interning = true);
 	}
 
 	sub vcl_recv {

@@ -26,8 +26,16 @@ Environment:
                         (default: ad-hoc)
   BENCH_RESULT_ID       Unique result id for labels/metadata
                         (default: result directory name)
-  BENCH_SET_INTERNING   1 to build cachetag with --enable-set-interning,
-                        0 to build its direct-vector baseline (default: 0)
+  BENCH_CODE_GENERATION runtime for the candidate VCL API or legacy for a
+                        frozen compile-time comparison build (default: runtime)
+  BENCH_RUNTIME_SET_INTERNING
+                        Candidate namespace mode: 0 for direct vectors or 1
+                        for set interning (default: 0 outside decision rounds)
+  BENCH_LEGACY_SET_INTERNING
+                        Frozen legacy build mode. Required only with
+                        BENCH_CODE_GENERATION=legacy.
+  VMOD_BUILD_SRC        VMOD build-source checkout, independently mounted and
+                        hashed from this measured-path harness (default: repo)
   XKEY_SRC              varnish-modules checkout for xkey baseline
                         (default: ../varnish-modules when present)
   RUN_XKEY              1 to build and run xkey baseline, 0 to skip,
@@ -40,8 +48,9 @@ Environment:
                         xkey VMODs (default: empty)
   RUN_NOINDEX           1 to run no-index load baseline, 0 to skip
                         (default: 1)
-  BENCHMARK_CONTRACT    development-v1, comparison-v1, or
-                        interning-screen-v1 (default: development-v1)
+  BENCHMARK_CONTRACT    development-v1, comparison-v1,
+                        interning-screen-v1, or runtime-interning-decision-v1
+                        (default: development-v1)
   OBJECTS               Objects to insert per workload (default: 1000)
   TAGS_PER_OBJECT       Tags attached in cachetag workload (default: 4)
   BENCH_PROFILE         explicit-purge, uniform-tags, zipfian-tags,
@@ -67,6 +76,11 @@ Environment:
                         (default: 1)
   BENCH_WARM_SECONDS    Timed post-load warm-hit phase duration for long-TTL
                         load profiles, 0 to disable (default: 5)
+  BENCH_WARM_PASSES     Fixed complete cyclic warm passes. Required by the
+                        runtime interning decision contract (default: 0)
+  BENCH_FELLOW_VOLATILE_FALLBACK
+                        1 to create duplicate persistent provider identities
+                        and force deterministic volatile fallback (default: 0)
   BENCH_WARM_VALIDATE_HIT
                         Fail warm phase if any warm request is not a hit
                         (default: 1)
@@ -362,6 +376,12 @@ case "${1:-}" in
 esac
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+vmod_build_src=${VMOD_BUILD_SRC:-$repo_dir}
+vmod_build_src=$(CDPATH= cd -- "$vmod_build_src" && pwd)
+test -f "$vmod_build_src/bootstrap" || {
+	echo "VMOD_BUILD_SRC is not a cachetag source checkout: $vmod_build_src" >&2
+	exit 2
+}
 default_src="$repo_dir/../vinyl-cache"
 vinyl_src=${1:-${VINYL_CACHE_SRC:-$default_src}}
 vinyl_src=$(CDPATH= cd -- "$vinyl_src" && pwd)
@@ -383,10 +403,14 @@ objects=${OBJECTS:-1000}
 tags_per_object=${TAGS_PER_OBJECT:-4}
 bench_profile=${BENCH_PROFILE:-explicit-purge}
 bench_matrix=${BENCH_MATRIX:-ad-hoc}
-bench_set_interning=${BENCH_SET_INTERNING:-0}
+bench_code_generation=${BENCH_CODE_GENERATION:-runtime}
+bench_runtime_set_interning=${BENCH_RUNTIME_SET_INTERNING:-}
+bench_legacy_set_interning=${BENCH_LEGACY_SET_INTERNING:-}
 bench_buckets=${BENCH_BUCKETS:-1024}
 bench_clients=${BENCH_CLIENTS:-1}
 bench_warm_seconds=${BENCH_WARM_SECONDS:-5}
+bench_warm_passes=${BENCH_WARM_PASSES:-0}
+bench_fellow_volatile_fallback=${BENCH_FELLOW_VOLATILE_FALLBACK:-0}
 bench_warm_validate_hit=${BENCH_WARM_VALIDATE_HIT:-1}
 bench_residency_validate_objects=${BENCH_RESIDENCY_VALIDATE_OBJECTS:-0}
 bench_http_timeout=${BENCH_HTTP_TIMEOUT:-30}
@@ -463,6 +487,7 @@ bench_cache_tag_wal_fsync=${BENCH_CACHE_TAG_WAL_FSYNC:-strict}
 bench_cache_tag_purge_history_max_entries=${BENCH_CACHE_TAG_PURGE_HISTORY_MAX_ENTRIES:-}
 bench_stream1_expect_checkpoint=${BENCH_STREAM1_EXPECT_CHECKPOINT:-}
 bench_cache_tag_sweep_interval=${BENCH_CACHE_TAG_SWEEP_INTERVAL:-}
+bench_cache_tag_vsc_publish_interval=${BENCH_CACHE_TAG_VSC_PUBLISH_INTERVAL:-}
 bench_cache_tag_sweep_batch_objects=${BENCH_CACHE_TAG_SWEEP_BATCH_OBJECTS:-}
 bench_cache_tag_sweep_batch_hold=${BENCH_CACHE_TAG_SWEEP_BATCH_HOLD:-}
 bench_cache_tag_sweep_batch_yield=${BENCH_CACHE_TAG_SWEEP_BATCH_YIELD:-}
@@ -489,6 +514,12 @@ bench_backend_gogc=${BENCH_BACKEND_GOGC:-100}
 bench_driver_gomemlimit=${BENCH_DRIVER_GOMEMLIMIT:-off}
 bench_backend_gomemlimit=${BENCH_BACKEND_GOMEMLIMIT:-off}
 benchmark_contract=${BENCHMARK_CONTRACT:-development-v1}
+bench_runtime_interning_decision=0
+if [ "$benchmark_contract" = runtime-interning-decision-v1 ]; then
+	bench_runtime_interning_decision=1
+	[ -n "$bench_cache_tag_sweep_interval" ] || bench_cache_tag_sweep_interval=0s
+	[ -n "$bench_cache_tag_vsc_publish_interval" ] || bench_cache_tag_vsc_publish_interval=1h
+fi
 xkey_src=${XKEY_SRC:-"$repo_dir/../varnish-modules"}
 run_xkey=${RUN_XKEY:-auto}
 if [ "$run_xkey" = auto ]; then
@@ -503,13 +534,31 @@ bench_comparison_memory_endpoints=${BENCH_COMPARISON_MEMORY_ENDPOINTS:-0}
 bench_memory_post_load_quiet_seconds=${BENCH_MEMORY_POST_LOAD_QUIET_SECONDS:-30}
 bench_memory_confirmation_quiet_seconds=${BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS:-10}
 case "$benchmark_contract" in
-	comparison-v1|interning-screen-v1) build_provenance_mode=strict ;;
+	comparison-v1|interning-screen-v1|runtime-interning-decision-v1) build_provenance_mode=strict ;;
 	development-v1) build_provenance_mode=development ;;
-	*) echo "BENCHMARK_CONTRACT must be comparison-v1, interning-screen-v1, or development-v1" >&2; exit 2 ;;
+	*) echo "BENCHMARK_CONTRACT must be comparison-v1, interning-screen-v1, runtime-interning-decision-v1, or development-v1" >&2; exit 2 ;;
 esac
-case "$bench_set_interning" in
+case "$bench_code_generation" in
+	runtime)
+		[ -z "$bench_legacy_set_interning" ] || { echo "BENCH_LEGACY_SET_INTERNING is invalid for runtime generation" >&2; exit 2; }
+		if [ -z "$bench_runtime_set_interning" ]; then
+			if [ "$benchmark_contract" = runtime-interning-decision-v1 ]; then
+				echo "runtime-interning-decision-v1 requires BENCH_RUNTIME_SET_INTERNING=0 or 1" >&2
+				exit 2
+			fi
+			bench_runtime_set_interning=0
+		fi
+		case "$bench_runtime_set_interning" in 0|1) ;; *) echo "BENCH_RUNTIME_SET_INTERNING must be 0 or 1" >&2; exit 2 ;; esac
+		;;
+	legacy)
+		[ -z "$bench_runtime_set_interning" ] || { echo "BENCH_RUNTIME_SET_INTERNING is invalid for legacy generation" >&2; exit 2; }
+		case "$bench_legacy_set_interning" in 0|1) ;; *) echo "BENCH_LEGACY_SET_INTERNING must be 0 or 1 for legacy generation" >&2; exit 2 ;; esac
+		;;
+	*) echo "BENCH_CODE_GENERATION must be legacy or runtime" >&2; exit 2 ;;
+esac
+case "$bench_fellow_volatile_fallback" in
 	0|1) ;;
-	*) echo "BENCH_SET_INTERNING must be 0 or 1" >&2; exit 2 ;;
+	*) echo "BENCH_FELLOW_VOLATILE_FALLBACK must be 0 or 1" >&2; exit 2 ;;
 esac
 for cpu_list in "$bench_cpuset_cpus" "$bench_driver_cpuset_cpus" "$bench_backend_cpuset_cpus" "$bench_vinyl_cpuset_cpus"; do
 	case "$cpu_list" in *[!0-9,-]*) echo "CPU lists may contain only digits, commas and hyphens" >&2; exit 2 ;; esac
@@ -677,8 +726,31 @@ case "$bench_perf_stat_runs" in
 	*) ;;
 esac
 [ -n "$bench_perf_stat_events" ] || { echo "BENCH_PERF_STAT_EVENTS must not be empty" >&2; exit 2; }
+case "$bench_warm_passes" in
+	''|*[!0-9]*) echo "BENCH_WARM_PASSES must be a non-negative integer" >&2; exit 2 ;;
+esac
+if [ "$benchmark_contract" = runtime-interning-decision-v1 ]; then
+	[ "$objects" = 1000000 ] || { echo "runtime-interning-decision-v1 requires OBJECTS=1000000" >&2; exit 2; }
+	[ "$tags_per_object" = 5 ] || { echo "runtime-interning-decision-v1 requires TAGS_PER_OBJECT=5" >&2; exit 2; }
+	[ "$bench_profile" = "interning-shared-five,interning-unique-five" ] || { echo "runtime-interning-decision-v1 requires the frozen shared/unique profile pair" >&2; exit 2; }
+	[ "$bench_storage_kind" = default ] || { echo "runtime-interning-decision-v1 requires Default storage" >&2; exit 2; }
+	[ "$run_xkey" = 0 ] && [ "$run_noindex" = 0 ] || { echo "runtime-interning-decision-v1 excludes xkey and noindex" >&2; exit 2; }
+	[ "$runs" = 3 ] || { echo "runtime-interning-decision-v1 requires RUNS=3" >&2; exit 2; }
+	[ "$bench_warm_passes" -gt 0 ] || { echo "runtime-interning-decision-v1 requires positive BENCH_WARM_PASSES" >&2; exit 2; }
+	[ "$bench_residency_validate_objects" = 0 ] || { echo "runtime-interning-decision-v1 requires full residency validation" >&2; exit 2; }
+	[ "$bench_perf_stat" = required ] || { echo "runtime-interning-decision-v1 requires BENCH_PERF_STAT=required" >&2; exit 2; }
+	[ "$bench_perf_stat_runs" = all ] || { echo "runtime-interning-decision-v1 requires BENCH_PERF_STAT_RUNS=all" >&2; exit 2; }
+	case ",$bench_perf_stat_events," in *,instructions,*) ;; *) echo "runtime-interning-decision-v1 requires the instructions event" >&2; exit 2 ;; esac
+	[ "$bench_validate_residency" = 1 ] || { echo "runtime-interning-decision-v1 requires residency validation" >&2; exit 2; }
+	[ "$bench_skip_purge" = 1 ] || { echo "runtime-interning-decision-v1 requires BENCH_SKIP_PURGE=1" >&2; exit 2; }
+	[ "$bench_driver_headroom_required" = 1 ] || { echo "runtime-interning-decision-v1 requires executable driver headroom" >&2; exit 2; }
+	[ -n "$bench_vinyl_cpuset_cpus" ] && [ -n "$bench_driver_cpuset_cpus" ] && [ -n "$bench_backend_cpuset_cpus" ] || {
+		echo "runtime-interning-decision-v1 requires explicit Vinyl, driver, and backend CPU sets" >&2
+		exit 2
+	}
+fi
 case "$benchmark_contract:$bench_perf_stat" in
-	comparison-v1:1|comparison-v1:yes|comparison-v1:true|comparison-v1:on|comparison-v1:required|interning-screen-v1:1|interning-screen-v1:yes|interning-screen-v1:true|interning-screen-v1:on|interning-screen-v1:required)
+	comparison-v1:1|comparison-v1:yes|comparison-v1:true|comparison-v1:on|comparison-v1:required|interning-screen-v1:1|interning-screen-v1:yes|interning-screen-v1:true|interning-screen-v1:on|interning-screen-v1:required|runtime-interning-decision-v1:required)
 		[ "$bench_perf_stat_runs" = all ] || { echo "$benchmark_contract requires BENCH_PERF_STAT_RUNS=all" >&2; exit 2; }
 		;;
 esac
@@ -811,12 +883,31 @@ else
 	slash_src=
 fi
 
+case "$bench_code_generation:$bench_legacy_set_interning" in
+	runtime:) benchmark_build_arm=runtime-candidate ;;
+	legacy:0) benchmark_build_arm=legacy-direct ;;
+	legacy:1) benchmark_build_arm=legacy-interned ;;
+esac
+if [ "$bench_code_generation" = legacy ] && [ "$vmod_build_src" = "$repo_dir" ]; then
+	echo "legacy generation requires VMOD_BUILD_SRC to name the frozen legacy checkout" >&2
+	exit 2
+fi
+
 build_dir=${BUILD_DIR:-}
 if [ -z "$build_dir" ]; then
 	if [ -d /private/tmp ]; then
 		build_dir=/private/tmp/libvmod-cachetag-bench
 	else
 		build_dir=/tmp/libvmod-cachetag-bench
+	fi
+fi
+build_dir="$build_dir/$benchmark_build_arm"
+if [ "$benchmark_contract" = runtime-interning-decision-v1 ]; then
+	if [ -s "$build_dir/benchmark-build-arm.env" ]; then
+		skip_build=1
+	elif [ "$skip_build" = 1 ]; then
+		echo "decision arm cache is absent: $benchmark_build_arm" >&2
+		exit 2
 	fi
 fi
 
@@ -849,10 +940,13 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	--label "org.cachetag.benchmark.matrix=$bench_matrix" \
 	--label "org.cachetag.benchmark.result_id=$bench_result_id" \
 	--label "org.cachetag.benchmark.branch=$bench_branch" \
-	--label "org.cachetag.benchmark.set_interning=$bench_set_interning" \
+	--label "org.cachetag.benchmark.code_generation=$bench_code_generation" \
+	--label "org.cachetag.benchmark.runtime_set_interning=${bench_runtime_set_interning:-none}" \
+	--label "org.cachetag.benchmark.legacy_set_interning=${bench_legacy_set_interning:-none}" \
 	-v "$vinyl_src:/vinyl-src:ro" \
 	$slash_mount_args \
 	-v "$repo_dir:/cachetag-host:ro" \
+	-v "$vmod_build_src:/cachetag-build-host:ro" \
 	-v "$xkey_src:/xkey-src:ro" \
 	-v "$build_dir:/work" \
 	-v "$results_dir:/results" \
@@ -861,10 +955,15 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "BENCH_PROFILE=$bench_profile" \
 	-e "BENCH_MATRIX=$bench_matrix" \
 	-e "BENCH_RESULT_ID=$bench_result_id" \
-	-e "BENCH_SET_INTERNING=$bench_set_interning" \
+	-e "BENCH_CODE_GENERATION=$bench_code_generation" \
+	-e "BENCH_RUNTIME_SET_INTERNING=$bench_runtime_set_interning" \
+	-e "BENCH_LEGACY_SET_INTERNING=$bench_legacy_set_interning" \
+	-e "BENCH_RUNTIME_INTERNING_DECISION=$bench_runtime_interning_decision" \
+	-e "BENCH_FELLOW_VOLATILE_FALLBACK=$bench_fellow_volatile_fallback" \
 	-e "BENCH_BUCKETS=$bench_buckets" \
 	-e "BENCH_CLIENTS=$bench_clients" \
 	-e "BENCH_WARM_SECONDS=$bench_warm_seconds" \
+	-e "BENCH_WARM_PASSES=$bench_warm_passes" \
 	-e "BENCH_WARM_VALIDATE_HIT=$bench_warm_validate_hit" \
 	-e "BENCH_RESIDENCY_VALIDATE_OBJECTS=$bench_residency_validate_objects" \
 	-e "BENCH_HTTP_TIMEOUT=$bench_http_timeout" \
@@ -942,6 +1041,7 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "BENCH_STREAM1_OVERLAP_PRESEED_ENTRIES=$bench_stream1_overlap_preseed_entries" \
 	-e "BENCH_STREAM1_OVERLAP_READS=$bench_stream1_overlap_reads" \
 		-e "BENCH_CACHE_TAG_SWEEP_INTERVAL=$bench_cache_tag_sweep_interval" \
+		-e "BENCH_CACHE_TAG_VSC_PUBLISH_INTERVAL=$bench_cache_tag_vsc_publish_interval" \
 		-e "BENCH_CACHE_TAG_SWEEP_BATCH_OBJECTS=$bench_cache_tag_sweep_batch_objects" \
 		-e "BENCH_CACHE_TAG_SWEEP_BATCH_HOLD=$bench_cache_tag_sweep_batch_hold" \
 		-e "BENCH_CACHE_TAG_SWEEP_BATCH_YIELD=$bench_cache_tag_sweep_batch_yield" \
@@ -1014,14 +1114,37 @@ build_cflags=${BENCH_BUILD_CFLAGS:?BENCH_BUILD_CFLAGS is required}
 build_cppflags=${BENCH_BUILD_CPPFLAGS-}
 build_ldflags=${BENCH_BUILD_LDFLAGS-}
 
-case "$BENCH_SET_INTERNING" in
-0) cachetag_configure_args=--disable-set-interning ;;
-1) cachetag_configure_args=--enable-set-interning ;;
+case "$BENCH_CODE_GENERATION:$BENCH_LEGACY_SET_INTERNING:$BENCH_RUNTIME_SET_INTERNING" in
+legacy:0:) cachetag_configure_arg=--disable-set-interning ;;
+legacy:1:) cachetag_configure_arg=--enable-set-interning ;;
+runtime::0|runtime::1) cachetag_configure_arg= ;;
 *)
-	echo "BENCH_SET_INTERNING must be 0 or 1" >&2
+	echo "benchmark code generation and interning selections disagree" >&2
 	exit 2
 	;;
 esac
+if [ -n "$cachetag_configure_arg" ]; then
+	cachetag_configure_args=$cachetag_configure_arg
+else
+	cachetag_configure_args=none
+fi
+case "$BENCH_CODE_GENERATION:$BENCH_LEGACY_SET_INTERNING" in
+	runtime:) benchmark_build_arm=runtime-candidate ;;
+	legacy:0) benchmark_build_arm=legacy-direct ;;
+	legacy:1) benchmark_build_arm=legacy-interned ;;
+esac
+if [ "$BENCHMARK_CONTRACT" = runtime-interning-decision-v1 ]; then
+	build_arm_marker=/work/benchmark-build-arm.env
+	if [ -s "$build_arm_marker" ]; then
+		cached_build_arm=$(sed -n "s/^benchmark_build_arm=//p" "$build_arm_marker")
+		test "$cached_build_arm" = "$benchmark_build_arm" || {
+			echo "decision build cache belongs to $cached_build_arm, not $benchmark_build_arm" >&2
+			exit 1
+		}
+	else
+		printf "benchmark_build_arm=%s\n" "$benchmark_build_arm" > "$build_arm_marker"
+	fi
+fi
 
 log_command() {
 	printf "+ " >> "$build_commands"
@@ -1042,8 +1165,9 @@ preflight_xkey_src=none
 if [ "${RUN_XKEY}" = 1 ]; then
 	preflight_xkey_src=/xkey-src
 fi
-sh /cachetag-host/benchmarks/build_provenance.sh identity \
-	/cachetag-host /vinyl-src "$preflight_slash_src" "$preflight_xkey_src" \
+BUILD_PROVENANCE_HARNESS_SRC=/cachetag-host \
+	sh /cachetag-host/benchmarks/build_provenance.sh identity \
+	/cachetag-build-host /vinyl-src "$preflight_slash_src" "$preflight_xkey_src" \
 	"$BENCH_STORAGE_KIND" ignored
 
 if [ "${SKIP_BUILD}" != 1 ]; then
@@ -1118,7 +1242,7 @@ if [ "${SKIP_BUILD}" != 1 ]; then
 				fi
 			done
 		}
-		apply_fellow_patch_stack /cachetag-host/patches/fellow
+		apply_fellow_patch_stack /cachetag-build-host/patches/fellow
 		mkdir -p m4
 		cp "$vinyl_src_copy"/m4/ax_*.m4 m4/
 		cat > m4/ax_execinfo.m4 <<'"'"'M4EOF'"'"'
@@ -1132,7 +1256,7 @@ M4EOF
 		run_logged make -j"$(nproc)" V=1
 	fi
 
-	tar -C /cachetag-host \
+	tar -C /cachetag-build-host \
 		--exclude=.git \
 		--exclude=Makefile \
 		--exclude=Makefile.in \
@@ -1161,7 +1285,11 @@ M4EOF
 		-cf - . | tar -C "$cachetag_src" -xf -
 
 	cd "$cachetag_src"
-	run_logged env CPPFLAGS="$build_cppflags" CFLAGS="$build_cflags" LDFLAGS="$build_ldflags" ./bootstrap --prefix="$prefix" "$cachetag_configure_args"
+	if [ -n "$cachetag_configure_arg" ]; then
+		run_logged env CPPFLAGS="$build_cppflags" CFLAGS="$build_cflags" LDFLAGS="$build_ldflags" ./bootstrap --prefix="$prefix" "$cachetag_configure_arg"
+	else
+		run_logged env CPPFLAGS="$build_cppflags" CFLAGS="$build_cflags" LDFLAGS="$build_ldflags" ./bootstrap --prefix="$prefix"
+	fi
 	run_logged make -j"$(nproc)" V=1
 else
 	test -x "$prefix/bin/vinyltest"
@@ -1331,18 +1459,41 @@ provenance_env=(
 	BUILD_PROVENANCE_CFLAGS="$build_cflags"
 	BUILD_PROVENANCE_CPPFLAGS="$build_cppflags"
 	BUILD_PROVENANCE_LDFLAGS="$build_ldflags"
-	BUILD_PROVENANCE_SET_INTERNING="$BENCH_SET_INTERNING"
+	BUILD_PROVENANCE_HARNESS_SRC=/cachetag-host
+	BUILD_PROVENANCE_CODE_GENERATION="$BENCH_CODE_GENERATION"
+	BUILD_PROVENANCE_LEGACY_SET_INTERNING="${BENCH_LEGACY_SET_INTERNING:-none}"
 	BUILD_PROVENANCE_CACHETAG_CONFIGURE_ARGS="$cachetag_configure_args"
 )
 if [ "${SKIP_BUILD}" = 1 ]; then
 	env "${provenance_env[@]}" sh /cachetag-host/benchmarks/build_provenance.sh verify \
-		/cachetag-host /vinyl-src "$provenance_slash" "$provenance_xkey_src" "$BENCH_STORAGE_KIND" \
+		/cachetag-build-host /vinyl-src "$provenance_slash" "$provenance_xkey_src" "$BENCH_STORAGE_KIND" \
 		/work/build-provenance.env
 fi
 env "${provenance_env[@]}" sh /cachetag-host/benchmarks/build_provenance.sh record \
-	/cachetag-host /vinyl-src "$provenance_slash" "$provenance_xkey_src" "$BENCH_STORAGE_KIND" \
+	/cachetag-build-host /vinyl-src "$provenance_slash" "$provenance_xkey_src" "$BENCH_STORAGE_KIND" \
 	/work/build-provenance.env
 cp /work/build-provenance.env /results/build-provenance.env
+binary_identity_file="/work/${benchmark_build_arm}-binary.env"
+current_cachetag_binary_sha=$(sed -n "s/^cachetag_binary_sha256=//p" /work/build-provenance.env)
+current_vinyl_binary_sha=$(sed -n "s/^vinyl_binary_sha256=//p" /work/build-provenance.env)
+if [ "$BENCHMARK_CONTRACT" = runtime-interning-decision-v1 ] && [ "${SKIP_BUILD}" = 1 ]; then
+	test -s "$binary_identity_file" || { echo "cached decision build has no binary identity" >&2; exit 1; }
+	test "$current_cachetag_binary_sha" = "$(sed -n "s/^cachetag_binary_sha256=//p" "$binary_identity_file")" || {
+		echo "cached VMOD binary hash changed within $benchmark_build_arm" >&2
+		exit 1
+	}
+	test "$current_vinyl_binary_sha" = "$(sed -n "s/^vinyl_binary_sha256=//p" "$binary_identity_file")" || {
+		echo "cached Vinyl binary hash changed within $benchmark_build_arm" >&2
+		exit 1
+	}
+else
+	{
+		printf "benchmark_build_arm=%s\n" "$benchmark_build_arm"
+		printf "cachetag_binary_sha256=%s\n" "$current_cachetag_binary_sha"
+		printf "vinyl_binary_sha256=%s\n" "$current_vinyl_binary_sha"
+	} > "$binary_identity_file"
+fi
+cp "$binary_identity_file" /results/build-artifact-identity.env
 
 noindex_flag=
 if [ "${RUN_NOINDEX}" = 0 ]; then
@@ -1393,6 +1544,37 @@ python3 /cachetag-host/benchmarks/generate_cachetag_benchmark_vtc.py \
 	$xkey_flag \
 	$fixture_flag
 
+runtime_mode_manifest=/results/workloads/runtime-mode.env
+test -s "$runtime_mode_manifest" || { echo "generated runtime-mode manifest is missing" >&2; exit 1; }
+# shellcheck disable=SC1090
+. "$runtime_mode_manifest"
+test "$code_generation" = "$BENCH_CODE_GENERATION" || {
+	echo "generated code generation disagrees with the request" >&2
+	exit 1
+}
+case "$BENCH_CODE_GENERATION" in
+	runtime)
+		test "$requested_runtime_set_interning" = "$BENCH_RUNTIME_SET_INTERNING" &&
+			test "$rendered_runtime_set_interning" = "$BENCH_RUNTIME_SET_INTERNING" || {
+			echo "requested and rendered runtime interning modes disagree" >&2
+			exit 1
+		}
+		expected_effective_mode=$BENCH_RUNTIME_SET_INTERNING
+		;;
+	legacy)
+		test "$requested_runtime_set_interning" = none &&
+			test "$rendered_runtime_set_interning" = none || {
+			echo "legacy generation rendered a runtime constructor argument" >&2
+			exit 1
+		}
+		expected_effective_mode=$BENCH_LEGACY_SET_INTERNING
+		;;
+esac
+test "$effective_set_interning" = "$expected_effective_mode" || {
+	echo "generated effective interning mode disagrees with the selected arm" >&2
+	exit 1
+}
+
 /cachetag-host/benchmarks/capture_system_metadata.sh /results/system.env
 cohort_system_env=/results/system.env
 if [ -s /results/host-system.env ]; then
@@ -1408,11 +1590,29 @@ benchmark_cohort_fingerprint=$(
 		# The measured VCL is part of the cohort: a one-call row and a
 		# two-call row must never merge (benchmarks/rules/BR-017).
 		printf "bench_stale_deliver=%s\n" "$BENCH_STALE_DELIVER"
+		# R0 and R1 deliberately share one candidate binary. The rendered mode is
+		# recorded separately and checked by the decision contract, rather than
+		# turning the two runtime arms into different hardware cohorts.
+		printf "code_generation=%s\n" "$code_generation"
 		# Counter attachment changes the measured process. Keep selection and
 		# event sets inside the judged cohort identity (BR-017/BR-024).
 		printf "bench_perf_stat_contract=%s|%s|%s|%s\n" "$BENCH_PERF_STAT" "$BENCH_PERF_STAT_RUNS" "$BENCH_PERF_STAT_WORKLOAD" "$BENCH_PERF_STAT_EVENTS"
 	} | sha256sum | awk "{print \$1}"
 )
+decision_cohort_fingerprint=
+if [ "$BENCHMARK_CONTRACT" = runtime-interning-decision-v1 ]; then
+	decision_cohort_fingerprint=$(
+		{
+			sh /cachetag-host/benchmarks/decision_cohort_material.sh \
+				"$cohort_system_env" /results/build-provenance.env
+			printf "%s\n" "$BENCH_VINYL_CPUSET_CPUS" "$BENCH_DRIVER_CPUSET_CPUS" "$BENCH_BACKEND_CPUSET_CPUS"
+			printf "%s\n" "$BENCH_DRIVER_GOMAXPROCS" "$BENCH_BACKEND_GOMAXPROCS" "$BENCH_DRIVER_GOGC" "$BENCH_BACKEND_GOGC" "$BENCH_DRIVER_GOMEMLIMIT" "$BENCH_BACKEND_GOMEMLIMIT"
+			printf "%s\n" "$BENCH_VINYL_THREAD_POOL_MAX" "$BENCH_VINYL_THREAD_POOLS"
+			printf "bench_stale_deliver=%s\n" "$BENCH_STALE_DELIVER"
+			printf "bench_perf_stat_contract=%s|%s|%s|%s\n" "$BENCH_PERF_STAT" "$BENCH_PERF_STAT_RUNS" "$BENCH_PERF_STAT_WORKLOAD" "$BENCH_PERF_STAT_EVENTS"
+		} | sha256sum | awk "{print \$1}"
+	)
+fi
 metadata_fixture_manifest=none
 metadata_fixture_name=
 metadata_fixture_fingerprint=
@@ -1436,7 +1636,8 @@ fi
 {
 	printf "date_utc=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	printf "vinyl_revision=%s\n" "$(git -C /vinyl-src rev-parse --short HEAD 2>/dev/null || true)"
-	printf "cachetag_revision=%s\n" "$(git -C /cachetag-host rev-parse --short HEAD 2>/dev/null || true)"
+		printf "harness_revision=%s\n" "$(git -C /cachetag-host rev-parse --short HEAD 2>/dev/null || true)"
+		printf "cachetag_revision=%s\n" "$(git -C /cachetag-build-host rev-parse --short HEAD 2>/dev/null || true)"
 	if [ "$BENCH_STORAGE_KIND" = fellow ] || [ "$BENCH_STORAGE_KIND" = buddy ]; then
 		printf "slash_revision=%s\n" "$(git -C /slash-host rev-parse --short HEAD 2>/dev/null || true)"
 	else
@@ -1454,11 +1655,22 @@ fi
 	printf "bench_profile=%s\n" "$BENCH_PROFILE"
 	printf "bench_matrix=%s\n" "$BENCH_MATRIX"
 	printf "bench_result_id=%s\n" "$BENCH_RESULT_ID"
-	printf "bench_set_interning=%s\n" "$BENCH_SET_INTERNING"
+		printf "bench_code_generation=%s\n" "$BENCH_CODE_GENERATION"
+		printf "bench_runtime_set_interning_requested=%s\n" "$requested_runtime_set_interning"
+		printf "bench_runtime_set_interning_rendered=%s\n" "$rendered_runtime_set_interning"
+		printf "bench_legacy_set_interning=%s\n" "${BENCH_LEGACY_SET_INTERNING:-none}"
+		printf "bench_effective_set_interning=%s\n" "$effective_set_interning"
+		printf "benchmark_build_arm=%s\n" "$benchmark_build_arm"
+		printf "rendered_cachetag_vcl_files=%s\n" "$rendered_cachetag_vcl_files"
+		printf "rendered_workloads_sha256=%s\n" "$rendered_workloads_sha256"
+		printf "generator_sha256=%s\n" "$generator_sha256"
+		printf "summarizer_sha256=%s\n" "$(sha256sum /cachetag-host/benchmarks/summarize_results.py | cut -d " " -f 1)"
 	printf "cachetag_configure_args=%s\n" "$cachetag_configure_args"
 	printf "bench_buckets=%s\n" "$BENCH_BUCKETS"
 	printf "bench_clients=%s\n" "$BENCH_CLIENTS"
-	printf "bench_warm_seconds=%s\n" "$BENCH_WARM_SECONDS"
+		printf "bench_warm_seconds=%s\n" "$BENCH_WARM_SECONDS"
+		printf "bench_warm_passes=%s\n" "$BENCH_WARM_PASSES"
+		printf "bench_fellow_volatile_fallback=%s\n" "$BENCH_FELLOW_VOLATILE_FALLBACK"
 	printf "bench_warm_validate_hit=%s\n" "$BENCH_WARM_VALIDATE_HIT"
 	printf "bench_residency_validate_objects=%s\n" "$BENCH_RESIDENCY_VALIDATE_OBJECTS"
 	printf "bench_http_timeout=%s\n" "$BENCH_HTTP_TIMEOUT"
@@ -1531,7 +1743,8 @@ fi
 	printf "bench_stream1_expect_checkpoint=%s\n" "$BENCH_STREAM1_EXPECT_CHECKPOINT"
 	printf "bench_stream1_overlap_preseed_entries=%s\n" "$BENCH_STREAM1_OVERLAP_PRESEED_ENTRIES"
 	printf "bench_stream1_overlap_reads=%s\n" "$BENCH_STREAM1_OVERLAP_READS"
-	printf "bench_cache_tag_sweep_interval=%s\n" "$BENCH_CACHE_TAG_SWEEP_INTERVAL"
+		printf "bench_cache_tag_sweep_interval=%s\n" "$BENCH_CACHE_TAG_SWEEP_INTERVAL"
+		printf "bench_cache_tag_vsc_publish_interval=%s\n" "$BENCH_CACHE_TAG_VSC_PUBLISH_INTERVAL"
 	printf "bench_cache_tag_sweep_batch_objects=%s\n" "$BENCH_CACHE_TAG_SWEEP_BATCH_OBJECTS"
 	printf "bench_cache_tag_sweep_batch_hold=%s\n" "$BENCH_CACHE_TAG_SWEEP_BATCH_HOLD"
 	printf "bench_cache_tag_sweep_batch_yield=%s\n" "$BENCH_CACHE_TAG_SWEEP_BATCH_YIELD"
@@ -1550,6 +1763,7 @@ fi
 	printf "bench_driver_gomemlimit=%s\n" "$BENCH_DRIVER_GOMEMLIMIT"
 	printf "bench_backend_gomemlimit=%s\n" "$BENCH_BACKEND_GOMEMLIMIT"
 	printf "benchmark_contract=%s\n" "$BENCHMARK_CONTRACT"
+	printf "decision_cohort_fingerprint=%s\n" "$decision_cohort_fingerprint"
 	printf "benchmark_cohort_fingerprint=%s\n" "$benchmark_cohort_fingerprint"
 	printf "bench_fixture_manifest=%s\n" "$metadata_fixture_manifest"
 	printf "fixture_name=%s\n" "$metadata_fixture_name"
@@ -1871,28 +2085,52 @@ for workload in /results/workloads/*.vtc; do
 					$vinyltest_command -t "$VTC_TIMEOUT" \
 					-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
 			else
-				printf "perf-stat %s run %s phase=warm target=vinyld events=%s\n" \
-					"$name" "$run" "$BENCH_PERF_STAT_EVENTS" | tee -a /results/summary.txt
-				python3 /cachetag-host/benchmarks/run_with_metrics.py \
-					--metrics "$timing" --phase-marker-dir /results/phase-markers \
-					--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
-					python3 /cachetag-host/benchmarks/run_with_phase_perf.py \
-					--mode stat \
-					--stat-output "$perf_stat_csv" \
-					--stat-events "$BENCH_PERF_STAT_EVENTS" \
-					--marker-dir /results/phase-markers \
-					--marker-prefix "$name" \
-					--phase warm \
-					--scope command \
-					--target vinyld -- \
-					$vinyltest_command -t "$VTC_TIMEOUT" \
-					-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
-				if ! perf_stat_counted "$perf_stat_csv"; then
-					if [ "$BENCH_PERF_STAT" = required ]; then
-						echo "perf stat counted no requested events for $name run $run" >&2
-						exit 1
+				if [ "$BENCHMARK_CONTRACT" = runtime-interning-decision-v1 ]; then
+					artifact_prefix="/results/${name}.run-${run}"
+					printf "controlled-perf-stat %s run %s phases=load,warm target=cache-main events=%s\n" \
+						"$name" "$run" "$BENCH_PERF_STAT_EVENTS" | tee -a /results/summary.txt
+					python3 /cachetag-host/benchmarks/run_with_metrics.py \
+						--metrics "$timing" --phase-marker-dir /results/phase-markers \
+						--phase-marker-prefix "$name" --perf off -- \
+						python3 /cachetag-host/benchmarks/run_with_controlled_perf.py \
+						--artifact-prefix "$artifact_prefix" \
+						--stat-events "$BENCH_PERF_STAT_EVENTS" \
+						--control-dir "/results/phase-control-${name}-${run}" -- \
+						$vinyltest_command -t "$VTC_TIMEOUT" \
+						-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
+					for phase in load warm; do
+						phase_csv="${artifact_prefix}.${phase}.perf-stat.csv"
+						perf_stat_counted "$phase_csv" || {
+							echo "controlled perf stat counted no requested events for $name run $run phase $phase" >&2
+							exit 1
+						}
+						test -s "${artifact_prefix}.${phase}.target.env" || { echo "missing cache-main target identity" >&2; exit 1; }
+						test -s "${artifact_prefix}.${phase}.handshake.env" || { echo "missing controlled profiler handshake" >&2; exit 1; }
+					done
+				else
+					printf "perf-stat %s run %s phase=warm target=vinyld events=%s\n" \
+						"$name" "$run" "$BENCH_PERF_STAT_EVENTS" | tee -a /results/summary.txt
+					python3 /cachetag-host/benchmarks/run_with_metrics.py \
+						--metrics "$timing" --phase-marker-dir /results/phase-markers \
+						--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
+						python3 /cachetag-host/benchmarks/run_with_phase_perf.py \
+						--mode stat \
+						--stat-output "$perf_stat_csv" \
+						--stat-events "$BENCH_PERF_STAT_EVENTS" \
+						--marker-dir /results/phase-markers \
+						--marker-prefix "$name" \
+						--phase warm \
+						--scope command \
+						--target vinyld -- \
+						$vinyltest_command -t "$VTC_TIMEOUT" \
+						-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
+					if ! perf_stat_counted "$perf_stat_csv"; then
+						if [ "$BENCH_PERF_STAT" = required ]; then
+							echo "perf stat counted no requested events for $name run $run" >&2
+							exit 1
+						fi
+						write_perf_stat_unavailable no_counted_events "$perf_stat_marker"
 					fi
-					write_perf_stat_unavailable no_counted_events "$perf_stat_marker"
 				fi
 			fi
 		else

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,8 @@ PHASED_PURGE_PROFILES = (
     "cutover-mostly-unique",
     "cutover-mostly-shared",
     "cutover-mixed",
+    "interning-shared-five",
+    "interning-unique-five",
     # Versioned declared scenarios.  Their driver aliases preserve the
     # existing deterministic wire format until the fixture-aware driver lands.
     "mostly-unique-bound",
@@ -83,7 +86,43 @@ FIXED_TAGS_PER_OBJECT = {
     "single-unique-tag": 1,
     "ten-unique-tags": 10,
     "five-unique-five-shared": 10,
+    "interning-shared-five": 5,
+    "interning-unique-five": 5,
 }
+
+
+def code_generation() -> str:
+    value = os.getenv("BENCH_CODE_GENERATION", "runtime")
+    if value not in {"legacy", "runtime"}:
+        raise SystemExit("BENCH_CODE_GENERATION must be legacy or runtime")
+    return value
+
+
+def runtime_set_interning() -> int | None:
+    if code_generation() == "legacy":
+        return None
+    value = os.getenv("BENCH_RUNTIME_SET_INTERNING", "0")
+    if value not in {"0", "1"}:
+        raise SystemExit("BENCH_RUNTIME_SET_INTERNING must be 0 or 1")
+    return int(value)
+
+
+def effective_set_interning() -> int:
+    runtime_mode = runtime_set_interning()
+    if runtime_mode is not None:
+        return runtime_mode
+    value = os.getenv("BENCH_LEGACY_SET_INTERNING", "")
+    if value not in {"0", "1"}:
+        raise SystemExit("BENCH_LEGACY_SET_INTERNING must be 0 or 1 for legacy generation")
+    return int(value)
+
+
+def runtime_interning_decision() -> bool:
+    return env_flag("BENCH_RUNTIME_INTERNING_DECISION")
+
+
+def fellow_volatile_fallback() -> bool:
+    return env_flag("BENCH_FELLOW_VOLATILE_FALLBACK")
 
 
 def profile_title(profile: str) -> str:
@@ -290,6 +329,8 @@ def default_purge_key(profile: str) -> str:
         "cutover-mostly-unique": cutover_tag("unique", 0, 0),
         "cutover-mostly-shared": cutover_tag("shared", 0, 0),
         "cutover-mixed": cutover_tag("shared", 0, 0),
+        "interning-shared-five": "intern:shared:0",
+        "interning-unique-five": "intern:unique:0:0",
         "bulk-purge-bursts": "bucket:0",
         "concurrent": "site",
         "purge-storm": "site",
@@ -625,6 +666,9 @@ def write_cachetag_vcl(
         sweep_interval = cachetag_sweep_interval
     if sweep_interval:
         namespace_args.append(f"sweep_interval = {sweep_interval}")
+    vsc_publish_interval = os.getenv("BENCH_CACHE_TAG_VSC_PUBLISH_INTERVAL", "")
+    if vsc_publish_interval:
+        namespace_args.append(f"vsc_publish_interval = {vsc_publish_interval}")
     sweep_batch_objects = os.getenv("BENCH_CACHE_TAG_SWEEP_BATCH_OBJECTS", "")
     if sweep_batch_objects:
         namespace_args.append(f"sweep_batch_objects = {int(sweep_batch_objects)}")
@@ -634,9 +678,15 @@ def write_cachetag_vcl(
     sweep_batch_yield = os.getenv("BENCH_CACHE_TAG_SWEEP_BATCH_YIELD", "")
     if sweep_batch_yield:
         namespace_args.append(f"sweep_batch_yield = {sweep_batch_yield}")
+    runtime_mode = runtime_set_interning()
+    if runtime_mode is not None:
+        namespace_args.append(f"interning = {'true' if runtime_mode else 'false'}")
     namespace_arg_string = ""
     if namespace_args:
         namespace_arg_string = ", " + ", ".join(namespace_args)
+    fallback_namespace_arg_string = namespace_arg_string.replace(
+        "/cachetag-bench-persist", "/cachetag-bench-persist-fallback"
+    )
     vmod_path = "${pwd}/.libs:"
     if is_phase5_held_profile(profile):
         vmod_path = "${pwd}/.libs:/work/prefix/lib/vinyl-cache/vmods:"
@@ -651,14 +701,22 @@ def write_cachetag_vcl(
     f.write("\tsub vcl_init {\n")
     write_slash_tuning(f, storage_kind, buddy_reserve_chunks)
     f.write(f'\t\tnew tags = cachetag.namespace("bench"{namespace_arg_string});\n')
+    if fellow_volatile_fallback():
+        f.write(
+            f'\t\tnew fallback_tags = cachetag.namespace("bench"{fallback_namespace_arg_string});\n'
+        )
     f.write("\t}\n\n")
     f.write("\tsub vcl_recv {\n")
     f.write('\t\tif (req.url == "/__bench_sync") {\n')
     f.write("\t\t\tset req.http.X-Bench-Sync = tags.pending();\n")
+    if fellow_volatile_fallback():
+        f.write("\t\t\tset req.http.X-Bench-Fallback-Sync = fallback_tags.pending();\n")
     f.write("\t\t\treturn (synth(204));\n")
     f.write("\t\t}\n")
     f.write('\t\tif (req.url == "/__bench_objects") {\n')
     f.write("\t\t\tset req.http.X-Bench-Objects = tags.objects();\n")
+    if fellow_volatile_fallback():
+        f.write("\t\t\tset req.http.X-Bench-Fallback-Objects = fallback_tags.objects();\n")
     f.write("\t\t\treturn (synth(204));\n")
     f.write("\t\t}\n")
     f.write('\t\tif (req.method == "PURGE") {\n')
@@ -698,10 +756,15 @@ def write_cachetag_vcl(
         f.write("\t\t}\n")
     if profile != "untagged-fellow-load":
         f.write('\t\ttags.add_header(bereq.http.X-Cache-Tags, sep = " ");\n')
+        if fellow_volatile_fallback():
+            f.write('\t\tfallback_tags.add_header(bereq.http.X-Cache-Tags, sep = " ");\n')
     f.write("\t}\n\n")
     f.write("\tsub vcl_hit {\n")
     if implementation == "cachetag":
-        f.write("\t\tif (tags.stale()) {\n")
+        stale_condition = "tags.stale()"
+        if fellow_volatile_fallback():
+            stale_condition += " || fallback_tags.stale()"
+        f.write(f"\t\tif ({stale_condition}) {{\n")
         f.write("\t\t\treturn (restart);\n")
         f.write("\t\t}\n")
     f.write('\t\tset req.http.X-Bench-Cache = "hit";\n')
@@ -730,6 +793,82 @@ def write_cachetag_vcl(
     f.write("\t}\n")
     f.write("} -start\n\n")
     f.write('vinyl v1 -cliok "param.set vsl_mask none"\n\n')
+
+
+INTERN_COUNTERS = (
+    "volatile_interned_sets",
+    "volatile_interned_set_refs",
+    "volatile_interned_set_hits",
+    "volatile_interned_set_misses",
+    "volatile_interned_set_bytes",
+    "volatile_interned_table_bytes",
+    "volatile_interned_acquire_calls",
+    "volatile_interned_acquire_usec",
+    "volatile_interned_acquire_max_usec",
+    "volatile_interned_acquire_over_50us",
+    "volatile_interned_acquire_over_250us",
+    "volatile_interned_acquire_over_1ms",
+    "volatile_interned_acquire_over_10ms",
+    "volatile_interned_table_grow_calls",
+    "volatile_interned_table_grow_usec",
+    "volatile_interned_table_grow_max_usec",
+    "volatile_interned_candidate_alloc_calls",
+    "volatile_interned_candidate_alloc_usec",
+    "volatile_interned_candidate_alloc_max_usec",
+    "volatile_interned_table_alloc_calls",
+    "volatile_interned_table_alloc_usec",
+    "volatile_interned_table_alloc_max_usec",
+    "volatile_interned_migration_active",
+    "volatile_interned_old_table_bytes",
+    "volatile_interned_detached_set_bytes",
+    "volatile_interned_detached_table_bytes",
+    "volatile_interned_table_alloc_failures",
+    "volatile_interned_table_grow_failures",
+    "volatile_interned_candidate_discards",
+)
+
+
+def write_runtime_interning_convergence(f, profile: str, objects: int, tags: int) -> None:
+    segment = "CACHETAG.vcl1_tags_bench"
+    f.write(f"vinyl v1 -expect {segment}.volatile_objects == {objects}\n")
+    f.write(f"vinyl v1 -expect {segment}.volatile_edges == {objects * tags}\n")
+    f.write(f"vinyl v1 -expect {segment}.side_migration_buckets_remaining == 0\n")
+    f.write(f"vinyl v1 -expect {segment}.side_migration_live_remaining == 0\n")
+    f.write(f"vinyl v1 -expect {segment}.resize_detached_bytes == 0\n")
+    if effective_set_interning() == 0:
+        for counter in INTERN_COUNTERS:
+            f.write(f"vinyl v1 -expect {segment}.{counter} == 0\n")
+        return
+    if profile == "interning-shared-five":
+        expected = {
+            "volatile_interned_sets": 1,
+            "volatile_interned_set_refs": objects,
+            "volatile_interned_set_hits": objects - 1,
+            "volatile_interned_set_misses": 1,
+        }
+    else:
+        expected = {
+            "volatile_interned_sets": objects,
+            "volatile_interned_set_refs": objects,
+            "volatile_interned_set_hits": 0,
+            "volatile_interned_set_misses": objects,
+        }
+    for counter, value in expected.items():
+        f.write(f"vinyl v1 -expect {segment}.{counter} == {value}\n")
+    for counter in (
+        "volatile_interned_migration_active",
+        "volatile_interned_old_table_bytes",
+        "volatile_interned_detached_set_bytes",
+        "volatile_interned_detached_table_bytes",
+    ):
+        f.write(f"vinyl v1 -expect {segment}.{counter} == 0\n")
+
+
+def write_controlled_phase_stop(f, phase: str) -> None:
+    f.write(
+        'shell "python3 /cachetag-host/benchmarks/phase_control_client.py '
+        f'--phase {phase} --event stop"\n'
+    )
 
 
 def write_xkey_vcl(
@@ -953,6 +1092,58 @@ def write_workload(
             return
 
         if profile in PHASED_PURGE_PROFILES:
+            decision_profile = runtime_interning_decision() and profile in {
+                "interning-shared-five",
+                "interning-unique-five",
+            }
+            if decision_profile:
+                write_stats_capture(
+                    f,
+                    "v1",
+                    stats_filter,
+                    f"/results/{prefix}_empty.stats",
+                    flush=flush,
+                )
+                write_driver(
+                    f,
+                    objects,
+                    f"{driver_impl}-load",
+                    profile,
+                    effective_tags,
+                    f"{prefix}_load",
+                    driver_command,
+                    env="BENCH_WARM_SECONDS=0",
+                )
+                write_runtime_interning_convergence(f, profile, objects, effective_tags)
+                write_stats_capture(
+                    f,
+                    "v1",
+                    stats_filter,
+                    f"/results/{prefix}_post_load.stats",
+                    flush=flush,
+                )
+                write_controlled_phase_stop(f, "load")
+                write_driver(
+                    f,
+                    objects,
+                    f"{driver_impl}-warm-only",
+                    profile,
+                    effective_tags,
+                    f"{prefix}_warm",
+                    driver_command,
+                )
+                write_runtime_interning_convergence(f, profile, objects, effective_tags)
+                write_stats_capture(
+                    f,
+                    "v1",
+                    stats_filter,
+                    f"/results/{prefix}_post_hit.stats",
+                    flush=flush,
+                )
+                if not allow_lru_nuked:
+                    f.write("vinyl v1 -expect n_lru_nuked == 0\n")
+                write_shutdown_drain(f, shutdown_drain_seconds)
+                return
             comparison_memory = os.getenv("BENCH_COMPARISON_MEMORY_ENDPOINTS", "0").lower() in {
                 "1", "true", "yes", "on"
             }
@@ -1002,7 +1193,7 @@ def write_workload(
             if not allow_lru_nuked:
                 f.write('vinyl v1 -expect n_lru_nuked == 0\n')
             if implementation.startswith("cachetag") and not allow_lru_nuked:
-                if storage_kind == "fellow" and cachetag_persist:
+                if storage_kind == "fellow" and cachetag_persist and not fellow_volatile_fallback():
                     f.write("vinyl v1 -expect CACHETAG.vcl1_tags_bench.volatile_objects == 0\n")
                     f.write("vinyl v1 -expect CACHETAG.vcl1_tags_bench.volatile_edges == 0\n")
                 else:
@@ -1011,6 +1202,19 @@ def write_workload(
                         "vinyl v1 -expect "
                         f"CACHETAG.vcl1_tags_bench.volatile_edges == {objects * effective_tags}\n"
                     )
+                    if fellow_volatile_fallback():
+                        f.write(
+                            "vinyl v1 -expect CACHETAG.vcl1_tags_bench."
+                            f"purgemap_volatile_fallback_attaches == {objects}\n"
+                        )
+                        f.write(
+                            "vinyl v1 -expect CACHETAG.vcl1_fallback_tags_bench."
+                            f"purgemap_volatile_fallback_attaches == {objects}\n"
+                        )
+                        f.write(
+                            "vinyl v1 -expect CACHETAG.vcl1_fallback_tags_bench."
+                            f"volatile_objects == {objects}\n"
+                        )
             if skip_purge:
                 if unload_fellow_cachetag:
                     write_fellow_cachetag_vcl_unload(f)
@@ -1679,6 +1883,9 @@ def main() -> None:
         help="benchmark profile to generate, 'all', or a comma-separated profile list",
     )
     args = parser.parse_args()
+    generation = code_generation()
+    runtime_mode = runtime_set_interning()
+    effective_mode = effective_set_interning()
     if args.objects <= 0:
         raise SystemExit("--objects must be positive")
     if args.tags_per_object <= 0:
@@ -1714,6 +1921,12 @@ def main() -> None:
         raise SystemExit("--buddy-reserve-chunks must be non-negative")
     if args.storage_kind in {"fellow", "buddy"} and not args.slash_vmod_path:
         raise SystemExit("--slash-vmod-path is required with --storage-kind=fellow or --storage-kind=buddy")
+    if fellow_volatile_fallback() and (
+        args.storage_kind != "fellow" or not args.cachetag_persist
+    ):
+        raise SystemExit(
+            "BENCH_FELLOW_VOLATILE_FALLBACK requires persistent Fellow storage"
+        )
     if args.timeout_idle and any(c.isspace() for c in args.timeout_idle):
         raise SystemExit("--timeout-idle must not contain whitespace")
     if args.backend_idle_timeout and any(c.isspace() for c in args.backend_idle_timeout):
@@ -1811,6 +2024,19 @@ def main() -> None:
             )
     if any(is_phase6_profile(profile) for profile in profiles) and args.tags_per_object < 4:
         raise SystemExit("phase6-fill-drain requires --tags-per-object >= 4")
+    decision_profiles = {"interning-shared-five", "interning-unique-five"}
+    if runtime_interning_decision():
+        if set(profiles) != decision_profiles:
+            raise SystemExit(
+                "BENCH_RUNTIME_INTERNING_DECISION requires exactly "
+                "interning-shared-five,interning-unique-five"
+            )
+        if args.tags_per_object != 5:
+            raise SystemExit("BENCH_RUNTIME_INTERNING_DECISION requires --tags-per-object=5")
+        if args.include_xkey or not args.skip_noindex:
+            raise SystemExit("BENCH_RUNTIME_INTERNING_DECISION excludes xkey and noindex")
+        if args.storage_kind != "default" or args.cachetag_persist:
+            raise SystemExit("BENCH_RUNTIME_INTERNING_DECISION requires volatile Default storage")
     restart_profiles = [profile for profile in profiles if profile in RESTART_PROFILES]
     if restart_profiles:
         normal_profiles = [profile for profile in profiles if profile not in RESTART_PROFILES]
@@ -1855,6 +2081,7 @@ def main() -> None:
                 args.shutdown_drain_seconds,
                 allow_lru_nuked,
             )
+        write_runtime_mode_manifest(args.out_dir, generation, runtime_mode, effective_mode)
         return
     if not args.skip_noindex:
         write_noindex_workload(
@@ -1992,6 +2219,48 @@ def main() -> None:
                 skip_purge,
                 ttl_override,
             )
+    write_runtime_mode_manifest(args.out_dir, generation, runtime_mode, effective_mode)
+
+
+def write_runtime_mode_manifest(
+    out_dir: Path,
+    generation: str,
+    runtime_mode: int | None,
+    effective_mode: int,
+) -> None:
+    cachetag_vtcs = sorted(out_dir.glob("cachetag_*.vtc"))
+    if not cachetag_vtcs:
+        raise SystemExit("no cachetag VCL was generated")
+    rendered_value = "none" if runtime_mode is None else str(runtime_mode)
+    expected = None if runtime_mode is None else f"interning = {'true' if runtime_mode else 'false'}"
+    opposite = None if runtime_mode is None else f"interning = {'false' if runtime_mode else 'true'}"
+    material = []
+    for path in cachetag_vtcs:
+        body = path.read_text(encoding="ascii")
+        if expected is None:
+            if "interning =" in body:
+                raise SystemExit(f"legacy VCL unexpectedly rendered runtime interning: {path.name}")
+        elif expected not in body or (opposite is not None and opposite in body):
+            raise SystemExit(
+                f"rendered VCL mode disagrees with BENCH_RUNTIME_SET_INTERNING: {path.name}"
+            )
+        material.append(f"{path.name}\0{hashlib.sha256(body.encode('ascii')).hexdigest()}\0")
+    workload_hash = hashlib.sha256("".join(material).encode("ascii")).hexdigest()
+    generator_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    (out_dir / "runtime-mode.env").write_text(
+        "".join(
+            (
+                f"code_generation={generation}\n",
+                f"requested_runtime_set_interning={rendered_value}\n",
+                f"rendered_runtime_set_interning={rendered_value}\n",
+                f"effective_set_interning={effective_mode}\n",
+                f"rendered_cachetag_vcl_files={len(cachetag_vtcs)}\n",
+                f"rendered_workloads_sha256={workload_hash}\n",
+                f"generator_sha256={generator_hash}\n",
+            )
+        ),
+        encoding="ascii",
+    )
 
 
 if __name__ == "__main__":

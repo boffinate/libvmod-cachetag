@@ -21,6 +21,18 @@ $Method BOOL .test_abort_next_sweep()
 
 Abort the next purge-map sweep after certificate start for regression tests.
 
+$Method BOOL .test_hold_next_object_event(ENUM { insert, expire } event = expire)
+
+Pause the next matching object event for this namespace. The pause self-releases after ten seconds so an aborted test cannot indefinitely block object-event unsubscription.
+
+$Method BOOL .test_wait_object_event_held(INT timeout_ms)
+
+Wait up to ``timeout_ms`` for the object event armed by ``test_hold_next_object_event()`` to enter its pause.
+
+$Method BOOL .test_release_object_event()
+
+Release the currently paused cachetag object event, including one owned by a namespace from a cooling VCL.
+
 $Method BOOL .test_hold_next_purge_publish()
 
 Pause the next purge after its registration sequence moves but before its purge-map entry is published.

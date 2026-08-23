@@ -1250,74 +1250,101 @@ cachetag_purgemap_probe_snapshots(struct cachetag_index *idx,
 	return (0);
 }
 
-int
-cachetag_attach(struct cachetag_index *idx, struct objcore *oc,
+static int
+cachetag_attach_prepared(struct cachetag_index *idx, struct objcore *oc,
     const struct cachetag_registration_snapshot *keys, unsigned nkeys,
-    enum cachetag_purge_mode *attach_purge)
+    enum cachetag_purge_mode *attach_purge,
+    struct cachetag_prepared_membership *prepared)
 {
-	struct cachetag_purgemap *pm;
-	void *fold_storage;
-#if CACHE_TAG_SET_INTERNING
-	uint64_t inline_folds[TAG_INTERN_LOOKUP_FIRST_MAX_FOLDS];
-#else
-	uint64_t inline_one;
-#endif
 	uint64_t *folds;
 	uint64_t reg_seq = 0;
 	unsigned u;
 	int r;
 
-	pm = cachetag_purgemap_get(idx);
-	if (pm == NULL)
-		goto fail_closed;
-	if (nkeys > 1) {
-	#if CACHE_TAG_SET_INTERNING
-		if (nkeys <= TAG_INTERN_LOOKUP_FIRST_MAX_FOLDS) {
-			fold_storage = NULL;
-			folds = inline_folds;
-		} else {
-			fold_storage = cachetag_intern_candidate_alloc(idx, nkeys);
-			if (fold_storage == NULL)
-				goto fail_closed;
-			folds = cachetag_fold_storage_values(fold_storage, nkeys);
-		}
-	#else
-		fold_storage = cachetag_fold_storage_alloc(nkeys);
-		if (fold_storage == NULL)
-			goto fail_closed;
-		folds = cachetag_fold_storage_values(fold_storage, nkeys);
-	#endif
-		if (folds == NULL) {
-			cachetag_fold_storage_free(fold_storage, nkeys);
-			goto fail_closed;
-		}
-	} else {
-	#if CACHE_TAG_SET_INTERNING
-		fold_storage = NULL;
-		folds = inline_folds;
-	#else
-		fold_storage = &inline_one;
-		folds = &inline_one;
-	#endif
-	}
+	folds = prepared->folds;
 	for (u = 0; u < nkeys; u++) {
 		folds[u] = cachetag_fold_digest(keys[u].digest_hi,
 		    keys[u].digest_lo);
 		if (reg_seq == 0)
 			reg_seq = keys[u].reg_seq;
 	}
-	r = cachetag_record_attach_purgemap_take(idx, oc, fold_storage, folds, nkeys,
-	    reg_seq, attach_purge);
-#if CACHE_TAG_SET_INTERNING
+	r = cachetag_record_attach_purgemap_take(idx, oc, prepared, reg_seq,
+	    attach_purge);
+	if (nkeys > 1)
+		cachetag_prepared_membership_cleanup(idx, prepared);
+	return (r);
+}
+
+static int
+cachetag_attach_one(struct cachetag_index *idx, struct objcore *oc,
+    const struct cachetag_registration_snapshot *keys,
+    enum cachetag_purge_mode *attach_purge)
+{
+	struct cachetag_prepared_membership prepared;
+	uint64_t inline_one;
+	int r;
+
+	r = cachetag_prepared_membership_init(idx, &prepared, 1, &inline_one);
 	if (r != 0)
+		return (r);
+	return (cachetag_attach_prepared(idx, oc, keys, 1, attach_purge,
+	    &prepared));
+}
+
+static int
+cachetag_attach_direct(struct cachetag_index *idx, struct objcore *oc,
+    const struct cachetag_registration_snapshot *keys, unsigned nkeys,
+    enum cachetag_purge_mode *attach_purge)
+{
+	struct cachetag_prepared_membership prepared;
+	int r;
+
+	r = cachetag_prepared_membership_init(idx, &prepared, nkeys, NULL);
+	if (r != 0)
+		return (r);
+	return (cachetag_attach_prepared(idx, oc, keys, nkeys, attach_purge,
+	    &prepared));
+}
+
+static int
+cachetag_attach_interned(struct cachetag_index *idx, struct objcore *oc,
+    const struct cachetag_registration_snapshot *keys, unsigned nkeys,
+    enum cachetag_purge_mode *attach_purge)
+{
+	struct cachetag_prepared_membership prepared;
+	uint64_t inline_folds[TAG_INTERN_LOOKUP_FIRST_MAX_FOLDS];
+	uint64_t *borrowed_folds;
+	int r;
+
+	borrowed_folds = nkeys <= TAG_INTERN_LOOKUP_FIRST_MAX_FOLDS ?
+	    inline_folds : NULL;
+	r = cachetag_prepared_membership_init(idx, &prepared, nkeys,
+	    borrowed_folds);
+	if (r != 0)
+		return (r);
+	return (cachetag_attach_prepared(idx, oc, keys, nkeys, attach_purge,
+	    &prepared));
+}
+
+int
+cachetag_attach(struct cachetag_index *idx, struct objcore *oc,
+    const struct cachetag_registration_snapshot *keys, unsigned nkeys,
+    enum cachetag_purge_mode *attach_purge)
+{
+	struct cachetag_purgemap *pm;
+	int r;
+
+	pm = cachetag_purgemap_get(idx);
+	if (pm == NULL || nkeys == 0)
 		goto fail_closed;
-#else
-	if (r != 0) {
-		cachetag_fold_storage_free(fold_storage, nkeys);
-		goto fail_closed;
-	}
-#endif
-	return (0);
+	if (nkeys == 1)
+		r = cachetag_attach_one(idx, oc, keys, attach_purge);
+	else if (cachetag_index_interning(idx))
+		r = cachetag_attach_interned(idx, oc, keys, nkeys, attach_purge);
+	else
+		r = cachetag_attach_direct(idx, oc, keys, nkeys, attach_purge);
+	if (r == 0)
+		return (0);
 
 fail_closed:
 	cachetag_counter_add(idx, &idx->counters.volatile_attach_failures, 1);

@@ -33,6 +33,9 @@ COMPARISON_COHORT_FIELDS = (
     "cpu_frequency_state", "cpu_boost_state", "kernel", "nproc", "mem_total_kb",
 )
 PERF_STAT_ROW_METRICS = (
+    "vinyld_load_instructions",
+    "vinyld_load_cycles",
+    "vinyld_load_task_clock_seconds",
     "vinyld_warm_instructions",
     "vinyld_warm_cycles",
     "vinyld_warm_task_clock_seconds",
@@ -1240,9 +1243,44 @@ def comparison_contract_active(result_dir: Path) -> bool:
     """
     metadata = parse_kv(result_dir / "metadata.env")
     remote = parse_kv(result_dir / "remote-run.env")
-    return metadata.get("benchmark_contract") in {"comparison-v1", "interning-screen-v1"} or remote.get(
+    return metadata.get("benchmark_contract") in {"comparison-v1", "interning-screen-v1", "runtime-interning-decision-v1"} or remote.get(
         "benchmark_contract"
-    ) in {"comparison-v1", "interning-screen-v1"}
+    ) in {"comparison-v1", "interning-screen-v1", "runtime-interning-decision-v1"}
+
+
+def controlled_perf_validity(result_dir: Path, workload: str, run: int) -> tuple[int, str]:
+    """Verify the decision protocol's phase-scoped counter identity."""
+    metadata = parse_kv(result_dir / "metadata.env")
+    required_events = set(metadata.get("bench_perf_stat_events", "").split(","))
+    required_events.discard("")
+    required_events.add("instructions")
+    identities: list[tuple[str, str, str]] = []
+    reasons: list[str] = []
+    for phase in ("load", "warm"):
+        prefix = result_dir / f"{workload}.run-{run}.{phase}"
+        target = parse_kv(Path(str(prefix) + ".target.env"))
+        handshake = parse_kv(Path(str(prefix) + ".handshake.env"))
+        start_tasks = target.get("start_task_ids", "").split(",") if target.get("start_task_ids") else []
+        end_tasks = target.get("end_task_ids", "").split(",") if target.get("end_task_ids") else []
+        attached_tasks = target.get("perf_attached_task_ids", "").split(",") if target.get("perf_attached_task_ids") else []
+        tasks_valid = bool(start_tasks) and start_tasks == end_tasks == attached_tasks and len(start_tasks) == as_int(target, "start_task_count") == as_int(target, "end_task_count") and len(set(start_tasks)) == len(start_tasks) and all(item.isdigit() and int(item) > 0 for item in start_tasks)
+        if target.get("identity_schema") != "cache-main-controlled-perf-v1":
+            reasons.append(f"controlled_perf_target_missing:{phase}")
+        elif target.get("phase") != phase or target.get("selected_comm") != "cache-main" or Path(target.get("selected_exe", "")).name != "vinyld" or target.get("identity_stable") != "1" or target.get("task_coverage_complete") != "1" or target.get("task_set_changed") != "0" or not tasks_valid:
+            reasons.append(f"controlled_perf_target_invalid:{phase}")
+        else:
+            identities.append((target.get("boot_id", ""), target.get("selected_pid", ""), target.get("selected_start_time_ticks", "")))
+        if handshake.get("handshake_schema") != "driver-perf-fifo-v1" or handshake.get("phase") != phase or any(
+            handshake.get(key) != "1" for key in ("profiler_ready_ack", "enable_ack", "disable_ack", "phase_complete_ack")
+        ):
+            reasons.append(f"controlled_perf_handshake_invalid:{phase}")
+        events = parse_perf_stat_csv_details(Path(str(prefix) + ".perf-stat.csv"))
+        missing = sorted(event for event in required_events if event not in events)
+        if missing:
+            reasons.append(f"controlled_perf_coverage_missing:{phase}:{','.join(missing)}")
+    if len(identities) == 2 and identities[0] != identities[1]:
+        reasons.append("controlled_perf_target_changed")
+    return int(not reasons), "ok" if not reasons else ",".join(reasons)
 
 
 def cache_main_capture_valid(result_dir: Path, workload: str, run: int, endpoint: str) -> tuple[int, str]:
@@ -1446,7 +1484,51 @@ def comparison_contract_validity(
     provenance = parse_kv(result_dir / "build-provenance.env")
     contract = metadata.get("benchmark_contract") or remote.get("benchmark_contract")
     interning_screen = contract == "interning-screen-v1"
+    runtime_interning_decision = contract == "runtime-interning-decision-v1"
     reasons: list[str] = []
+    if runtime_interning_decision:
+        for key in (
+            "build_provenance_version", "vinyl_build_input_sha256", "cachetag_build_input_sha256",
+            "vinyl_binary_sha256", "cachetag_binary_sha256", "build_commands_sha256",
+            "dockerfile_sha256", "docker_image_id",
+        ):
+            if key == "build_provenance_version":
+                if provenance.get(key) != "5":
+                    reasons.append(f"provenance_missing:{key}")
+            elif key == "docker_image_id":
+                if not provenance.get(key) or provenance.get(key) == "none":
+                    reasons.append(f"provenance_missing:{key}")
+            else:
+                _required_hash(reasons, provenance, key)
+        if provenance.get("build_provenance_mode") != "strict" or provenance.get("build_provenance_eligible") != "1":
+            reasons.append("provenance_not_comparison_eligible")
+        generation = metadata.get("bench_code_generation")
+        requested = metadata.get("bench_runtime_set_interning_requested")
+        rendered = metadata.get("bench_runtime_set_interning_rendered")
+        effective = metadata.get("bench_effective_set_interning")
+        legacy = metadata.get("bench_legacy_set_interning")
+        if generation == "runtime":
+            mode_valid = requested in {"0", "1"} and rendered == requested and effective == requested and legacy == "none"
+        elif generation == "legacy":
+            mode_valid = requested == "none" and rendered == "none" and legacy in {"0", "1"} and effective == legacy
+        else:
+            mode_valid = False
+        if not mode_valid:
+            reasons.append("runtime_interning_mode_metadata_invalid")
+        expected_configure = {
+            "0": "--disable-set-interning",
+            "1": "--enable-set-interning",
+        }.get(legacy) if generation == "legacy" else "none"
+        if provenance.get("code_generation") != generation or provenance.get("legacy_set_interning") != legacy or provenance.get("cachetag_configure_args") != expected_configure:
+            reasons.append("runtime_interning_provenance_mode_mismatch")
+        if not metadata.get("rendered_workloads_sha256"):
+            reasons.append("runtime_interning_rendered_workload_hash_missing")
+        if not metadata.get("decision_cohort_fingerprint"):
+            reasons.append("decision_cohort_fingerprint_missing")
+        valid, reason = controlled_perf_validity(result_dir, workload, run)
+        if not valid:
+            reasons.append(reason)
+        return int(not reasons), "ok" if not reasons else ",".join(reasons)
     required_provenance = [
         "build_provenance_version",
         "vinyl_build_input_sha256",
@@ -1466,7 +1548,7 @@ def comparison_contract_validity(
         required_provenance.insert(8, "xkey_binary_sha256")
     for key in required_provenance:
         if key == "build_provenance_version":
-            accepted_versions = {"4"} if interning_screen else {"3", "4"}
+            accepted_versions = {"5"} if interning_screen else {"3", "4", "5"}
             if provenance.get(key) not in accepted_versions:
                 reasons.append(f"provenance_missing:{key}")
         elif key == "docker_image_id":
@@ -1485,19 +1567,14 @@ def comparison_contract_validity(
             reasons.append("interning_screen_xkey_arm_present")
         if contract_value("run_noindex") != "0":
             reasons.append("interning_screen_noindex_arm_present")
-        set_interning = contract_value("bench_set_interning")
-        configure_args = contract_value("cachetag_configure_args")
-        expected_configure_args = {
-            "0": "--disable-set-interning",
-            "1": "--enable-set-interning",
-        }
-        if set_interning not in expected_configure_args:
+        requested = contract_value("bench_runtime_set_interning_requested")
+        rendered = contract_value("bench_runtime_set_interning_rendered")
+        effective = contract_value("bench_effective_set_interning")
+        if contract_value("bench_code_generation") != "runtime" or requested not in {"0", "1"} or rendered != requested or effective != requested:
             reasons.append("interning_screen_set_interning_invalid")
-        elif configure_args != expected_configure_args[set_interning]:
-            reasons.append("interning_screen_configure_args_invalid")
-        if provenance.get("bench_set_interning") != set_interning:
+        if provenance.get("code_generation") != "runtime" or provenance.get("legacy_set_interning") != "none":
             reasons.append("interning_screen_provenance_set_interning_mismatch")
-        if provenance.get("cachetag_configure_args") != configure_args:
+        if provenance.get("cachetag_configure_args") != "none":
             reasons.append("interning_screen_provenance_configure_args_mismatch")
     fixture_name = metadata.get("fixture_name") or remote.get("fixture_name") or driver.get("driver_fixture_name")
     declared_fixture_fingerprint = metadata.get("fixture_fingerprint") or remote.get("fixture_fingerprint")
@@ -1767,6 +1844,15 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
         warm_perf_stat_details = parse_perf_stat_csv_details(
             result_dir / f"{workload}.run-{run}.warm.perf-stat.csv"
         )
+        load_perf_stat_details = parse_perf_stat_csv_details(
+            result_dir / f"{workload}.run-{run}.load.perf-stat.csv"
+        )
+        load_instructions_event = load_perf_stat_details.get("instructions")
+        load_cycles_event = load_perf_stat_details.get("cycles")
+        load_task_clock_event = load_perf_stat_details.get("task-clock")
+        load_instructions = int(float(load_instructions_event["count"])) if load_instructions_event else None
+        load_cycles = int(float(load_cycles_event["count"])) if load_cycles_event else None
+        load_task_clock_seconds = perf_stat_seconds(load_task_clock_event)
         warm_instructions_event = warm_perf_stat_details.get("instructions")
         warm_cycles_event = warm_perf_stat_details.get("cycles")
         warm_task_clock_event = warm_perf_stat_details.get("task-clock")
@@ -2046,6 +2132,14 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
             "cache_main_load_cpu_seconds": load_cache_main_cpu_seconds,
             "cache_main_load_cpu_seconds_per_object": ratio(
                 load_cache_main_cpu_seconds, load_backend_objects
+            ),
+            "vinyld_load_instructions": load_instructions,
+            "vinyld_load_cycles": load_cycles,
+            "vinyld_load_task_clock_seconds": load_task_clock_seconds,
+            "vinyld_load_instructions_per_object": ratio(load_instructions, load_backend_objects),
+            "vinyld_load_cycles_per_object": ratio(load_cycles, load_backend_objects),
+            "vinyld_load_task_clock_seconds_per_object": ratio(
+                load_task_clock_seconds, load_backend_objects
             ),
             "driver_warm_requests_per_second": as_float(driver_values, "driver_warm_requests_per_second"),
             "driver_warm_latency_p99_seconds": as_float(
@@ -2805,6 +2899,24 @@ def result_data(result_dir: Path) -> dict[str, Any]:
         "bench_perf_stat": metadata.get("bench_perf_stat")
         or command_env_value(remote, "BENCH_PERF_STAT")
         or "",
+        "bench_code_generation": metadata.get("bench_code_generation")
+        or remote.get("bench_code_generation")
+        or command_env_value(remote, "BENCH_CODE_GENERATION")
+        or "",
+        "bench_runtime_set_interning_requested": metadata.get("bench_runtime_set_interning_requested")
+        or remote.get("bench_runtime_set_interning_requested")
+        or command_env_value(remote, "BENCH_RUNTIME_SET_INTERNING")
+        or "",
+        "bench_runtime_set_interning_rendered": metadata.get("bench_runtime_set_interning_rendered")
+        or remote.get("bench_runtime_set_interning_rendered")
+        or "",
+        "bench_effective_set_interning": metadata.get("bench_effective_set_interning")
+        or remote.get("bench_effective_set_interning")
+        or "",
+        "rendered_workloads_sha256": metadata.get("rendered_workloads_sha256")
+        or remote.get("rendered_workloads_sha256")
+        or "",
+        "cachetag_binary_sha256": parse_kv(result_dir / "build-provenance.env").get("cachetag_binary_sha256", ""),
         "runs": {
             "pass": valid_count,
             "fail": invalid_count,
@@ -3093,7 +3205,9 @@ def sweep_configuration(result_dir: Path) -> dict[str, Any]:
     )
     env_names = {
         "cachetag_configure_args": "CACHE_TAG_CONFIGURE_ARGS",
-        "bench_set_interning": "BENCH_SET_INTERNING",
+        "bench_code_generation": "BENCH_CODE_GENERATION",
+        "bench_runtime_set_interning_requested": "BENCH_RUNTIME_SET_INTERNING",
+        "bench_effective_set_interning": "BENCH_RUNTIME_SET_INTERNING",
         "bench_stale_deliver": "BENCH_STALE_DELIVER",
         "objects": "OBJECTS",
         "tags_per_object": "TAGS_PER_OBJECT",
@@ -3824,6 +3938,49 @@ def comparison_arm_cohort_validity(arms: dict[str, list[dict[str, Any]]]) -> tup
         for result in results
         if comparison_contract_active(Path(result["path"]))
     ]
+    decision_results = [
+        result
+        for results in arms.values()
+        for result in results
+        if (parse_kv(Path(result["path"]) / "metadata.env").get("benchmark_contract")
+            or parse_kv(Path(result["path"]) / "remote-run.env").get("benchmark_contract"))
+        == "runtime-interning-decision-v1"
+    ]
+    if decision_results:
+        expected_labels = ("D1", "R0-1", "I1", "R1-1", "D2", "R0-2", "I2", "R1-2")
+        if tuple(arms) != expected_labels or any(len(arms[label]) != 1 for label in expected_labels if label in arms):
+            return 0, "decision_row_labels_or_order_invalid"
+        expected_matrices = {
+            label: f"runtime-interning-decision-{label.lower()}" for label in expected_labels
+        }
+        if any(arms[label][0].get("matrix") != expected_matrices[label] for label in expected_labels):
+            return 0, "decision_row_matrix_label_mismatch"
+        if len(decision_results) != sum(len(results) for results in arms.values()):
+            return 0, "decision_campaign_mixed_with_other_contract"
+        decision_fingerprints = {
+            parse_kv(Path(result["path"]) / "metadata.env").get("decision_cohort_fingerprint")
+            for result in decision_results
+        }
+        if not decision_fingerprints or None in decision_fingerprints or "" in decision_fingerprints:
+            return 0, "decision_cohort_fingerprint_missing"
+        if len(decision_fingerprints) != 1:
+            return 0, "decision_cohort_fingerprint_changed_across_arms"
+        runtime_binaries = {
+            result.get("cachetag_binary_sha256") for result in decision_results
+            if result.get("bench_code_generation") == "runtime" and result.get("cachetag_binary_sha256")
+        }
+        if len(runtime_binaries) > 1:
+            return 0, "runtime_r0_r1_binary_hash_changed"
+        arm_binaries: dict[tuple[str, str], set[str]] = {}
+        for result in decision_results:
+            generation = str(result.get("bench_code_generation") or "")
+            effective = str(result.get("bench_effective_set_interning") or "")
+            binary = str(result.get("cachetag_binary_sha256") or "")
+            if generation and effective and binary:
+                arm_binaries.setdefault((generation, effective), set()).add(binary)
+        if any(len(binaries) > 1 for binaries in arm_binaries.values()):
+            return 0, "decision_arm_binary_hash_changed"
+        return 1, "ok"
     fingerprints = {
         str(result.get("comparison_cohort_fingerprint"))
         for results in arms.values()
@@ -3842,7 +3999,19 @@ def comparison_arm_cohort_validity(arms: dict[str, list[dict[str, Any]]]) -> tup
 
 
 def render_arm_comparison(arms: dict[str, list[dict[str, Any]]]) -> str:
-    arm_names = list(arms)
+    def arm_order(name: str) -> tuple[int, str]:
+        lowered = name.lower()
+        if "legacy" in lowered and ("direct" in lowered or "r0" in lowered):
+            return (0, lowered)
+        if "legacy" in lowered and ("intern" in lowered or "r1" in lowered):
+            return (1, lowered)
+        if "runtime" in lowered and ("direct" in lowered or "r0" in lowered):
+            return (2, lowered)
+        if "runtime" in lowered and ("intern" in lowered or "r1" in lowered):
+            return (3, lowered)
+        return (4, lowered)
+
+    arm_names = sorted(arms, key=arm_order)
     hardware = {
         result["hardware"]
         for results in arms.values()

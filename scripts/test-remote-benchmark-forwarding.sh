@@ -46,8 +46,12 @@ printf '%s\n' "$transport_names" | while IFS= read -r name; do
 done
 
 grep -F 'envs="\$envs BENCHMARK_CONTRACT=\$CACHE_TAG_BENCHMARK_CONTRACT"' "$script" >/dev/null
-grep -F "CACHE_TAG_BENCH_SET_INTERNING=%s" "$script" >/dev/null
-grep -F 'envs="\$envs BENCH_SET_INTERNING=\$CACHE_TAG_BENCH_SET_INTERNING"' "$script" >/dev/null
+grep -F "CACHE_TAG_BENCH_CODE_GENERATION=%s" "$script" >/dev/null
+grep -F "CACHE_TAG_BENCH_RUNTIME_SET_INTERNING=%s" "$script" >/dev/null
+grep -F "CACHE_TAG_BENCH_LEGACY_SET_INTERNING=%s" "$script" >/dev/null
+grep -F 'envs="\$envs BENCH_CODE_GENERATION=\$CACHE_TAG_BENCH_CODE_GENERATION"' "$script" >/dev/null
+grep -F 'envs="\$envs BENCH_RUNTIME_SET_INTERNING=\$CACHE_TAG_BENCH_RUNTIME_SET_INTERNING"' "$script" >/dev/null
+grep -F 'envs="\$envs BENCH_LEGACY_SET_INTERNING=\$CACHE_TAG_BENCH_LEGACY_SET_INTERNING"' "$script" >/dev/null
 grep -F "CACHE_TAG_BENCH_BUILD_CFLAGS=%s" "$script" >/dev/null
 grep -F 'export BENCH_BUILD_CFLAGS="\$CACHE_TAG_BENCH_BUILD_CFLAGS"' "$script" >/dev/null
 grep -F 'bench_build_cflags=%s' "$script" >/dev/null
@@ -61,6 +65,18 @@ grep -F 'export BENCH_PERF_STAT_RUNS="\$CACHE_TAG_BENCH_PERF_STAT_RUNS"' "$scrip
 grep -F 'export BENCH_PERF_STAT_WORKLOAD="\$CACHE_TAG_BENCH_PERF_STAT_WORKLOAD"' "$script" >/dev/null
 grep -F 'export BENCH_PERF_STAT_EVENTS="\$CACHE_TAG_BENCH_PERF_STAT_EVENTS"' "$script" >/dev/null
 grep -F 'export BENCH_STALE_DELIVER="\$CACHE_TAG_BENCH_STALE_DELIVER"' "$script" >/dev/null
+grep -F 'runtime-interning-decision-d1' "$script" >/dev/null
+grep -F 'runtime-interning-decision-r0-1' "$script" >/dev/null
+grep -F 'runtime-interning-decision-i1' "$script" >/dev/null
+grep -F 'runtime-interning-decision-r1-1' "$script" >/dev/null
+grep -F 'decision_cohort_fingerprint' "$script" >/dev/null
+grep -F 'CACHE_TAG_LEGACY_DIRECT_VMOD_SRC' "$script" >/dev/null
+grep -F 'CACHE_TAG_LEGACY_INTERNED_VMOD_SRC' "$script" >/dev/null
+grep -F 'runtime-interning-decision-d1|runtime-interning-decision-i1|runtime-interning-decision-r0-1) skip_build=0' "$script" >/dev/null
+grep -F 'runtime-interning-decision-d2|runtime-interning-decision-i2|runtime-interning-decision-r1-1|runtime-interning-decision-r0-2|runtime-interning-decision-r1-2) skip_build=1' "$script" >/dev/null
+expected_order='runtime-interning-decision-d1 runtime-interning-decision-r0-1 runtime-interning-decision-i1 runtime-interning-decision-r1-1 runtime-interning-decision-d2 runtime-interning-decision-r0-2 runtime-interning-decision-i2 runtime-interning-decision-r1-2'
+actual_order=$(sed -n '/runtime-interning-decision)/,/;;/p' "$script" | grep -o 'runtime-interning-decision-[a-z0-9-]*' | tr '\n' ' ' | sed 's/ $//')
+[ "$actual_order" = "$expected_order" ]
 # Both perf attachments must stay single-profiler on the remote host.
 [ "$(grep -Fc 'envs="\$envs PERF_MODE=off"' "$script")" -eq 2 ]
 

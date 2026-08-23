@@ -12,7 +12,8 @@ vinyl v1 -vcl+backend {
 	import vtc;
 
 	sub vcl_init {
-		new tags = cachetag.namespace("intern_publish_race", sweep_interval = 0s);
+		new tags = cachetag.namespace("intern_publish_race", sweep_interval = 0s,
+		    interning = true);
 	}
 
 	sub vcl_recv {

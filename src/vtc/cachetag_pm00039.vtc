@@ -1,0 +1,186 @@
+vtest "direct and interned namespaces own the same objects independently"
+
+server s1 {
+	rxreq
+	expect req.url == "/a"
+	txresp -body "a"
+
+	rxreq
+	expect req.url == "/b"
+	txresp -body "b"
+
+	rxreq
+	expect req.url == "/ttl"
+	txresp -body "ttl"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new direct = cachetag.namespace("mixed", sweep_interval = 0s,
+		    interning = false);
+		new interned = cachetag.namespace("mixed", sweep_interval = 0s,
+		    interning = true);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE_DIRECT") {
+			set req.http.result = direct.purge(req.http.Tag);
+			return (synth(200));
+		}
+		if (req.method == "COMPACT_DIRECT") {
+			set req.http.result = direct.compact();
+			return (synth(200));
+		}
+		if (req.method == "REMOVE") {
+			return (purge);
+		}
+		if (req.method == "STATS") {
+			set req.http.direct_objects = direct.objects();
+			set req.http.direct_edges = direct.edges();
+			set req.http.interned_objects = interned.objects();
+			set req.http.interned_edges = interned.edges();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/b") {
+			direct.add_header("beta,alpha");
+			interned.add_header("beta,alpha");
+		} else if (bereq.url == "/ttl") {
+			direct.add_header("ttl-a,ttl-b");
+			interned.add_header("ttl-a,ttl-b");
+		} else {
+			direct.add_header("alpha,beta");
+			interned.add_header("alpha,beta");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (direct.stale() || interned.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		set resp.http.direct_objects = req.http.direct_objects;
+		set resp.http.direct_edges = req.http.direct_edges;
+		set resp.http.interned_objects = req.http.interned_objects;
+		set resp.http.interned_edges = req.http.interned_edges;
+		return (deliver);
+	}
+} -start
+
+client c_load {
+	txreq -url "/a"
+	rxresp
+	expect resp.body == "a"
+
+	txreq -url "/b"
+	rxresp
+	expect resp.body == "b"
+
+	txreq -url "/ttl"
+	rxresp
+	expect resp.body == "ttl"
+
+	txreq -req STATS
+	rxresp
+	expect resp.http.direct_objects == 3
+	expect resp.http.direct_edges == 6
+	expect resp.http.interned_objects == 3
+	expect resp.http.interned_edges == 6
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_sets == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_set_refs == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_set_hits == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_set_misses == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_set_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_table_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_interned_mixed.volatile_interned_sets == 2
+vinyl v1 -expect CACHETAG.vcl1_interned_mixed.volatile_interned_set_refs == 3
+vinyl v1 -expect CACHETAG.vcl1_interned_mixed.volatile_interned_set_hits == 1
+vinyl v1 -expect CACHETAG.vcl1_interned_mixed.volatile_interned_set_misses == 2
+
+client c_compact_direct {
+	txreq -req PURGE_DIRECT -hdr "Tag: alpha"
+	rxresp
+	expect resp.http.result == -1
+
+	txreq -req COMPACT_DIRECT
+	rxresp
+	expect resp.http.result == 2
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_objects == 1
+vinyl v1 -expect CACHETAG.vcl1_interned_mixed.volatile_objects == 1
+
+client c_compact_stats {
+	txreq -req STATS
+	rxresp
+	expect resp.http.direct_objects == 1
+	expect resp.http.direct_edges == 2
+	expect resp.http.interned_objects == 1
+	expect resp.http.interned_edges == 2
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_sets == 0
+vinyl v1 -expect CACHETAG.vcl1_interned_mixed.volatile_interned_sets == 1
+vinyl v1 -expect CACHETAG.vcl1_interned_mixed.volatile_interned_set_refs == 1
+
+client c_remove_last {
+	txreq -req REMOVE -url "/ttl"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_interned_mixed.volatile_objects == 0
+
+client c_final_stats {
+	txreq -req STATS
+	rxresp
+	expect resp.http.direct_objects == 0
+	expect resp.http.direct_edges == 0
+	expect resp.http.interned_objects == 0
+	expect resp.http.interned_edges == 0
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_sets == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_set_refs == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_set_hits == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_set_misses == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_set_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_table_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_acquire_calls == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_acquire_usec == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_acquire_max_usec == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_acquire_over_50us == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_acquire_over_250us == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_acquire_over_1ms == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_acquire_over_10ms == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_table_grow_calls == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_table_grow_usec == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_table_grow_max_usec == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_candidate_alloc_calls == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_candidate_alloc_usec == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_candidate_alloc_max_usec == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_table_alloc_calls == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_table_alloc_usec == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_table_alloc_max_usec == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_migration_active == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_old_table_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_detached_set_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_detached_table_bytes == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_table_alloc_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_table_grow_failures == 0
+vinyl v1 -expect CACHETAG.vcl1_direct_mixed.volatile_interned_candidate_discards == 0
+vinyl v1 -expect CACHETAG.vcl1_interned_mixed.volatile_interned_sets == 0
+vinyl v1 -expect CACHETAG.vcl1_interned_mixed.volatile_interned_set_refs == 0
+
+server s1 -wait

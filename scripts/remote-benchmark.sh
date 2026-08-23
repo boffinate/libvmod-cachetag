@@ -42,9 +42,15 @@ Environment:
                            auto.
   CACHE_TAG_SKIP_BUILD     1 to reuse the remote benchmark build cache; reuse is
                            provenance-checked against the synced sources (BR-016)
-  CACHE_TAG_BENCH_SET_INTERNING
-                           Override BENCH_SET_INTERNING: 0 for direct vectors or
-                           1 for set interning (default: benchmark default)
+  CACHE_TAG_BENCH_CODE_GENERATION
+                           runtime candidate or frozen legacy generation
+  CACHE_TAG_BENCH_RUNTIME_SET_INTERNING
+                           Candidate namespace mode, 0 or 1
+  CACHE_TAG_BENCH_LEGACY_SET_INTERNING
+                           Frozen legacy compile-time mode, 0 or 1
+  CACHE_TAG_VMOD_BUILD_SRC
+                           Independent local VMOD build-source checkout. It is
+                           synced separately from the measured-path harness.
   CACHE_TAG_BENCH_BUILD_CFLAGS
                            Override BENCH_BUILD_CFLAGS for the cachetag/xkey
                            VMOD build (default: benchmark default)
@@ -406,6 +412,25 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 workspace_dir=$(CDPATH= cd -- "$repo_dir/.." && pwd)
+vmod_build_src_explicit=${CACHE_TAG_VMOD_BUILD_SRC:+1}
+vmod_build_src=${CACHE_TAG_VMOD_BUILD_SRC:-$repo_dir}
+legacy_direct_vmod_src=${CACHE_TAG_LEGACY_DIRECT_VMOD_SRC:-}
+legacy_interned_vmod_src=${CACHE_TAG_LEGACY_INTERNED_VMOD_SRC:-}
+vmod_build_src=$(CDPATH= cd -- "$vmod_build_src" && pwd)
+if [ -n "$legacy_direct_vmod_src" ]; then
+	legacy_direct_vmod_src=$(CDPATH= cd -- "$legacy_direct_vmod_src" && pwd)
+fi
+if [ -n "$legacy_interned_vmod_src" ]; then
+	legacy_interned_vmod_src=$(CDPATH= cd -- "$legacy_interned_vmod_src" && pwd)
+fi
+if [ -n "$legacy_direct_vmod_src" ] && [ -n "$legacy_interned_vmod_src" ] && {
+	[ "$legacy_direct_vmod_src" = "$legacy_interned_vmod_src" ] ||
+	[ "$legacy_direct_vmod_src" = "$vmod_build_src" ] ||
+	[ "$legacy_interned_vmod_src" = "$vmod_build_src" ];
+}; then
+	echo "decision VMOD source checkouts must be distinct" >&2
+	exit 2
+fi
 remote_dir=${CACHE_TAG_REMOTE_DIR:-cachetag-bench}
 target_host=$target
 case "$target_host" in
@@ -424,7 +449,9 @@ pressure_purgers_override=${CACHE_TAG_PRESSURE_PURGERS:-}
 pressure_target_rps_override=${CACHE_TAG_PRESSURE_TARGET_RPS:-}
 pressure_purge_rate_override=${CACHE_TAG_PRESSURE_PURGE_RATE:-}
 skip_build=${CACHE_TAG_SKIP_BUILD:-0}
-bench_set_interning_override=${CACHE_TAG_BENCH_SET_INTERNING:-}
+bench_code_generation_override=${CACHE_TAG_BENCH_CODE_GENERATION:-}
+bench_runtime_set_interning_override=${CACHE_TAG_BENCH_RUNTIME_SET_INTERNING:-}
+bench_legacy_set_interning_override=${CACHE_TAG_BENCH_LEGACY_SET_INTERNING:-}
 bench_build_cflags_override=${CACHE_TAG_BENCH_BUILD_CFLAGS:-}
 # Retained only because the quoted remote environment line is a stable public
 # transport surface. The benchmark harness no longer consumes or honours it.
@@ -444,6 +471,7 @@ bench_stale_deliver_override=${CACHE_TAG_BENCH_STALE_DELIVER:-}
 bench_workload_filter_override=${CACHE_TAG_BENCH_WORKLOAD_FILTER:-}
 bench_validate_residency_override=${CACHE_TAG_BENCH_VALIDATE_RESIDENCY:-}
 bench_warm_seconds_override=${CACHE_TAG_BENCH_WARM_SECONDS:-}
+bench_warm_passes_override=${CACHE_TAG_BENCH_WARM_PASSES:-}
 bench_skip_purge_override=${CACHE_TAG_BENCH_SKIP_PURGE:-}
 bench_restart_tag_profile_override=${CACHE_TAG_BENCH_RESTART_TAG_PROFILE:-}
 bench_restart_touch_percent_override=${CACHE_TAG_BENCH_RESTART_TOUCH_PERCENT:-}
@@ -481,6 +509,10 @@ malloc_conf_override=${CACHE_TAG_MALLOC_CONF:-}
 malloc_arena_max_override=${CACHE_TAG_MALLOC_ARENA_MAX:-}
 malloc_trim_threshold_override=${CACHE_TAG_MALLOC_TRIM_THRESHOLD:-}
 benchmark_contract_override=${CACHE_TAG_BENCHMARK_CONTRACT:-}
+decision_shared_load_budget=${CACHE_TAG_DECISION_SHARED_LOAD_BUDGET_PERCENT:-}
+decision_shared_warm_budget=${CACHE_TAG_DECISION_SHARED_WARM_BUDGET_PERCENT:-}
+decision_unique_load_budget=${CACHE_TAG_DECISION_UNIQUE_LOAD_BUDGET_PERCENT:-}
+decision_unique_warm_budget=${CACHE_TAG_DECISION_UNIQUE_WARM_BUDGET_PERCENT:-}
 bench_cpuset_override=${CACHE_TAG_BENCH_CPUSET_CPUS:-}
 bench_driver_cpuset_override=${CACHE_TAG_BENCH_DRIVER_CPUSET_CPUS:-}
 bench_backend_cpuset_override=${CACHE_TAG_BENCH_BACKEND_CPUSET_CPUS:-}
@@ -517,8 +549,15 @@ quote() {
 
 remote_sh() {
 	{
-		printf 'CACHE_TAG_BENCH_SET_INTERNING=%s\n' "$(quote "$bench_set_interning_override")"
+		printf 'CACHE_TAG_BENCH_CODE_GENERATION=%s\n' "$(quote "$bench_code_generation_override")"
+		printf 'CACHE_TAG_BENCH_RUNTIME_SET_INTERNING=%s\n' "$(quote "$bench_runtime_set_interning_override")"
+		printf 'CACHE_TAG_BENCH_LEGACY_SET_INTERNING=%s\n' "$(quote "$bench_legacy_set_interning_override")"
+		printf 'CACHE_TAG_BENCH_WARM_PASSES=%s\n' "$(quote "$bench_warm_passes_override")"
 		printf 'CACHE_TAG_BENCH_BUILD_CFLAGS=%s\n' "$(quote "$bench_build_cflags_override")"
+		printf 'CACHE_TAG_DECISION_SHARED_LOAD_BUDGET_PERCENT=%s\n' "$(quote "$decision_shared_load_budget")"
+		printf 'CACHE_TAG_DECISION_SHARED_WARM_BUDGET_PERCENT=%s\n' "$(quote "$decision_shared_warm_budget")"
+		printf 'CACHE_TAG_DECISION_UNIQUE_LOAD_BUDGET_PERCENT=%s\n' "$(quote "$decision_unique_load_budget")"
+		printf 'CACHE_TAG_DECISION_UNIQUE_WARM_BUDGET_PERCENT=%s\n' "$(quote "$decision_unique_warm_budget")"
 		printf 'CACHE_TAG_BENCH_PERF_RECORD_CALL_GRAPH=%s\n' "$(quote "$bench_perf_record_call_graph_override")"
 		cat
 	} |
@@ -597,6 +636,12 @@ EOF
 }
 
 sync_checkout() {
+	if [ "$matrix" = runtime-interning-decision ]; then
+		[ -n "$vmod_build_src_explicit" ] && [ -n "$legacy_direct_vmod_src" ] && [ -n "$legacy_interned_vmod_src" ] || {
+			echo "runtime-interning-decision requires CACHE_TAG_LEGACY_DIRECT_VMOD_SRC, CACHE_TAG_LEGACY_INTERNED_VMOD_SRC, and CACHE_TAG_VMOD_BUILD_SRC" >&2
+			exit 2
+		}
+	fi
 	ssh "$target" "REMOTE_DIR=$(quote "$remote_dir"); if [ \"\${REMOTE_DIR#/}\" = \"\$REMOTE_DIR\" ]; then REMOTE_DIR=\$HOME/\$REMOTE_DIR; fi; mkdir -p \"\$REMOTE_DIR\"; printf '%s\n' \"\$REMOTE_DIR\""
 	resolved_remote_dir=$(ssh "$target" "REMOTE_DIR=$(quote "$remote_dir"); if [ \"\${REMOTE_DIR#/}\" = \"\$REMOTE_DIR\" ]; then REMOTE_DIR=\$HOME/\$REMOTE_DIR; fi; printf '%s\n' \"\$REMOTE_DIR\"")
 	rsync -a --delete \
@@ -617,6 +662,30 @@ sync_checkout() {
 		--exclude='benchmarks/remote-results' \
 		--exclude='libvmod-cachetag-*.tar.gz' \
 		"$repo_dir/" "$target:$resolved_remote_dir/libvmod-cachetag/"
+	rsync -a --delete \
+		--exclude='.libs' \
+		--exclude='.deps' \
+		--exclude='autom4te.cache' \
+		--exclude='build-aux' \
+		--exclude='m4' \
+		--exclude='Makefile' \
+		--exclude='Makefile.in' \
+		--exclude='config.log' \
+		--exclude='config.status' \
+		--exclude='configure' \
+		--exclude='benchmarks/results' \
+		--exclude='benchmarks/remote-results' \
+		--exclude='libvmod-cachetag-*.tar.gz' \
+	"$vmod_build_src/" "$target:$resolved_remote_dir/libvmod-cachetag-build-source/"
+	for source_spec in "legacy_direct_vmod_src:libvmod-cachetag-legacy-direct" "legacy_interned_vmod_src:libvmod-cachetag-legacy-interned"; do
+		local_name=${source_spec%%:*}
+		remote_name=${source_spec#*:}
+		eval "local_source=\${$local_name}"
+		if [ -n "$local_source" ]; then
+			test -f "$local_source/bootstrap" || { echo "$local_name is not a cachetag checkout" >&2; exit 2; }
+			rsync -a --delete "$local_source/" "$target:$resolved_remote_dir/$remote_name/"
+		fi
+	done
 	rsync -a --delete \
 		"$workspace_dir/vinyl-cache/" "$target:$resolved_remote_dir/vinyl-cache/"
 	if [ -d "$workspace_dir/varnish-modules" ]; then
@@ -789,6 +858,12 @@ case "\$matrix" in
 		check_disk_headroom 1
 		envs="BENCH_STORAGE_KIND=fellow BENCH_CACHE_TAG_PERSIST=1 BENCH_CACHE_TAG_WAL_FSYNC=strict BENCH_PROFILE=low-fanout-unique OBJECTS=1000 BENCH_BUCKETS=64 RUNS=1 RUN_XKEY=0 RUN_NOINDEX=0 PERF_MODE=auto BENCH_STORAGE=1g BENCH_FELLOW_SIZE=1g BENCH_HTTP_TIMEOUT=120 BENCH_RESIDENCY_VALIDATE_OBJECTS=1000 BENCH_WARM_SECONDS=5 VTC_TIMEOUT=900"
 		;;
+	fellow-volatile-fallback-runtime-smoke-r0|fellow-volatile-fallback-runtime-smoke-r1)
+		check_storage_headroom 1
+		check_disk_headroom 1
+		case "\$matrix" in *-r0) runtime_mode=0 ;; *-r1) runtime_mode=1 ;; esac
+		envs="BENCH_CODE_GENERATION=runtime BENCH_RUNTIME_SET_INTERNING=\$runtime_mode BENCH_FELLOW_VOLATILE_FALLBACK=1 BENCH_STORAGE_KIND=fellow BENCH_CACHE_TAG_PERSIST=1 BENCH_CACHE_TAG_WAL_FSYNC=strict BENCH_PROFILE=low-fanout-unique OBJECTS=1000 TAGS_PER_OBJECT=5 BENCH_BUCKETS=64 RUNS=1 RUN_XKEY=0 RUN_NOINDEX=0 PERF_MODE=auto BENCH_STORAGE=1g BENCH_FELLOW_SIZE=1g BENCH_HTTP_TIMEOUT=120 BENCH_RESIDENCY_VALIDATE_OBJECTS=1000 BENCH_WARM_SECONDS=1 VTC_TIMEOUT=900"
+		;;
 	fellow-local-cost-100k)
 		check_storage_headroom 4
 		check_disk_headroom 4
@@ -942,6 +1017,21 @@ case "\$matrix" in
 		check_storage_headroom 1
 		envs="BENCH_STORAGE_KIND=buddy BENCH_PROFILE=low-fanout-unique OBJECTS=1000 BENCH_BUCKETS=64 RUNS=1 RUN_XKEY=1 RUN_NOINDEX=1 PERF_MODE=auto BENCH_STORAGE=1g BENCH_BUDDY_SIZE=1g BENCH_HTTP_TIMEOUT=120 BENCH_RESIDENCY_VALIDATE_OBJECTS=1000 BENCH_WARM_SECONDS=5 VTC_TIMEOUT=900"
 		;;
+	buddy-runtime-interning-smoke-r0|buddy-runtime-interning-smoke-r1)
+		check_storage_headroom 1
+		case "\$matrix" in *-r0) runtime_mode=0 ;; *-r1) runtime_mode=1 ;; esac
+		envs="BENCH_CODE_GENERATION=runtime BENCH_RUNTIME_SET_INTERNING=\$runtime_mode BENCH_STORAGE_KIND=buddy BENCH_PROFILE=low-fanout-unique OBJECTS=1000 TAGS_PER_OBJECT=5 BENCH_BUCKETS=64 RUNS=1 RUN_XKEY=0 RUN_NOINDEX=0 PERF_MODE=auto BENCH_STORAGE=1g BENCH_BUDDY_SIZE=1g BENCH_HTTP_TIMEOUT=120 BENCH_RESIDENCY_VALIDATE_OBJECTS=1000 BENCH_WARM_SECONDS=1 VTC_TIMEOUT=900"
+		;;
+	runtime-interning-decision-d1|runtime-interning-decision-d2|runtime-interning-decision-i1|runtime-interning-decision-i2|runtime-interning-decision-r0-1|runtime-interning-decision-r0-2|runtime-interning-decision-r1-1|runtime-interning-decision-r1-2)
+		check_storage_headroom 16
+		case "\$matrix" in
+			runtime-interning-decision-d*) generation=legacy; legacy_mode=0; runtime_mode= ;;
+			runtime-interning-decision-i*) generation=legacy; legacy_mode=1; runtime_mode= ;;
+			runtime-interning-decision-r0-*) generation=runtime; legacy_mode=; runtime_mode=0 ;;
+			runtime-interning-decision-r1-*) generation=runtime; legacy_mode=; runtime_mode=1 ;;
+		esac
+		envs="BENCHMARK_CONTRACT=runtime-interning-decision-v1 BENCH_CODE_GENERATION=\$generation BENCH_LEGACY_SET_INTERNING=\$legacy_mode BENCH_RUNTIME_SET_INTERNING=\$runtime_mode BENCH_PROFILE=interning-shared-five,interning-unique-five OBJECTS=1000000 TAGS_PER_OBJECT=5 RUNS=3 RUN_XKEY=0 RUN_NOINDEX=0 PERF_MODE=off BENCH_PERF_STAT=required BENCH_PERF_STAT_RUNS=all BENCH_PERF_STAT_EVENTS=instructions,cycles,ref-cycles,task-clock BENCH_WARM_SECONDS=0 BENCH_WARM_PASSES=1 BENCH_SKIP_PURGE=1 BENCH_VALIDATE_RESIDENCY=1 BENCH_RESIDENCY_VALIDATE_OBJECTS=0 BENCH_STORAGE_KIND=default BENCH_STORAGE=16g BENCH_CACHE_TAG_SWEEP_INTERVAL=0s BENCH_CACHE_TAG_VSC_PUBLISH_INTERVAL=1h BENCH_HTTP_TIMEOUT=240 VTC_TIMEOUT=14400"
+		;;
 	buddy-local-cost-attach-100k)
 		check_storage_headroom 2
 		envs="BENCH_STORAGE_KIND=buddy BENCH_PROFILE=extreme-high-fanout,low-fanout-unique OBJECTS=100000 BENCH_BUCKETS=64 RUNS=3 RUN_XKEY=1 RUN_NOINDEX=1 PERF_MODE=required BENCH_VALIDATE_RESIDENCY=0 BENCH_WARM_SECONDS=0 BENCH_STORAGE=2g BENCH_BUDDY_SIZE=2g BENCH_HTTP_TIMEOUT=120 VTC_TIMEOUT=1800"
@@ -1094,8 +1184,17 @@ case "\$matrix" in
 esac
 envs="SKIP_BUILD=\$CACHE_TAG_SKIP_BUILD \$envs"
 envs="BENCH_VINYL_THREAD_POOL_MAX=\$bench_vinyl_thread_pool_max BENCH_VINYL_THREAD_POOLS=2 \$envs"
-if [ -n "\$CACHE_TAG_BENCH_SET_INTERNING" ]; then
-	envs="\$envs BENCH_SET_INTERNING=\$CACHE_TAG_BENCH_SET_INTERNING"
+if [ -n "\$CACHE_TAG_BENCH_CODE_GENERATION" ]; then
+	envs="\$envs BENCH_CODE_GENERATION=\$CACHE_TAG_BENCH_CODE_GENERATION"
+fi
+if [ -n "\$CACHE_TAG_BENCH_RUNTIME_SET_INTERNING" ]; then
+	envs="\$envs BENCH_RUNTIME_SET_INTERNING=\$CACHE_TAG_BENCH_RUNTIME_SET_INTERNING"
+fi
+if [ -n "\$CACHE_TAG_BENCH_LEGACY_SET_INTERNING" ]; then
+	envs="\$envs BENCH_LEGACY_SET_INTERNING=\$CACHE_TAG_BENCH_LEGACY_SET_INTERNING"
+fi
+if [ -n "\$CACHE_TAG_BENCH_WARM_PASSES" ]; then
+	envs="\$envs BENCH_WARM_PASSES=\$CACHE_TAG_BENCH_WARM_PASSES"
 fi
 if [ -n "\$CACHE_TAG_RUNS_OVERRIDE" ]; then
 	envs="\$envs RUNS=\$CACHE_TAG_RUNS_OVERRIDE"
@@ -1316,6 +1415,10 @@ printf '%s\n' "\$result_dir" > "\$remote_dir/fetch/last-result-dir"
 	printf 'physical_cores=%s\n' "\$physical_cores"
 	printf 'VTC_QUIET=%s\n' "\${CACHE_TAG_VTC_QUIET:-}"
 	printf 'bench_build_cflags=%s\n' "\${CACHE_TAG_BENCH_BUILD_CFLAGS:-}"
+	printf 'bench_code_generation=%s\n' "\${CACHE_TAG_BENCH_CODE_GENERATION:-}"
+	printf 'bench_runtime_set_interning_requested=%s\n' "\${CACHE_TAG_BENCH_RUNTIME_SET_INTERNING:-}"
+	printf 'bench_legacy_set_interning=%s\n' "\${CACHE_TAG_BENCH_LEGACY_SET_INTERNING:-}"
+	printf 'bench_warm_passes=%s\n' "\${CACHE_TAG_BENCH_WARM_PASSES:-}"
 	printf 'remote_dir=%s\n' "\$remote_dir"
 	printf 'docker_command=%s\n' "\$docker_cmd"
 	printf 'docker_run_args=%s\n' "\$REMOTE_DOCKER_RUN_ARGS"
@@ -1326,6 +1429,7 @@ printf '%s\n' "\$result_dir" > "\$remote_dir/fetch/last-result-dir"
 cd "\$remote_dir/libvmod-cachetag"
 export RESULTS_DIR="\$result_dir"
 export VINYL_DOCKER_IMAGE
+export VMOD_BUILD_SRC="\$remote_dir/libvmod-cachetag-build-source"
 export BENCH_CLIENTS="\$bench_clients"
 export DOCKER="\$docker_cmd"
 export DOCKER_RUN_ARGS="\$REMOTE_DOCKER_RUN_ARGS"
@@ -1385,7 +1489,35 @@ fi
 if [ -n "\$CACHE_TAG_BENCH_PERF_FREQ" ]; then
 	export BENCH_PERF_FREQ="\$CACHE_TAG_BENCH_PERF_FREQ"
 fi
-eval "BENCH_MATRIX=\$matrix BENCH_RESULT_ID=\$result_id \$envs scripts/benchmark-cachetag-vmod.sh ../vinyl-cache"
+case "\$matrix" in
+	runtime-interning-decision-d*) decision_vmod_src="\$remote_dir/libvmod-cachetag-legacy-direct" ;;
+	runtime-interning-decision-i*) decision_vmod_src="\$remote_dir/libvmod-cachetag-legacy-interned" ;;
+	runtime-interning-decision-r0-*|runtime-interning-decision-r1-*) decision_vmod_src="\$remote_dir/libvmod-cachetag-build-source" ;;
+	*) decision_vmod_src="\$remote_dir/libvmod-cachetag-build-source" ;;
+esac
+if [ "\$matrix" != "${matrix#runtime-interning-decision-}" ]; then
+	test -f "\$decision_vmod_src/bootstrap" || { echo "missing frozen VMOD source for \$matrix: \$decision_vmod_src" >&2; exit 2; }
+	for budget in "\$CACHE_TAG_DECISION_SHARED_LOAD_BUDGET_PERCENT" "\$CACHE_TAG_DECISION_SHARED_WARM_BUDGET_PERCENT" "\$CACHE_TAG_DECISION_UNIQUE_LOAD_BUDGET_PERCENT" "\$CACHE_TAG_DECISION_UNIQUE_WARM_BUDGET_PERCENT"; do
+		awk -v value="\$budget" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/) }' || { echo "decision campaign requires four pre-frozen non-negative dispersion budgets" >&2; exit 2; }
+	done
+fi
+eval "VMOD_BUILD_SRC=\$decision_vmod_src BENCH_MATRIX=\$matrix BENCH_RESULT_ID=\$result_id \$envs scripts/benchmark-cachetag-vmod.sh ../vinyl-cache"
+case "\$matrix" in
+	runtime-interning-decision-d1|runtime-interning-decision-i1)
+		python3 "\$remote_dir/libvmod-cachetag/benchmarks/verify_decision_row.py" "\$result_dir" \
+			--shared-load-budget-percent "\$CACHE_TAG_DECISION_SHARED_LOAD_BUDGET_PERCENT" \
+			--shared-warm-budget-percent "\$CACHE_TAG_DECISION_SHARED_WARM_BUDGET_PERCENT" \
+			--unique-load-budget-percent "\$CACHE_TAG_DECISION_UNIQUE_LOAD_BUDGET_PERCENT" \
+			--unique-warm-budget-percent "\$CACHE_TAG_DECISION_UNIQUE_WARM_BUDGET_PERCENT"
+		;;
+esac
+metadata="\$result_dir/metadata.env"
+if [ -r "\$metadata" ]; then
+	for key in bench_code_generation bench_runtime_set_interning_rendered bench_effective_set_interning rendered_workloads_sha256 decision_cohort_fingerprint; do
+		value=\$(sed -n "s/^\$key=//p" "\$metadata" | tail -n 1)
+		printf '%s=%s\n' "\$key" "\$value" >> "\$result_dir/remote-run.env"
+	done
+fi
 printf '%s\n' "\$result_dir"
 EOF
 }
@@ -1455,6 +1587,17 @@ matrix_group() {
 				phase6-fill-drain-default-1m \
 				phase6-fill-drain-buddy-1m
 			;;
+		runtime-interning-decision)
+			printf '%s\n' \
+				runtime-interning-decision-d1 \
+				runtime-interning-decision-r0-1 \
+				runtime-interning-decision-i1 \
+				runtime-interning-decision-r1-1 \
+				runtime-interning-decision-d2 \
+				runtime-interning-decision-r0-2 \
+				runtime-interning-decision-i2 \
+				runtime-interning-decision-r1-2
+			;;
 		full)
 			matrix_group regression
 			printf '%s\n' \
@@ -1472,7 +1615,7 @@ matrix_group() {
 
 is_matrix_group() {
 	case "$1" in
-		regression|full|local-cost-100k|local-cost-1m|buddy-local-cost-100k|backend-local-cost-100k|fellow-memory-paired-100k|fellow-memory-fanout-paired-100k|fellow-memory-paired-1m|fellow-memory-paired-5m) return 0 ;;
+		regression|full|local-cost-100k|local-cost-1m|buddy-local-cost-100k|backend-local-cost-100k|fellow-memory-paired-100k|fellow-memory-fanout-paired-100k|fellow-memory-paired-1m|fellow-memory-paired-5m|runtime-interning-decision) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -1489,6 +1632,12 @@ run_and_fetch() {
 	fi
 	for child_matrix in $(matrix_group "$base_matrix"); do
 		matrix=$child_matrix
+		if [ "$base_matrix" = runtime-interning-decision ]; then
+			case "$matrix" in
+				runtime-interning-decision-d1|runtime-interning-decision-i1|runtime-interning-decision-r0-1) skip_build=0 ;;
+				runtime-interning-decision-d2|runtime-interning-decision-i2|runtime-interning-decision-r1-1|runtime-interning-decision-r0-2|runtime-interning-decision-r1-2) skip_build=1 ;;
+			esac
+		fi
 		if is_matrix_group "$base_matrix"; then
 			local_dest=$base_dest/$child_matrix
 		else

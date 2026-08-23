@@ -236,14 +236,16 @@ emit_record() {
 	build_cflags=$(require_flag_env BUILD_PROVENANCE_CFLAGS)
 	build_cppflags=$(require_flag_env BUILD_PROVENANCE_CPPFLAGS)
 	build_ldflags=$(require_flag_env BUILD_PROVENANCE_LDFLAGS)
-	set_interning=$(require_env BUILD_PROVENANCE_SET_INTERNING)
+	harness_src=$(require_env BUILD_PROVENANCE_HARNESS_SRC)
+	code_generation=$(require_env BUILD_PROVENANCE_CODE_GENERATION)
+	legacy_set_interning=$(require_env BUILD_PROVENANCE_LEGACY_SET_INTERNING)
 	cachetag_configure_args=$(require_env BUILD_PROVENANCE_CACHETAG_CONFIGURE_ARGS)
-	case "$set_interning:$cachetag_configure_args" in
-	0:--disable-set-interning|1:--enable-set-interning) ;;
-	*) die "set interning selection and configure arguments disagree" ;;
+	case "$code_generation:$legacy_set_interning:$cachetag_configure_args" in
+	legacy:0:--disable-set-interning|legacy:1:--enable-set-interning|runtime:none:none) ;;
+	*) die "code generation and configure arguments disagree" ;;
 	esac
 
-	printf 'build_provenance_version=4\n'
+	printf 'build_provenance_version=5\n'
 	printf 'build_provenance_mode=%s\n' "$provenance_mode"
 	if [ "$provenance_mode" = strict ]; then
 		printf 'build_provenance_eligible=1\n'
@@ -255,11 +257,13 @@ emit_record() {
 	printf 'build_time_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	printf 'build_storage_kind=%s\n' "$storage_kind"
 	printf 'xkey_pinned_commit=%s\n' "$PINNED_XKEY_COMMIT"
+	source_fields harness "$harness_src"
 	source_fields cachetag "$cachetag_src"
 	source_fields vinyl "$vinyl_src"
 	source_fields slash "$slash_src"
 	source_fields xkey "$xkey_src"
-	printf 'cachetag_build_input_sha256=%s\n' "$(tree_hash "$cachetag_src" src configure.ac Makefile.am bootstrap patches benchmarks scripts docker)"
+	printf 'harness_input_sha256=%s\n' "$(tree_hash "$harness_src" benchmarks scripts/benchmark-cachetag-vmod.sh scripts/remote-benchmark.sh docker)"
+	printf 'cachetag_build_input_sha256=%s\n' "$(tree_hash "$cachetag_src" src configure.ac Makefile.am bootstrap patches)"
 	printf 'vinyl_build_input_sha256=%s\n' "$(tree_hash "$vinyl_src" bin lib include vmod configure.ac Makefile.am)"
 	if [ "$slash_src" = none ]; then
 		printf 'slash_build_input_sha256=none\n'
@@ -280,7 +284,8 @@ emit_record() {
 	printf 'build_cflags=%s\n' "$build_cflags"
 	printf 'build_cppflags=%s\n' "$build_cppflags"
 	printf 'build_ldflags=%s\n' "$build_ldflags"
-	printf 'bench_set_interning=%s\n' "$set_interning"
+	printf 'code_generation=%s\n' "$code_generation"
+	printf 'legacy_set_interning=%s\n' "$legacy_set_interning"
 	printf 'cachetag_configure_args=%s\n' "$cachetag_configure_args"
 	printf 'dockerfile_sha256=%s\n' "$(sha_file "$dockerfile")"
 	printf 'docker_image_ref=%s\n' "$image_ref"
@@ -297,8 +302,9 @@ verify_record() {
 	xkey_src=$4
 	storage_kind=$5
 	file=$6
+	harness_src=$(require_env BUILD_PROVENANCE_HARNESS_SRC)
 	test -f "$file" || die "no provenance file at $file"
-	test "$(read_field build_provenance_version "$file")" = 4 || die "unsupported provenance version"
+	test "$(read_field build_provenance_version "$file")" = 5 || die "unsupported provenance version"
 	test "$(read_field build_provenance_mode "$file")" = "$provenance_mode" || die "provenance mode changed"
 	if [ "$provenance_mode" = strict ]; then
 		test "$(read_field build_provenance_eligible "$file")" = 1 || die "cached build is not comparison-eligible"
@@ -306,7 +312,7 @@ verify_record() {
 	test "$(read_field build_storage_kind "$file")" = "$storage_kind" || die "storage kind changed"
 	test "$(read_field xkey_pinned_commit "$file")" = "$PINNED_XKEY_COMMIT" || die "xkey pin changed"
 
-	for source in cachetag vinyl slash xkey; do
+	for source in harness cachetag vinyl slash xkey; do
 		eval "source_dir=\${${source}_src}"
 		for field in dirty_state git_commit git_tree git_tree_manifest_sha256 git_diff_sha256; do
 			current=$(source_value "$source" "$source_dir" "$field")
@@ -321,7 +327,8 @@ verify_record() {
 		recorded=$(read_field "$key" "$file")
 		test "$current" = "$recorded" || die "$key changed"
 	}
-	check_hash cachetag_build_input_sha256 "$(tree_hash "$cachetag_src" src configure.ac Makefile.am bootstrap patches benchmarks scripts docker)"
+	check_hash harness_input_sha256 "$(tree_hash "$harness_src" benchmarks scripts/benchmark-cachetag-vmod.sh scripts/remote-benchmark.sh docker)"
+	check_hash cachetag_build_input_sha256 "$(tree_hash "$cachetag_src" src configure.ac Makefile.am bootstrap patches)"
 	check_hash vinyl_build_input_sha256 "$(tree_hash "$vinyl_src" bin lib include vmod configure.ac Makefile.am)"
 	if [ "$slash_src" = none ]; then slash_hash=none; else slash_hash=$(tree_hash "$slash_src" src include configure.ac Makefile.am bootstrap); fi
 	if [ "$xkey_src" = none ]; then xkey_hash=none; else xkey_hash=$(tree_hash "$xkey_src" src configure.ac Makefile.am bootstrap); fi
@@ -346,13 +353,15 @@ verify_record() {
 		record_key=$(printf '%s' "$key" | sed 's/^BUILD_PROVENANCE_/build_/; y/ABCDEFGHIJKLMNOPQRSTUVWXYZ/abcdefghijklmnopqrstuvwxyz/')
 		test "$value" = "$(read_field "$record_key" "$file")" || die "$record_key changed"
 	done
-	set_interning=$(require_env BUILD_PROVENANCE_SET_INTERNING)
+	code_generation=$(require_env BUILD_PROVENANCE_CODE_GENERATION)
+	legacy_set_interning=$(require_env BUILD_PROVENANCE_LEGACY_SET_INTERNING)
 	cachetag_configure_args=$(require_env BUILD_PROVENANCE_CACHETAG_CONFIGURE_ARGS)
-	case "$set_interning:$cachetag_configure_args" in
-	0:--disable-set-interning|1:--enable-set-interning) ;;
-	*) die "set interning selection and configure arguments disagree" ;;
+	case "$code_generation:$legacy_set_interning:$cachetag_configure_args" in
+	legacy:0:--disable-set-interning|legacy:1:--enable-set-interning|runtime:none:none) ;;
+	*) die "code generation and configure arguments disagree" ;;
 	esac
-	test "$set_interning" = "$(read_field bench_set_interning "$file")" || die "bench_set_interning changed"
+	test "$code_generation" = "$(read_field code_generation "$file")" || die "code_generation changed"
+	test "$legacy_set_interning" = "$(read_field legacy_set_interning "$file")" || die "legacy_set_interning changed"
 	test "$cachetag_configure_args" = "$(read_field cachetag_configure_args "$file")" || die "cachetag_configure_args changed"
 	check_hash dockerfile_sha256 "$(sha_file "$dockerfile")"
 	test "$(require_env BUILD_PROVENANCE_IMAGE_REF)" = "$(read_field docker_image_ref "$file")" || die "Docker image reference changed"
@@ -377,6 +386,9 @@ identity)
 	# rather than a best-effort Git label: it rejects dirty trees and validates
 	# the xkey pin/tag.
 	source_fields cachetag "$cachetag_src" >/dev/null
+	if [ -n "${BUILD_PROVENANCE_HARNESS_SRC:-}" ]; then
+		source_fields harness "$BUILD_PROVENANCE_HARNESS_SRC" >/dev/null
+	fi
 	source_fields vinyl "$vinyl_src" >/dev/null
 	source_fields slash "$slash_src" >/dev/null
 	source_fields xkey "$xkey_src" >/dev/null

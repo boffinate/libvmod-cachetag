@@ -47,6 +47,11 @@ enum cachetag_purgemap_probe_result {
 	TAG_PM_PROBE_SOFT
 };
 
+enum cachetag_membership_mode {
+	TAG_MEMBERSHIP_DIRECT,
+	TAG_MEMBERSHIP_INTERNED
+};
+
 enum cachetag_fellow_metric {
 	TAG_FELLOW_ATTR_OBJECTS_WRITTEN,
 	TAG_FELLOW_ATTR_BYTES_WRITTEN,
@@ -66,7 +71,7 @@ typedef int cachetag_pending_probe_f(void *, struct objcore *,
 
 void cachetag_limits_default(struct cachetag_limits *);
 struct cachetag_index *cachetag_index_new(const char *, const struct cachetag_limits *,
-    const struct cachetag_persist_config *);
+    enum cachetag_membership_mode, const struct cachetag_persist_config *);
 void cachetag_index_delete(struct cachetag_index **);
 int cachetag_index_start(struct cachetag_index *);
 void cachetag_index_stop(struct cachetag_index *);
@@ -99,6 +104,7 @@ uint64_t cachetag_purgemap_byte_count(struct cachetag_index *);
 void cachetag_snapshot_counters(struct cachetag_index *, struct cachetag_counters *);
 const struct cachetag_limits *cachetag_get_limits(const struct cachetag_index *);
 const char *cachetag_namespace_name(const struct cachetag_index *);
+int cachetag_index_interning(const struct cachetag_index *);
 void cachetag_namespace_digest(const struct cachetag_index *, uint64_t *,
     uint64_t *);
 uint64_t cachetag_fold_digest(uint64_t, uint64_t);
@@ -116,7 +122,7 @@ int cachetag_test_release_purge_publish(struct cachetag_index *);
 #endif
 int cachetag_test_force_next_attach_slot_overflow(struct cachetag_index *);
 int cachetag_test_fail_next_object_segment_alloc(struct cachetag_index *);
-#if CACHE_TAG_SET_INTERNING
+int cachetag_test_fail_next_direct_alloc(struct cachetag_index *);
 int cachetag_test_fail_next_intern_alloc(struct cachetag_index *);
 int cachetag_test_intern_initial_buckets(struct cachetag_index *, uint32_t);
 int cachetag_test_fail_next_intern_table_alloc(struct cachetag_index *);
@@ -125,7 +131,6 @@ int cachetag_test_intern_worker_hold(struct cachetag_index *, int);
 int cachetag_test_intern_migrate_buckets(struct cachetag_index *, uint32_t);
 int cachetag_test_intern_active_buckets(struct cachetag_index *);
 int cachetag_test_intern_old_buckets(struct cachetag_index *);
-#endif
 int cachetag_test_structural_limits(struct cachetag_index *);
 int cachetag_test_side_fingerprint_bits(struct cachetag_index *, uint32_t);
 int cachetag_test_side_start_migration(struct cachetag_index *, uint32_t);

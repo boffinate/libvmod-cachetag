@@ -1,0 +1,107 @@
+vtest "VCL cold drains an expiry callback held inside cachetag"
+
+server s1 {
+	rxreq
+	expect req.url == "/expires"
+	txresp -body "expires"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("callback_old", sweep_interval = 0s,
+		    vsc_publish_interval = 0s, interning = false);
+	}
+
+	sub vcl_recv {
+		if (req.method == "ARM") {
+			set req.http.result = tags.test_hold_next_object_event(expire);
+			return (synth(200));
+		}
+		if (req.method == "WAIT") {
+			set req.http.result = tags.test_wait_object_event_held(5000);
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add_header("alpha,beta");
+		set beresp.ttl = 1s;
+		set beresp.grace = 0s;
+		set beresp.keep = 0s;
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+vinyl v1 -cliok {vcl.inline vcl2 << EOF
+	vcl 4.1;
+
+	backend default {
+		.host = "${s1_addr}";
+		.port = "${s1_port}";
+	}
+
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new replacement = cachetag.namespace("callback_new",
+		    sweep_interval = 0s, vsc_publish_interval = 0s,
+		    interning = true);
+	}
+
+	sub vcl_recv {
+		if (req.url == "/release") {
+			vtc.sleep(0.2s);
+			set req.http.result = replacement.test_release_object_event();
+			return (synth(200));
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+	EOF
+}
+
+client c_seed {
+	txreq -url "/expires"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "expires"
+} -run
+
+client c_arm {
+	txreq -req ARM
+	rxresp
+	expect resp.http.result == true
+} -run
+
+client c_wait {
+	txreq -req WAIT
+	rxresp
+	expect resp.http.result == true
+} -run
+
+vinyl v1 -cliok "vcl.use vcl2"
+
+client c_release {
+	txreq -url "/release"
+	rxresp
+	expect resp.http.result == true
+} -start
+
+# ObjUnsubscribeEvents takes the object-event write lock. The paused expiry
+# owns the matching read lock until vcl2 releases it, so this cannot complete
+# unless cold waits for the callback before destroying the old namespace.
+vinyl v1 -cliok "vcl.discard vcl1"
+client c_release -wait
+vinyl v1 -cliok "vcl.list"
+
+server s1 -wait

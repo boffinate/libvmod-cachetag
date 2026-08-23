@@ -302,6 +302,18 @@ static struct vmod_cachetag_namespace *cachetag_namespaces;
 static struct cachetag_fellow_registration *cachetag_fellow_regs;
 static pid_t cachetag_fellow_regs_pid;
 static pid_t cachetag_fellow_absent_pid;
+#if CACHE_TAG_TEST_HOOKS
+#define TAG_TEST_OBJ_EVENT_IDLE 0U
+#define TAG_TEST_OBJ_EVENT_ARMED 1U
+#define TAG_TEST_OBJ_EVENT_HELD 2U
+#define TAG_TEST_OBJ_EVENT_CONFIGURING 3U
+#define TAG_TEST_OBJ_EVENT_RELEASED 4U
+/* Cooling removes access to an old namespace, so the replacement namespace
+ * must be able to release this diagnostic-only process-wide handoff. */
+static struct vmod_cachetag_namespace *cachetag_test_obj_event_owner;
+static unsigned cachetag_test_obj_event_mask;
+static unsigned cachetag_test_obj_event_state;
+#endif
 
 static int cachetag_fellow_attr_size_cb(void *, const struct objcore *,
     size_t *);
@@ -1823,6 +1835,67 @@ vmod_namespace_test_abort_next_sweep(VRT_CTX,
 	return (cachetag_test_abort_next_sweep(ns->index));
 }
 
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_hold_next_object_event)
+vmod_namespace_test_hold_next_object_event(VRT_CTX,
+    struct vmod_cachetag_namespace *ns, VCL_ENUM event)
+{
+	unsigned expected, mask;
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	mask = event == VENUM(expire) ? OEV_EXPIRE : OEV_INSERT;
+	expected = TAG_TEST_OBJ_EVENT_IDLE;
+	if (!__atomic_compare_exchange_n(&cachetag_test_obj_event_state,
+	    &expected, TAG_TEST_OBJ_EVENT_CONFIGURING, 0, __ATOMIC_ACQ_REL,
+	    __ATOMIC_ACQUIRE))
+		return (0);
+	__atomic_store_n(&cachetag_test_obj_event_owner, ns,
+	    __ATOMIC_RELEASE);
+	__atomic_store_n(&cachetag_test_obj_event_mask, mask, __ATOMIC_RELEASE);
+	__atomic_store_n(&cachetag_test_obj_event_state,
+	    TAG_TEST_OBJ_EVENT_ARMED, __ATOMIC_RELEASE);
+	return (1);
+}
+
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_wait_object_event_held)
+vmod_namespace_test_wait_object_event_held(VRT_CTX,
+    struct vmod_cachetag_namespace *ns, VCL_INT timeout_ms)
+{
+	double deadline;
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (timeout_ms <= 0 || timeout_ms > 60000)
+		return (0);
+	deadline = VTIM_mono() + (double)timeout_ms / 1000.;
+	while (__atomic_load_n(&cachetag_test_obj_event_owner,
+	    __ATOMIC_ACQUIRE) == ns &&
+	    __atomic_load_n(&cachetag_test_obj_event_state,
+	    __ATOMIC_ACQUIRE) == TAG_TEST_OBJ_EVENT_ARMED) {
+		if (VTIM_mono() >= deadline)
+			return (0);
+		VTIM_sleep(0.001);
+	}
+	return (__atomic_load_n(&cachetag_test_obj_event_owner,
+	    __ATOMIC_ACQUIRE) == ns &&
+	    __atomic_load_n(&cachetag_test_obj_event_state,
+	    __ATOMIC_ACQUIRE) == TAG_TEST_OBJ_EVENT_HELD);
+}
+
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_release_object_event)
+vmod_namespace_test_release_object_event(VRT_CTX,
+    struct vmod_cachetag_namespace *ns)
+{
+	unsigned expected;
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	expected = TAG_TEST_OBJ_EVENT_HELD;
+	return (__atomic_compare_exchange_n(&cachetag_test_obj_event_state,
+	    &expected, TAG_TEST_OBJ_EVENT_RELEASED, 0, __ATOMIC_ACQ_REL,
+	    __ATOMIC_ACQUIRE));
+}
+
 VCL_BOOL v_matchproto_(td_cachetag_namespace_test_hold_next_purge_publish)
 vmod_namespace_test_hold_next_purge_publish(VRT_CTX,
     struct vmod_cachetag_namespace *ns)
@@ -1876,7 +1949,17 @@ vmod_namespace_test_fail_next_object_segment_alloc(VRT_CTX,
 	return (cachetag_test_fail_next_object_segment_alloc(ns->index));
 }
 
-#if CACHE_TAG_SET_INTERNING
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_fail_next_direct_alloc)
+vmod_namespace_test_fail_next_direct_alloc(VRT_CTX,
+    struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (cachetag_index_interning(ns->index))
+		return (0);
+	return (cachetag_test_fail_next_direct_alloc(ns->index));
+}
 
 VCL_BOOL v_matchproto_(td_cachetag_namespace_test_fail_next_intern_alloc)
 vmod_namespace_test_fail_next_intern_alloc(VRT_CTX,
@@ -1885,6 +1968,8 @@ vmod_namespace_test_fail_next_intern_alloc(VRT_CTX,
 
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (!cachetag_index_interning(ns->index))
+		return (0);
 	return (cachetag_test_fail_next_intern_alloc(ns->index));
 }
 
@@ -1895,6 +1980,8 @@ vmod_namespace_test_intern_initial_buckets(VRT_CTX,
 
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (!cachetag_index_interning(ns->index))
+		return (0);
 	if (buckets <= 0 || (uint64_t)buckets > UINT32_MAX)
 		return (0);
 	return (cachetag_test_intern_initial_buckets(ns->index,
@@ -1908,6 +1995,8 @@ vmod_namespace_test_fail_next_intern_table_alloc(VRT_CTX,
 
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (!cachetag_index_interning(ns->index))
+		return (0);
 	return (cachetag_test_fail_next_intern_table_alloc(ns->index));
 }
 
@@ -1918,6 +2007,8 @@ vmod_namespace_test_intern_migration_active(VRT_CTX,
 
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (!cachetag_index_interning(ns->index))
+		return (0);
 	return (cachetag_test_intern_migration_active(ns->index));
 }
 
@@ -1928,6 +2019,8 @@ vmod_namespace_test_intern_worker_hold(VRT_CTX,
 
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (!cachetag_index_interning(ns->index))
+		return (0);
 	return (cachetag_test_intern_worker_hold(ns->index, hold));
 }
 
@@ -1938,6 +2031,8 @@ vmod_namespace_test_intern_migrate_buckets(VRT_CTX,
 
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (!cachetag_index_interning(ns->index))
+		return (0);
 	if (buckets <= 0 || (uint64_t)buckets > UINT32_MAX)
 		return (0);
 	return (cachetag_test_intern_migrate_buckets(ns->index,
@@ -1951,6 +2046,8 @@ vmod_namespace_test_intern_active_buckets(VRT_CTX,
 
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (!cachetag_index_interning(ns->index))
+		return (0);
 	return (cachetag_test_intern_active_buckets(ns->index));
 }
 
@@ -1961,10 +2058,10 @@ vmod_namespace_test_intern_old_buckets(VRT_CTX,
 
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (!cachetag_index_interning(ns->index))
+		return (0);
 	return (cachetag_test_intern_old_buckets(ns->index));
 }
-
-#endif /* CACHE_TAG_SET_INTERNING */
 
 VCL_BOOL v_matchproto_(td_cachetag_namespace_test_structural_limits)
 vmod_namespace_test_structural_limits(VRT_CTX,
@@ -2153,6 +2250,48 @@ vmod_namespace_test_next_fellow_attr_read_failure(VRT_CTX,
 
 #endif /* CACHE_TAG_TEST_HOOKS */
 
+#if CACHE_TAG_TEST_HOOKS
+static void
+cachetag_test_pause_object_event(struct vmod_cachetag_namespace *ns,
+    unsigned event)
+{
+	double deadline;
+	unsigned expected;
+
+	if (__atomic_load_n(&cachetag_test_obj_event_owner,
+	    __ATOMIC_ACQUIRE) != ns ||
+	    __atomic_load_n(&cachetag_test_obj_event_mask,
+	    __ATOMIC_ACQUIRE) != event)
+		return;
+	expected = TAG_TEST_OBJ_EVENT_ARMED;
+	if (!__atomic_compare_exchange_n(&cachetag_test_obj_event_state,
+	    &expected, TAG_TEST_OBJ_EVENT_HELD, 0, __ATOMIC_ACQ_REL,
+	    __ATOMIC_ACQUIRE))
+		return;
+	deadline = VTIM_mono() + 10.;
+	while (__atomic_load_n(&cachetag_test_obj_event_state,
+	    __ATOMIC_ACQUIRE) == TAG_TEST_OBJ_EVENT_HELD &&
+	    VTIM_mono() < deadline)
+		VTIM_sleep(0.001);
+	__atomic_store_n(&cachetag_test_obj_event_owner, NULL, __ATOMIC_RELEASE);
+	__atomic_store_n(&cachetag_test_obj_event_state,
+	    TAG_TEST_OBJ_EVENT_IDLE, __ATOMIC_RELEASE);
+}
+
+static void
+cachetag_test_cancel_object_event(struct vmod_cachetag_namespace *ns)
+{
+
+	if (__atomic_load_n(&cachetag_test_obj_event_owner,
+	    __ATOMIC_ACQUIRE) == ns) {
+		__atomic_store_n(&cachetag_test_obj_event_owner, NULL,
+		    __ATOMIC_RELEASE);
+		__atomic_store_n(&cachetag_test_obj_event_state,
+		    TAG_TEST_OBJ_EVENT_IDLE, __ATOMIC_RELEASE);
+	}
+}
+#endif
+
 static void
 cachetag_apply_attach_purge(struct worker *wrk, struct objcore *oc,
     enum cachetag_purge_mode mode)
@@ -2183,6 +2322,9 @@ cachetag_obj_cb(struct worker *wrk, void *priv, struct objcore *oc, unsigned eve
 	CHECK_OBJ_NOTNULL(wrk, WORKER_MAGIC);
 	CHECK_OBJ_NOTNULL(oc, OBJCORE_MAGIC);
 	CAST_OBJ_NOTNULL(ns, priv, TAG_NAMESPACE_MAGIC);
+#if CACHE_TAG_TEST_HOOKS
+	cachetag_test_pause_object_event(ns, event);
+#endif
 	if (event == OEV_EXPIRE) {
 		/* Vinyl emits OEV_EXPIRE synchronously for every real cache
 		 * departure while oc is still valid, including explicit removal
@@ -2391,6 +2533,10 @@ cachetag_namespace_cold(struct vmod_cachetag_namespace *ns)
 	cachetag_index_stop(ns->index);
 	if (h != 0)
 		ObjUnsubscribeEvents(&h);
+#if CACHE_TAG_TEST_HOOKS
+	/* A namespace can be destroyed with an armed event that never fired. */
+	cachetag_test_cancel_object_event(ns);
+#endif
 	cachetag_index_detach_all(ns->index);
 	cachetag_fellow_provider_release_if_idle();
 	cachetag_vsc_publish(ns);
@@ -2403,12 +2549,14 @@ vmod_namespace__init(VRT_CTX, struct vmod_cachetag_namespace **nsp,
     VCL_STRING persist_path, VCL_ENUM wal_fsync, VCL_INT wal_segment_bytes,
     VCL_DURATION sweep_interval, VCL_INT purge_history_max_entries,
     VCL_INT sweep_batch_objects, VCL_DURATION sweep_batch_hold,
-    VCL_DURATION sweep_batch_yield, VCL_DURATION vsc_publish_interval)
+    VCL_DURATION sweep_batch_yield, VCL_DURATION vsc_publish_interval,
+    VCL_BOOL interning)
 {
 	struct vmod_cachetag_namespace *ns;
 	char *vsc_name;
 	struct cachetag_limits limits;
 	struct cachetag_persist_config persist;
+	enum cachetag_membership_mode membership_mode;
 	int r;
 
 	CHECK_OBJ_NOTNULL(ctx, VRT_CTX_MAGIC);
@@ -2445,6 +2593,8 @@ vmod_namespace__init(VRT_CTX, struct vmod_cachetag_namespace **nsp,
 	persist.wal_fsync = cachetag_parse_wal_fsync(wal_fsync);
 	if (wal_segment_bytes > 0)
 		persist.wal_segment_bytes = (uint64_t)wal_segment_bytes;
+	membership_mode = interning ? TAG_MEMBERSHIP_INTERNED :
+	    TAG_MEMBERSHIP_DIRECT;
 
 	ALLOC_OBJ(ns, TAG_NAMESPACE_MAGIC);
 	AN(ns);
@@ -2468,7 +2618,8 @@ vmod_namespace__init(VRT_CTX, struct vmod_cachetag_namespace **nsp,
 	    strcmp(getenv("CACHE_TAG_TEST_VSC_PUBLISH_SYNC"), "0") != 0)
 		ns->vsc_publish_sync = 1;
 #endif
-	ns->index = cachetag_index_new(name, &limits, &persist);
+	ns->index = cachetag_index_new(name, &limits, membership_mode,
+	    &persist);
 	AN(ns->index);
 	cachetag_namespace_digest(ns->index, &ns->namespace_digest_hi,
 	    &ns->namespace_digest_lo);

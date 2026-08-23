@@ -1,0 +1,185 @@
+vtest "opposite membership modes survive reload while old VCL requests drain"
+
+barrier b_direct_enter sock 2
+barrier b_direct_release sock 2
+barrier b_intern_enter sock 2
+barrier b_intern_release sock 2
+
+server s1 {
+	rxreq
+	expect req.url == "/flip"
+	txresp -body "direct-old"
+
+	rxreq
+	expect req.url == "/park"
+	txresp -body "park-direct"
+
+	rxreq
+	expect req.url == "/flip"
+	txresp -body "interned-new"
+
+	rxreq
+	expect req.url == "/park-interned"
+	txresp -body "park-interned"
+
+	rxreq
+	expect req.url == "/flip"
+	txresp -body "direct-new"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("reload", sweep_interval = 0s,
+		    vsc_publish_interval = 0s, interning = false);
+	}
+
+	sub vcl_backend_response {
+		tags.add_header("alpha,beta");
+		if (bereq.url == "/flip") {
+			set beresp.ttl = 2s;
+			set beresp.grace = 0s;
+			set beresp.keep = 0s;
+		} else {
+			set beresp.ttl = 1h;
+		}
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_deliver {
+		if (req.url == "/park") {
+			vtc.barrier_sync("${b_direct_enter_sock}");
+			vtc.barrier_sync("${b_direct_release_sock}");
+		}
+	}
+} -start
+
+client c_direct_flip {
+	txreq -url "/flip"
+	rxresp
+	expect resp.body == "direct-old"
+} -run
+
+client c_direct_park {
+	txreq -url "/park"
+	rxresp
+	expect resp.body == "park-direct"
+} -start
+
+barrier b_direct_enter sync
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("reload", sweep_interval = 0s,
+		    vsc_publish_interval = 0s, interning = true);
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/park-interned") {
+			tags.add_header("park-a,park-b");
+			set beresp.ttl = 1h;
+		} else {
+			tags.add_header("alpha,beta");
+			set beresp.ttl = 2s;
+			set beresp.grace = 0s;
+			set beresp.keep = 0s;
+		}
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_deliver {
+		if (req.url == "/park-interned") {
+			vtc.barrier_sync("${b_intern_enter_sock}");
+			vtc.barrier_sync("${b_intern_release_sock}");
+		}
+	}
+}
+
+vinyl v1 -cliok "vcl.use vcl2"
+# Let the short-lived vcl1 object expire while the parked vcl1 delivery keeps
+# that VCL live. This exercises the old namespace's normal lifetime without
+# claiming that a request-side barrier can hold an expiry callback itself.
+delay 2.1
+
+client c_intern_flip {
+	txreq -url "/flip"
+	rxresp
+	expect resp.body == "interned-new"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_reload.volatile_objects == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_reload.volatile_edges == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_reload.volatile_interned_sets == 0
+vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_sets == 1
+vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_set_refs == 1
+
+barrier b_direct_release sync
+client c_direct_park -wait
+vinyl v1 -cliok "vcl.discard vcl1"
+
+client c_intern_park {
+	txreq -url "/park-interned"
+	rxresp
+	expect resp.body == "park-interned"
+} -start
+
+barrier b_intern_enter sync
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("reload", sweep_interval = 0s,
+		    vsc_publish_interval = 0s, interning = false);
+	}
+
+	sub vcl_backend_response {
+		tags.add_header("alpha,beta");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+}
+
+vinyl v1 -cliok "vcl.use vcl3"
+delay 2.1
+
+client c_direct_again {
+	txreq -url "/flip"
+	rxresp
+	expect resp.body == "direct-new"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_objects == 1
+vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_edges == 2
+vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_sets == 1
+vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_set_refs == 1
+vinyl v1 -expect CACHETAG.vcl3_tags_reload.volatile_objects == 1
+vinyl v1 -expect CACHETAG.vcl3_tags_reload.volatile_edges == 2
+vinyl v1 -expect CACHETAG.vcl3_tags_reload.volatile_interned_sets == 0
+
+barrier b_intern_release sync
+client c_intern_park -wait
+vinyl v1 -cliok "vcl.discard vcl2"
+vinyl v1 -cliok "vcl.list"
+
+server s1 -wait

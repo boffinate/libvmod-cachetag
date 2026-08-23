@@ -16,16 +16,13 @@
 #define TAG_INDEX_MAGIC 0x74616769
 #define TAG_OBJECT_SEGMENTS 32
 #define TAG_RESIZE_BATCH_YIELD_SEC 0.0001
-#if CACHE_TAG_SET_INTERNING
 #define TAG_INTERN_LOOKUP_FIRST_MAX_FOLDS 8U
-#endif
 
 struct cachetag_objent;
 struct cachetag_side_bucket;
 struct cachetag_purgemap;
-#if CACHE_TAG_SET_INTERNING
 struct cachetag_interned_set;
-#endif
+struct cachetag_direct_vector;
 
 /*
  * Epoch reader gate: a phase bit plus a per-phase reader count.  Readers pin
@@ -97,6 +94,8 @@ struct cachetag_index {
 	unsigned magic;
 	char *namespace;
 	size_t namespace_len;
+	/* Stored memberships have no discriminator, so this must never change. */
+	enum cachetag_membership_mode membership_mode;
 	struct cachetag_limits limits;
 	struct cachetag_wal *wal;
 	struct cachetag_purgemap *purgemap_data;
@@ -111,7 +110,6 @@ struct cachetag_index {
 	 * handles, so a stale slot generation cannot outlive the mutex-protected
 	 * lookup which resolves an objcore to its current dense slot.
 	 */
-#if CACHE_TAG_SET_INTERNING
 	/*
 	 * Hash-consed multi-fold membership sets. The registry is guarded by
 	 * obj_mtx like the dense object table and side map. Hits and misses survive
@@ -136,7 +134,6 @@ struct cachetag_index {
 	struct cachetag_timing_counters intern_table_grow_timing;
 	struct cachetag_timing_counters intern_candidate_alloc_timing;
 	struct cachetag_timing_counters intern_table_alloc_timing;
-#endif
 
 	struct cachetag_side_table side_primary;
 	struct cachetag_side_table side_retiring;
@@ -159,9 +156,8 @@ struct cachetag_index {
 	 * Family accumulators.  The published struct is flat, so these live
 	 * here and cachetag_snapshot_counters() fans them out under
 	 * counter_mtx.  Written under counter_mtx like idx->counters, and
-	 * zero from ALLOC_OBJ, which is what a build that never writes them
-	 * relies on.  Deliberately outside the CACHE_TAG_SET_INTERNING block
-	 * above: the lockwait and resize families exist in every build.
+	 * zero from ALLOC_OBJ, which is what an index that never writes them
+	 * relies on.
 	 */
 	struct cachetag_lockwait_counters lockwait_request_probe;
 	struct cachetag_lockwait_counters lockwait_request_attach;
@@ -198,13 +194,12 @@ struct cachetag_index {
 #endif
 	unsigned test_force_next_attach_slot_overflow;
 	unsigned test_fail_next_object_segment_alloc;
+	unsigned test_fail_next_direct_alloc;
 	unsigned test_fail_next_side_migration_alloc;
-#if CACHE_TAG_SET_INTERNING
 	unsigned test_fail_next_intern_alloc;
 	unsigned test_fail_next_intern_table_alloc;
 	unsigned test_intern_worker_hold;
 	size_t test_intern_initial_buckets;
-#endif
 	unsigned test_side_fingerprint_bits;
 	unsigned benchmark_obj_mtx_timing;
 };
@@ -239,21 +234,23 @@ void cachetag_purgemap_data_set(struct cachetag_index *,
 void cachetag_counter_add(struct cachetag_index *, uint64_t *, uint64_t);
 void cachetag_note_stale_call(struct cachetag_index *);
 void cachetag_note_stale_detected(struct cachetag_index *);
-/*
- * Without set interning, a successful multi-fold attach takes ownership of
- * storage; the caller retains it on failure and for one fold. With set
- * interning, candidate is an optional unpublished complete set consumed on
- * every return path; folds is borrowed and may be stack-backed.
- */
+struct cachetag_prepared_membership {
+	enum cachetag_membership_mode mode;
+	unsigned nfolds;
+	uint64_t *folds;
+	union {
+		struct cachetag_direct_vector *direct;
+		struct cachetag_interned_set *candidate;
+	} owner;
+};
+
 int cachetag_record_attach_purgemap_take(struct cachetag_index *,
-    struct objcore *, void *, uint64_t *, unsigned, uint64_t,
+    struct objcore *, struct cachetag_prepared_membership *, uint64_t,
     enum cachetag_purge_mode *);
-void *cachetag_fold_storage_alloc(unsigned);
-uint64_t *cachetag_fold_storage_values(void *, unsigned);
-void cachetag_fold_storage_free(void *, unsigned);
-#if CACHE_TAG_SET_INTERNING
-void *cachetag_intern_candidate_alloc(struct cachetag_index *, unsigned);
-#endif
+int cachetag_prepared_membership_init(struct cachetag_index *,
+    struct cachetag_prepared_membership *, unsigned, uint64_t *);
+void cachetag_prepared_membership_cleanup(struct cachetag_index *,
+    struct cachetag_prepared_membership *);
 void cachetag_record_invalidate(struct cachetag_index *, struct objcore *);
 void cachetag_record_shrink(struct cachetag_index *);
 enum cachetag_purgemap_probe_result cachetag_record_probe_purgemap(

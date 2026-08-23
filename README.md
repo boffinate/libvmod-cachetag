@@ -64,6 +64,8 @@ sub vcl_deliver {
 
 The `stale()` check runs twice on purpose: `vcl_hit` rejects cache hits that a purge has invalidated, and `vcl_deliver` closes the race where a purge happens while the fetch or delivery is in progress.
 
+Namespaces store direct per-object membership vectors by default. Set `interning = true` on `cachetag.namespace()` when your workload has enough identical complete tag sets to justify canonicalising them; see the usage guide for the memory and CPU trade-off. This choice affects volatile memberships only and is fixed for the namespace's lifetime.
+
 [The usage guide](docs/usage.md) covers separators, registration limits, soft purges, return codes, and Fellow persistence.
 
 ## Why did I build this?

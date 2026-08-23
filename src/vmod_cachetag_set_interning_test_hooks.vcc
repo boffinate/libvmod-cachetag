@@ -1,7 +1,11 @@
-SET INTERNING TEST HOOKS
-========================
+MEMBERSHIP REPRESENTATION TEST HOOKS
+====================================
 
-The following fault injector exists only when the VMOD was configured with both ``--enable-set-interning`` and ``--enable-test-hooks``. It verifies the fail-closed allocation path of the experimental implementation and must not be exposed in a production build.
+The following methods exist only when the VMOD was configured with ``--enable-test-hooks``. A method for the namespace's other membership representation returns false or zero immediately and never arms latent state. They verify fail-closed allocation and migration paths and must not be exposed in a production build.
+
+$Method BOOL .test_fail_next_direct_alloc()
+
+One-shot: fail the next direct multi-fold vector allocation; the affected attach fails closed.
 
 $Method BOOL .test_fail_next_intern_alloc()
 

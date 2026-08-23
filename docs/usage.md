@@ -80,6 +80,18 @@ sub vcl_deliver {
 
 Registration limits fail closed. A namespace accepts at most `max_keys_per_object` unique tags per object (default 512, sized from production traces showing real 333-tag objects) and at most `max_tag_header_bytes` per header value (default 16 KiB). Exceeding either limit during a fetch **fails that fetch** (the client sees a 503 and the namespace's `limit_rejections` counter increments); tags are never silently dropped, because caching an object with a truncated tag set would let a later purge miss it. There is no separate per-header token ceiling — raise `max_keys_per_object` explicitly if your workload carries more tags per object.
 
+By default, each volatile object with multiple tags stores its own compact membership vector. A namespace can instead canonicalise complete membership sets:
+
+```vcl
+sub vcl_init {
+    new tags = cachetag.namespace("default", interning = true);
+}
+```
+
+`interning` is fixed when the namespace is created; changing it requires a VCL reload and affects only the new namespace instance. It can reduce retained membership memory when many objects have exactly the same complete tag set, but unique sets add registry overhead and lookup work. Measure your workload rather than assuming it is a saving. Zero tags create no volatile membership, and one tag stays inline in either mode.
+
+The option affects Default and Buddy memberships, plus transient volatile fallbacks in a persistent namespace. Fellow-direct objects continue to store and probe membership in their FDO attributes, so their representation is unchanged. Both modes are compiled into every VMOD build; this is a VCL choice, not a configure option or a separate binary.
+
 To purge one or more tags, send the purge endpoint a matching request header:
 
 ```http

@@ -45,11 +45,7 @@ vmod_cachetag_vcc_fragments += $(srcdir)/vmod_cachetag_demo_diagnostics.vcc
 endif
 if CACHE_TAG_TEST_HOOKS
 vmod_cachetag_vcc_fragments += $(srcdir)/vmod_cachetag_test_hooks.vcc
-endif
-if CACHE_TAG_SET_INTERNING
-if CACHE_TAG_TEST_HOOKS
 vmod_cachetag_vcc_fragments += $(srcdir)/vmod_cachetag_set_interning_test_hooks.vcc
-endif
 endif
 
 vmod_cachetag.vcc: $(vmod_cachetag_vcc_fragments) Makefile
@@ -70,6 +66,8 @@ vtc/.dirstamp:
 
 CLEANFILES = \
 	vtc/.dirstamp \
+	vtc/.interned-generated \
+	$(VTC_TESTS_GENERATED_INTERNED) \
 	vmod_cachetag.vcc \
 	vmod_vcs_version.txt
 
@@ -119,9 +117,8 @@ AM_VTC_LOG_FLAGS = \
 	-p vcl_path="$(abs_top_srcdir)/vcl:$(VINYLAPI_VCLDIR)" \
 	-p vmod_path="$(abs_builddir)/.libs:$(vmoddir):$(VINYLAPI_VMODDIR)"
 
-# VTCs split by required build surface and implementation: core VTCs run in
-# every build; the overflow-accounting VTC follows the selected membership
-# representation; VCL-surface tests require their matching configure flags.
+# Both runtime modes need identical core scenarios. Generate interned copies
+# from the checked-in default/direct core so their coverage cannot drift apart.
 
 VTC_TESTS_CORE = \
 	vtc/cachetag_c00000.vtc \
@@ -165,11 +162,50 @@ VTC_TESTS_CORE = \
 	vtc/cachetag_pm00017.vtc \
 	vtc/cachetag_pm00018.vtc
 
-VTC_TESTS_NO_SET_INTERNING = \
+# Keep the interning coverage a mechanical transform of the direct/default
+# cases. A new core case therefore cannot silently gain only one mode.
+VTC_TESTS_INTERNED_CORE = $(VTC_TESTS_CORE:.vtc=_interned.vtc)
+
+# These test-hook cases exercise table and allocation mechanics that are shared
+# by both representations. Their generated interned copies intentionally omit
+# representation-specific allocation hooks, which have dedicated VTCs below.
+VTC_TESTS_SHARED_ALLOCATION_TEST_HOOKS = \
+	vtc/cachetag_pm00007.vtc \
+	vtc/cachetag_pm00016.vtc \
+	vtc/cachetag_pm00019.vtc \
+	vtc/cachetag_pm00022.vtc \
+	vtc/cachetag_pm00023.vtc \
+	vtc/cachetag_pm00025.vtc \
+	vtc/cachetag_pm00028.vtc
+
+VTC_TESTS_INTERNED_SHARED_ALLOCATION_TEST_HOOKS = \
+	$(VTC_TESTS_SHARED_ALLOCATION_TEST_HOOKS:.vtc=_interned.vtc)
+VTC_TESTS_GENERATED_INTERNED = \
+	$(VTC_TESTS_INTERNED_CORE) \
+	$(VTC_TESTS_INTERNED_SHARED_ALLOCATION_TEST_HOOKS)
+
+VTC_TESTS_DIRECT_ACCOUNTING = \
 	vtc/cachetag_pm00027.vtc
 
-VTC_TESTS_SET_INTERNING = \
+VTC_TESTS_INTERNED_ACCOUNTING = \
 	vtc/cachetag_pm00027_interned.vtc
+
+vtc/.interned-generated: $(VTC_TESTS_CORE) \
+	$(VTC_TESTS_SHARED_ALLOCATION_TEST_HOOKS) \
+	$(srcdir)/vtc/generate-interning-variant.sh \
+	vtc/.dirstamp
+	$(AM_V_GEN) for source in $(VTC_TESTS_CORE) $(VTC_TESTS_SHARED_ALLOCATION_TEST_HOOKS); do \
+		destination=$${source%.vtc}_interned.vtc; \
+		$(SHELL) $(srcdir)/vtc/generate-interning-variant.sh \
+		    $(srcdir)/$$source $$destination || exit 1; \
+	done; \
+	: > $@
+
+$(VTC_TESTS_GENERATED_INTERNED): vtc/.interned-generated
+
+VTC_TESTS_RUNTIME_MODES = \
+	vtc/cachetag_pm00039.vtc \
+	vtc/cachetag_pm00041.vtc
 
 VTC_TESTS_DEMO_DIAGNOSTICS = \
 	vtc/cachetag_c00025.vtc \
@@ -193,31 +229,30 @@ VTC_TESTS_TEST_HOOKS = \
 	vtc/cachetag_pm00035.vtc \
 	vtc/cachetag_pm00036.vtc \
 	vtc/cachetag_pm00037.vtc \
-	vtc/cachetag_pm00038.vtc
+	vtc/cachetag_pm00038.vtc \
+	vtc/cachetag_pm00042.vtc
 
-VTC_TESTS_SET_INTERNING_TEST_HOOKS = \
+VTC_TESTS_MEMBERSHIP_TEST_HOOKS = \
 	vtc/cachetag_pm00030.vtc \
 	vtc/cachetag_pm00031.vtc \
 	vtc/cachetag_pm00032.vtc \
 	vtc/cachetag_pm00033.vtc \
-	vtc/cachetag_pm00034.vtc
+	vtc/cachetag_pm00034.vtc \
+	vtc/cachetag_pm00040.vtc
 
-VTC_TESTS = $(VTC_TESTS_CORE)
-if CACHE_TAG_SET_INTERNING
-VTC_TESTS += $(VTC_TESTS_SET_INTERNING)
-else
-VTC_TESTS += $(VTC_TESTS_NO_SET_INTERNING)
-endif
+VTC_TESTS = \
+	$(VTC_TESTS_CORE) \
+	$(VTC_TESTS_INTERNED_CORE) \
+	$(VTC_TESTS_DIRECT_ACCOUNTING) \
+	$(VTC_TESTS_INTERNED_ACCOUNTING) \
+	$(VTC_TESTS_RUNTIME_MODES)
 if CACHE_TAG_DEMO_DIAGNOSTICS
 VTC_TESTS += $(VTC_TESTS_DEMO_DIAGNOSTICS)
 endif
 if CACHE_TAG_TEST_HOOKS
 VTC_TESTS += $(VTC_TESTS_TEST_HOOKS)
-endif
-if CACHE_TAG_SET_INTERNING
-if CACHE_TAG_TEST_HOOKS
-VTC_TESTS += $(VTC_TESTS_SET_INTERNING_TEST_HOOKS)
-endif
+VTC_TESTS += $(VTC_TESTS_INTERNED_SHARED_ALLOCATION_TEST_HOOKS)
+VTC_TESTS += $(VTC_TESTS_MEMBERSHIP_TEST_HOOKS)
 endif
 
 FELLOW_VTC_TESTS = \
@@ -244,6 +279,7 @@ FELLOW_VTC_TESTS = \
 	vtc/cachetag_p00020.vtc \
 	vtc/cachetag_p00021.vtc \
 	vtc/cachetag_p00022.vtc \
+	vtc/cachetag_p00023.vtc \
 	vtc/cachetag_p00090.vtc \
 	vtc/cachetag_x00000.vtc
 
@@ -269,10 +305,13 @@ EXTRA_DIST = \
 	vmod_cachetag_demo_diagnostics.vcc \
 	vmod_cachetag_test_hooks.vcc \
 	vmod_cachetag_set_interning_test_hooks.vcc \
+	vtc/generate-interning-variant.sh \
 	$(VTC_TESTS_CORE) \
-	$(VTC_TESTS_NO_SET_INTERNING) \
-	$(VTC_TESTS_SET_INTERNING) \
+	$(VTC_TESTS_DIRECT_ACCOUNTING) \
+	$(VTC_TESTS_INTERNED_ACCOUNTING) \
+	$(VTC_TESTS_RUNTIME_MODES) \
 	$(VTC_TESTS_DEMO_DIAGNOSTICS) \
 	$(VTC_TESTS_TEST_HOOKS) \
-	$(VTC_TESTS_SET_INTERNING_TEST_HOOKS) \
+	$(VTC_TESTS_SHARED_ALLOCATION_TEST_HOOKS) \
+	$(VTC_TESTS_MEMBERSHIP_TEST_HOOKS) \
 	$(FELLOW_VTC_TESTS)

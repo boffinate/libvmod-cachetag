@@ -43,7 +43,7 @@ The configure summary prints the VMOD directory. `make install` puts `libvmod_ca
 
 ### Optional diagnostic build flags
 
-A default build exposes only the production VCL surface. Two configure flags add extra namespace methods; both are off by default and neither belongs in a production build:
+A default build exposes only the production VCL surface. Direct and interned volatile membership representations are always compiled in and selected per namespace with the VCL `interning` argument; no separate build flag is required. Two configure flags add extra namespace methods; both are off by default and neither belongs in a production build:
 
 - `--enable-demo-diagnostics` builds the read-only diagnostics `.generation()`, `.purge_seq()`, `.purgemap_entries()`, `.purgemap_slots()`, and `.purgemap_bytes()`.
 - `--enable-test-hooks` builds every `.test_*()` fault injector and internal toggler used by the regression suite.

@@ -7,7 +7,7 @@
   "thread_pools": 2,
   "match_identity": [
     ["cachetag_configure_args", "--enable-demo-diagnostics"],
-    ["bench_set_interning", "1"],
+    ["bench_effective_set_interning", "1"],
     ["objects", "1000000"],
     ["bench_storage_kind", "default"],
     ["bench_storage", "4g"]

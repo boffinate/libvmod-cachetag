@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,7 @@ type config struct {
 	buckets                      int
 	clients                      int
 	warmSeconds                  int
+	warmPasses                   int
 	warmValidateHit              bool
 	residencyValidate            int
 	churnCycles                  int
@@ -78,6 +80,9 @@ type config struct {
 	disableKeepAlives            bool
 	phaseMarkerDir               string
 	phaseMarkerPrefix            string
+	phaseControlRequired         bool
+	phaseControlRequestFIFO      string
+	phaseControlAckFIFO          string
 	churnCompactEachCycle        bool
 	churnGeneration              int
 	storageKind                  string
@@ -390,6 +395,8 @@ func effectiveTagsPerObject(profile string, configured int) int {
 		return 1
 	case "ten-unique-tags", "five-unique-five-shared":
 		return 10
+	case "interning-shared-five", "interning-unique-five":
+		return 5
 	default:
 		return configured
 	}
@@ -651,6 +658,19 @@ func parseConfig() (config, error) {
 	warmSeconds, err := envIntAllowZero("BENCH_WARM_SECONDS", 5)
 	if err != nil {
 		return config{}, err
+	}
+	warmPasses, err := envIntAllowZero("BENCH_WARM_PASSES", 0)
+	if err != nil {
+		return config{}, err
+	}
+	phaseControlRequired, err := envBool("BENCH_PHASE_CONTROL_REQUIRED", false)
+	if err != nil {
+		return config{}, err
+	}
+	phaseControlRequestFIFO := os.Getenv("BENCH_PHASE_CONTROL_REQUEST_FIFO")
+	phaseControlAckFIFO := os.Getenv("BENCH_PHASE_CONTROL_ACK_FIFO")
+	if phaseControlRequired && (phaseControlRequestFIFO == "" || phaseControlAckFIFO == "") {
+		return config{}, fmt.Errorf("BENCH_PHASE_CONTROL_REQUIRED needs request and acknowledgement FIFOs")
 	}
 	warmValidateHit, err := envBool("BENCH_WARM_VALIDATE_HIT", true)
 	if err != nil {
@@ -945,7 +965,8 @@ func parseConfig() (config, error) {
 		metricsPath:                  os.Args[8],
 		buckets:                      buckets,
 		clients:                      clients,
-		warmSeconds:                  warmSeconds,
+			warmSeconds:                  warmSeconds,
+			warmPasses:                   warmPasses,
 		warmValidateHit:              warmValidateHit,
 		residencyValidate:            residencyValidate,
 		churnCycles:                  churnCycles,
@@ -989,7 +1010,10 @@ func parseConfig() (config, error) {
 		evictionValidate:             evictionValidate,
 		disableKeepAlives:            disableKeepAlives,
 		phaseMarkerDir:               os.Getenv("BENCH_PHASE_MARKER_DIR"),
-		phaseMarkerPrefix:            os.Getenv("BENCH_PHASE_MARKER_PREFIX"),
+			phaseMarkerPrefix:            os.Getenv("BENCH_PHASE_MARKER_PREFIX"),
+			phaseControlRequired:         phaseControlRequired,
+			phaseControlRequestFIFO:      phaseControlRequestFIFO,
+			phaseControlAckFIFO:          phaseControlAckFIFO,
 		churnCompactEachCycle:        churnCompactEachCycle,
 		storageKind:                  storageKind,
 		cacheTagPersist:              cacheTagPersist,
@@ -1066,6 +1090,68 @@ func writePhaseMarker(cfg config, phase string, event string) error {
 	return os.WriteFile(path, []byte(body), 0644)
 }
 
+func phaseControlExchange(cfg config, phase string, event string) error {
+	if !cfg.phaseControlRequired {
+		return nil
+	}
+	request, err := os.OpenFile(cfg.phaseControlRequestFIFO, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open phase-control request FIFO: %w", err)
+	}
+	_, writeErr := fmt.Fprintf(request, "%s %s %d\n", event, phase, os.Getpid())
+	closeErr := request.Close()
+	if writeErr != nil {
+		return fmt.Errorf("write phase-control request: %w", writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close phase-control request: %w", closeErr)
+	}
+	ack, err := os.OpenFile(cfg.phaseControlAckFIFO, os.O_RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open phase-control acknowledgement FIFO: %w", err)
+	}
+	line, readErr := bufio.NewReader(ack).ReadString('\n')
+	closeErr = ack.Close()
+	if readErr != nil {
+		return fmt.Errorf("read phase-control acknowledgement: %w", readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close phase-control acknowledgement: %w", closeErr)
+	}
+	expected := "GO " + phase
+	if event == "WORK_DONE" {
+		if phase == "warm" {
+			expected = "DONE " + phase
+		} else {
+			expected = "ACK " + phase
+		}
+	}
+	if strings.TrimSpace(line) != expected {
+		return fmt.Errorf("phase-control acknowledgement=%q expected=%q", strings.TrimSpace(line), expected)
+	}
+	return nil
+}
+
+func startMeasuredPhase(cfg config, lines *metrics, phase string) (time.Time, error) {
+	if err := phaseControlExchange(cfg, phase, "READY"); err != nil {
+		return time.Time{}, err
+	}
+	start := beginPhase(lines, phase)
+	if err := writePhaseMarker(cfg, phase, "start"); err != nil {
+		return time.Time{}, err
+	}
+	return start, nil
+}
+
+func finishMeasuredPhase(cfg config, phase string) error {
+	markerErr := writePhaseMarker(cfg, phase, "end")
+	controlErr := phaseControlExchange(cfg, phase, "WORK_DONE")
+	if markerErr != nil {
+		return markerErr
+	}
+	return controlErr
+}
+
 func tagsFor(cfg config, obj int) []string {
 	if len(cfg.fixtureRecords) > 0 {
 		return append([]string(nil), cfg.fixtureRecords[obj%len(cfg.fixtureRecords)]...)
@@ -1136,6 +1222,14 @@ func tagsFor(cfg config, obj int) []string {
 		}
 		for n := 0; len(tags) < limit; n++ {
 			tags = add(tags, fmt.Sprintf("shared:%d", n))
+		}
+	case "interning-shared-five":
+		for n := 0; len(tags) < limit; n++ {
+			tags = add(tags, fmt.Sprintf("intern:shared:%d", n))
+		}
+	case "interning-unique-five":
+		for n := 0; len(tags) < limit; n++ {
+			tags = add(tags, fmt.Sprintf("intern:unique:%d:%d", obj, n))
 		}
 	case "cutover-mostly-unique":
 		for n := 0; len(tags) < limit; n++ {
@@ -2365,22 +2459,22 @@ func runLoadObjectsPhase(client *http.Client, baseURL string, cfg config, lines 
 }
 
 func runExactLoadObjectsPhase(client *http.Client, baseURL string, cfg config, lines *metrics) error {
-	start := beginPhase(lines, "load")
-	if err := writePhaseMarker(cfg, "load", "start"); err != nil {
+	start, err := startMeasuredPhase(cfg, lines, "load")
+	if err != nil {
 		return err
 	}
 	workStart := time.Now()
-	result, err := loadObjectsDetailed(client, baseURL, cfg, 0, cfg.objects, nil)
+	result, workErr := loadObjectsDetailed(client, baseURL, cfg, 0, cfg.objects, nil)
 	workSeconds := time.Since(workStart).Seconds()
 	drainSeconds := 0.0
-	if err == nil && result.backendObjects != int64(cfg.objects) {
-		err = fmt.Errorf("exact load backend objects=%d expected=%d", result.backendObjects, cfg.objects)
+	if workErr == nil && result.backendObjects != int64(cfg.objects) {
+		workErr = fmt.Errorf("exact load backend objects=%d expected=%d", result.backendObjects, cfg.objects)
 	}
-	if err == nil {
-		drainSeconds, err = waitForPendingZeroTimed(client, baseURL, cfg)
+	if workErr == nil {
+		drainSeconds, workErr = waitForPendingZeroTimed(client, baseURL, cfg)
 	}
 	seconds := time.Since(start).Seconds()
-	markerErr := writePhaseMarker(cfg, "load", "end")
+	finishErr := finishMeasuredPhase(cfg, "load")
 	lines.add("driver_load_wall_seconds", seconds)
 	lines.add("driver_load_request_seconds", workSeconds)
 	lines.add("driver_load_fixed_work_seconds", seconds)
@@ -2392,19 +2486,138 @@ func runExactLoadObjectsPhase(client *http.Client, baseURL string, cfg config, l
 	if seconds > 0 {
 		lines.add("driver_load_requests_per_second", float64(result.requests)/seconds)
 	}
+	if workErr != nil {
+		return workErr
+	}
+	return finishErr
+}
+
+func runFixedWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics) error {
+	start, err := startMeasuredPhase(cfg, lines, "warm")
 	if err != nil {
 		return err
 	}
-	return markerErr
+	type warmWorkerResult struct {
+		recorder  *latencyRecorder
+		attempted int64
+		completed int64
+		hits      int64
+		misses    int64
+		errors    int64
+	}
+	latencies := newLatencyRecorder(200000)
+	workerResults := make([]warmWorkerResult, cfg.clients)
+	perWorkerLimit := workerLatencyLimit(latencies.limit, cfg.clients)
+	var firstErr error
+	var firstErrMu sync.Mutex
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	for worker := 0; worker < cfg.clients; worker++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			local := warmWorkerResult{recorder: newLatencyRecorder(perWorkerLimit)}
+			defer func() { workerResults[workerID] = local }()
+			for pass := 0; pass < cfg.warmPasses; pass++ {
+				for obj := workerID; obj < cfg.objects; obj += cfg.clients {
+					if stop.Load() {
+						return
+					}
+					local.attempted++
+					t0 := time.Now()
+					resp, requestErr := objectRequest(client, baseURL, cfg, obj)
+					local.recorder.add(time.Since(t0))
+					if requestErr != nil {
+						local.errors++
+						firstErrMu.Lock()
+						if firstErr == nil {
+							firstErr = requestErr
+						}
+						firstErrMu.Unlock()
+						stop.Store(true)
+						return
+					}
+					local.completed++
+					if resp.cacheState == "hit" {
+						local.hits++
+					} else {
+						local.misses++
+						if cfg.warmValidateHit {
+							local.errors++
+							firstErrMu.Lock()
+							if firstErr == nil {
+								firstErr = fmt.Errorf("warm request returned %q for object %d", resp.cacheState, obj)
+							}
+							firstErrMu.Unlock()
+							stop.Store(true)
+							return
+						}
+					}
+				}
+			}
+		}(worker)
+	}
+	wg.Wait()
+	var attempted, completed, hits, misses, errors int64
+	for worker := range workerResults {
+		local := &workerResults[worker]
+		attempted += local.attempted
+		completed += local.completed
+		hits += local.hits
+		misses += local.misses
+		errors += local.errors
+		latencies.mergeRecorder(local.recorder)
+		lines.add(fmt.Sprintf("driver_warm_worker_%02d_attempted", worker), local.attempted)
+		lines.add(fmt.Sprintf("driver_warm_worker_%02d_completed", worker), local.completed)
+	}
+	finishErr := finishMeasuredPhase(cfg, "warm")
+	seconds := time.Since(start).Seconds()
+	target := int64(cfg.objects) * int64(cfg.warmPasses)
+	fingerprintMaterial := fmt.Sprintf("cyclic-worker-stride-v1 objects=%d clients=%d passes=%d", cfg.objects, cfg.clients, cfg.warmPasses)
+	fingerprint := sha256.Sum256([]byte(fingerprintMaterial))
+	lines.add("driver_warm_enabled", true)
+	lines.add("driver_warm_fixed_work", true)
+	lines.add("driver_warm_passes", cfg.warmPasses)
+	lines.add("driver_warm_sequence", "cyclic-worker-stride-v1")
+	lines.add("driver_warm_sequence_fingerprint", fmt.Sprintf("%x", fingerprint))
+	lines.add("driver_warm_target", target)
+	lines.add("driver_warm_attempted", attempted)
+	lines.add("driver_warm_completed", completed)
+	lines.add("driver_warm_requests", completed)
+	lines.add("driver_warm_hits", hits)
+	lines.add("driver_warm_misses", misses)
+	lines.add("driver_warm_errors", errors)
+	lines.add("driver_warm_backend_fetch_delta", misses)
+	lines.add("driver_warm_wall_seconds", seconds)
+	if seconds > 0 {
+		lines.add("driver_warm_requests_per_second", float64(completed)/seconds)
+	}
+	latencies.emit("driver_warm", lines)
+	firstErrMu.Lock()
+	workErr := firstErr
+	firstErrMu.Unlock()
+	if workErr == nil && (attempted != target || completed != target || hits != target || misses != 0 || errors != 0) {
+		workErr = fmt.Errorf(
+			"fixed warm work mismatch attempted=%d completed=%d hits=%d misses=%d errors=%d target=%d",
+			attempted, completed, hits, misses, errors, target,
+		)
+	}
+	if workErr != nil {
+		return workErr
+	}
+	return finishErr
 }
 
 func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics) error {
+	if cfg.warmPasses > 0 {
+		return runFixedWarmHits(client, baseURL, cfg, lines)
+	}
 	if cfg.warmSeconds <= 0 {
 		lines.add("driver_warm_enabled", false)
 		return nil
 	}
-	start := beginPhase(lines, "warm")
-	if err := writePhaseMarker(cfg, "warm", "start"); err != nil {
+	start, err := startMeasuredPhase(cfg, lines, "warm")
+	if err != nil {
 		return err
 	}
 	deadline := time.Now().Add(time.Duration(cfg.warmSeconds) * time.Second)
@@ -2495,7 +2708,7 @@ func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics
 		errors += local.errors
 		latencies.mergeRecorder(local.recorder)
 	}
-	markerErr := writePhaseMarker(cfg, "warm", "end")
+	finishErr := finishMeasuredPhase(cfg, "warm")
 
 	seconds := time.Since(start).Seconds()
 	lines.add("driver_warm_enabled", true)
@@ -2514,12 +2727,12 @@ func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics
 	latencies.emit("driver_warm", lines)
 
 	firstErrMu.Lock()
-	err := firstErr
+	err = firstErr
 	firstErrMu.Unlock()
 	if err != nil {
 		return err
 	}
-	return markerErr
+	return finishErr
 }
 
 func runLoad(client *http.Client, baseURL string, cfg config, lines *metrics) error {
@@ -2528,6 +2741,9 @@ func runLoad(client *http.Client, baseURL string, cfg config, lines *metrics) er
 	// the request-only loader cannot distinguish an accidental cache hit.
 	if err := runExactLoadObjectsPhase(client, baseURL, cfg, lines); err != nil {
 		return err
+	}
+	if cfg.phaseControlRequired {
+		return nil
 	}
 	beginPhase(lines, "load-residency")
 	if err := validateResidentHits(client, baseURL, cfg, 0, cfg.objects, lines, "driver_load"); err != nil {
@@ -5309,6 +5525,7 @@ func main() {
 	lines.add("driver_runtime_gogc", os.Getenv("GOGC"))
 	lines.add("driver_runtime_gomemlimit", os.Getenv("GOMEMLIMIT"))
 	lines.add("driver_warm_seconds_configured", cfg.warmSeconds)
+	lines.add("driver_warm_passes_configured", cfg.warmPasses)
 	lines.add("driver_warm_validate_hit_configured", cfg.warmValidateHit)
 	lines.add("driver_allow_stale_after_purge", cfg.allowStaleAfterPurge)
 	lines.add("driver_validate_residency", cfg.validateResidency)
@@ -5318,6 +5535,7 @@ func main() {
 	lines.add("driver_cachetag_persist", cfg.cacheTagPersist)
 	lines.add("driver_phase_marker_dir", cfg.phaseMarkerDir)
 	lines.add("driver_phase_marker_prefix", cfg.phaseMarkerPrefix)
+	lines.add("driver_phase_control_required", boolInt(cfg.phaseControlRequired))
 	lines.add("driver_purge_storm_rate_configured", cfg.purgeStormRate)
 	lines.add("driver_purge_storm_distinct_configured", cfg.purgeStormDistinct)
 	lines.add("driver_purge_storm_unknown_percent_configured", cfg.purgeStormUnknownPct)

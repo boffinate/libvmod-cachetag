@@ -1,0 +1,147 @@
+vtest "Fellow membership and purge WAL survive a direct to interned VCL reload"
+
+server s1 {
+	rxreq
+	expect req.url == "/mode-reload"
+	txresp -hdr "Connection: close" -hdr "X-Source: backend-old" -body "old-body"
+
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/mode-reload"
+	txresp -hdr "X-Source: backend-new" -body "new-body"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/mode-reload.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+		new tags = cachetag.namespace("mode_reload_pm",
+		    persist_path = "${tmpdir}/mode-reload-persist",
+		    sweep_interval = 0s, interning = false);
+	}
+
+	sub vcl_backend_response {
+		tags.add_header("alpha,beta");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+} -start
+
+client c_seed {
+	txreq -url "/mode-reload"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_mode_reload_pm.purgemap_fellow_attr_objects_written == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_mode_reload_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_mode_reload_pm.volatile_interned_sets == 0
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new keep = cachetag.namespace("reload_keeper");
+	}
+}
+
+vinyl v1 -cliok "vcl.use vcl2"
+vinyl v1 -cliok "vcl.discard vcl1"
+
+vinyl v1 -vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+		new tags = cachetag.namespace("mode_reload_pm",
+		    persist_path = "${tmpdir}/mode-reload-persist",
+		    sweep_interval = 0s, interning = true);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge("alpha");
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add_header("alpha,beta");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+}
+
+vinyl v1 -cliok "vcl.use vcl3"
+vinyl v1 -cliok "vcl.discard vcl2"
+
+client c_reload {
+	txreq -url "/mode-reload"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+
+	txreq -url "/mode-reload"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_fellow_direct_probes >= 1
+vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_fellow_namespace_records_probed >= 1
+vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_probe_hard_hits >= 1
+vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.persist_wal_records >= 1
+vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.volatile_interned_sets == 0
+
+vinyl v1 -stop
+vinyl v1 -start
+
+client c_restart {
+	txreq -url "/mode-reload"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.persist_replay_records >= 1
+vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_fellow_direct_probes >= 1
+vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_fellow_namespace_records_probed >= 1
+vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.volatile_interned_sets == 0
+
+server s1 -wait

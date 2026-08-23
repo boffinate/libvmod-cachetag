@@ -24,7 +24,8 @@ $Object namespace(STRING name = "default",
 		  INT sweep_batch_objects = 8192,
 		  DURATION sweep_batch_hold = 0.00025,
 		  DURATION sweep_batch_yield = 0.0001,
-		  DURATION vsc_publish_interval = 0.1)
+		  DURATION vsc_publish_interval = 0.1,
+		  BOOL interning = false)
 
 Create a cache-tag namespace.
 
@@ -55,6 +56,15 @@ snapshot; mutating calls do not publish and are picked up on the next tick.
 ``0s`` publishes synchronously on every call, which is the legacy behaviour and
 is useful for tests and debugging; a positive value below ``0.1s`` is clamped up
 to it, and a negative value is a VCL initialisation error.
+
+``interning`` selects the immutable representation for this namespace's
+volatile multi-tag memberships. The default ``false`` stores a direct fold
+vector per object. ``true`` canonicalises complete fold sets within the
+namespace, which can reduce memory when many objects share an identical set but
+adds fixed registry state and lookup work. Zero tags create no volatile
+membership; one tag retains its common inline representation. Fellow-direct
+objects keep membership in their FDO attributes; only volatile objects,
+including transient Fellow fallbacks, use this option.
 
 ``persist_path`` enables durable purge history. The WAL is replayed before the
 namespace becomes ready. Fellow objects keep their folded tags and registration
