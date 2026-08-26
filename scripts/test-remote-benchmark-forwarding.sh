@@ -62,6 +62,8 @@ grep -F 'CACHE_TAG_BENCH_WARM_CLIENT_SWEEP=%s' "$script" >/dev/null
 grep -F 'envs="\$envs BENCH_WARM_CLIENT_SWEEP=\$CACHE_TAG_BENCH_WARM_CLIENT_SWEEP"' "$script" >/dev/null
 grep -F 'CACHE_TAG_RESIDENT_HIT_DRIVER=%s' "$script" >/dev/null
 grep -F 'envs="\$envs BENCH_RESIDENT_HIT_DRIVER=\$CACHE_TAG_RESIDENT_HIT_DRIVER"' "$script" >/dev/null
+grep -F '"\$remote_dir/libvmod-cachetag/benchmarks/verify_performance_governor.sh"' "$script" >/dev/null
+grep -F '"\$result_dir/governor-gate.env"' "$script" >/dev/null
 grep -F 'CACHE_TAG_OHA_WORKER_THREADS=%s' "$script" >/dev/null
 grep -F 'envs="\$envs BENCH_OHA_WORKER_THREADS=\$CACHE_TAG_OHA_WORKER_THREADS"' "$script" >/dev/null
 grep -F 'envs="\$envs OBJECTS=\$CACHE_TAG_BENCH_OBJECTS"' "$script" >/dev/null

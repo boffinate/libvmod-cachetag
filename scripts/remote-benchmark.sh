@@ -1425,6 +1425,11 @@ result_dir="\$remote_dir/libvmod-cachetag/benchmarks/results/\$result_id"
 mkdir -p "\$result_dir"
 printf '%s\n' "\$result_dir" > "\$remote_dir/fetch/last-result-dir"
 "\$remote_dir/libvmod-cachetag/benchmarks/capture_system_metadata.sh" "\$result_dir/host-system.env"
+if ! "\$remote_dir/libvmod-cachetag/benchmarks/verify_performance_governor.sh" > "\$result_dir/governor-gate.env" 2>&1; then
+	cat "\$result_dir/governor-gate.env" >&2
+	exit 1
+fi
+cat "\$result_dir/governor-gate.env"
 {
 	printf 'matrix=%s\n' "\$matrix"
 	printf 'result_id=%s\n' "\$result_id"
