@@ -345,8 +345,10 @@ Environment:
                         to add perf record -a (default: command)
   BENCH_PERF_RECORD_PHASE
                         command to profile the full vinyltest command, or load
-                        / warm / concurrent to profile only that driver phase
-                        (default: command)
+                        / warm / concurrent / warm_sweep_clients_N to profile
+                        only that driver phase (default: command). With
+                        BENCH_PERF_RECORD=required a phase whose marker never
+                        appears fails the row instead of passing silently.
   BENCH_PERF_RECORD_TARGET
                         vinyld to profile only the cache process during a
                         phase profile, or descendants to profile the whole
@@ -2071,8 +2073,15 @@ write_perf_reports() {
 	perf report -i "$perf_data" --stdio --children \
 		--no-inline --sort comm,dso,symbol > "${report_prefix}.perf-report-children.txt" \
 		2> "${report_prefix}.perf-report-children.err" || true
+	# 20,000 lines was roughly the first thousand samples of a 14K-sample
+	# phase, a head that misrepresented the phase. Keep a larger
+	# head for reading and a complete one-line-per-sample folded file for
+	# aggregation; the folded file is small enough to retain in full.
 	perf script -i "$perf_data" --no-inline 2> "${report_prefix}.perf-script.err" |
-		sed -n "1,20000p" > "${report_prefix}.perf-script.txt" || true
+		sed -n "1,400000p" > "${report_prefix}.perf-script.txt" || true
+	perf script -i "$perf_data" --no-inline 2> /dev/null |
+		python3 /cachetag-host/benchmarks/fold_perf_script.py \
+		> "${report_prefix}.perf-folded.txt" || true
 	perf script -i "$perf_data" --no-inline \
 		2> "${report_prefix}.perf-script-cachetag.err" |
 		awk "BEGIN { RS = \"\"; ORS = \"\\n\\n\" } /cachetag_|vmod_cachetag/ { print }" \
@@ -2173,7 +2182,7 @@ for workload in /results/workloads/*.vtc; do
 							$vinyltest_command -t "$VTC_TIMEOUT" \
 							-b "$VTC_LOG_BYTES" $vtc_quiet_flag "$workload" > "$out" 2>&1
 						;;
-					load|warm|concurrent)
+					load|warm|concurrent|warm_sweep_clients_*)
 						python3 /cachetag-host/benchmarks/run_with_metrics.py \
 							--metrics "$timing" --phase-marker-dir /results/phase-markers \
 							--phase-marker-prefix "$name" --perf "$PERF_MODE" -- \
@@ -2194,6 +2203,18 @@ for workload in /results/workloads/*.vtc; do
 						exit 1
 						;;
 				esac
+				# Keep the marker diagnostic visible beside the workload log.
+				if grep -q "phase perf marker not observed" "$out"; then
+					printf "perf-record %s run %s produced no profile: phase marker not observed\n" \
+						"$name" "$run" | tee -a /results/summary.txt
+					if [ "$BENCH_PERF_RECORD" = required ]; then
+						exit 1
+					fi
+				fi
+				if [ "$BENCH_PERF_RECORD" = required ] && [ ! -s "$perf_data" ]; then
+					echo "required perf record produced no usable artifact for $name run $run" >&2
+					exit 1
+				fi
 				save_symbol_artifacts
 				write_perf_reports "$perf_data" "$report_prefix"
 			fi

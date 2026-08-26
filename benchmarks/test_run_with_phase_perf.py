@@ -19,6 +19,189 @@ from run_with_phase_perf import (  # noqa: E402
 
 
 class PhasePerfMarkerTests(unittest.TestCase):
+    @staticmethod
+    def python_perf_program(body: str) -> str:
+        return f"#!{sys.executable}\n" + body
+
+    def run_record_fixture(
+        self,
+        perf_program: str,
+        child_exit: int = 0,
+        wait_for_perf_start: bool = False,
+        metrics_wrapper: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[str], bool, bytes, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            fake_bin = directory / "fake-bin"
+            fake_bin.mkdir()
+            fake_perf = fake_bin / "perf"
+            fake_perf.write_text(perf_program, encoding="ascii")
+            fake_perf.chmod(0o755)
+            child = directory / "marker_child.py"
+            child_program = (
+                "import os\n"
+                "import time\n"
+                "from pathlib import Path\n"
+                "markers = Path(os.environ['BENCH_PHASE_MARKER_DIR'])\n"
+                "prefix = os.environ['BENCH_PHASE_MARKER_PREFIX']\n"
+                "markers.mkdir(parents=True, exist_ok=True)\n"
+                "(markers / f'{prefix}.warm.start').write_text('start\\n', encoding='ascii')\n"
+            )
+            if wait_for_perf_start:
+                child_program += (
+                    "ready = Path(os.environ['PERF_FIXTURE_READY'])\n"
+                    "deadline = time.monotonic() + 2\n"
+                    "while not ready.exists():\n"
+                    "    if time.monotonic() >= deadline:\n"
+                    "        raise SystemExit(8)\n"
+                    "    time.sleep(0.01)\n"
+                )
+            child_program += (
+                "time.sleep(0.2)\n"
+                "(markers / f'{prefix}.warm.end').write_text('end\\n', encoding='ascii')\n"
+            )
+            if child_exit:
+                child_program += f"raise SystemExit({child_exit})\n"
+            child.write_text(child_program, encoding="ascii")
+            markers = directory / "markers"
+            perf_data = directory / "profile.perf.data"
+            env = {"PATH": str(fake_bin)}
+            if wait_for_perf_start:
+                env["PERF_FIXTURE_READY"] = str(directory / "perf-ready")
+            command = [
+                sys.executable,
+                str(Path(__file__).with_name("run_with_phase_perf.py")),
+                "--perf-data",
+                str(perf_data),
+                "--marker-dir",
+                str(markers),
+                "--marker-prefix",
+                "fixture",
+                "--phase",
+                "warm",
+                "--scope",
+                "system",
+                "--",
+                sys.executable,
+                str(child),
+            ]
+            metrics = directory / "metrics"
+            if metrics_wrapper:
+                command = [
+                    sys.executable,
+                    str(Path(__file__).with_name("run_with_metrics.py")),
+                    "--metrics",
+                    str(metrics),
+                    "--system-sample-interval",
+                    "0",
+                    "--perf",
+                    "off",
+                    "--",
+                    *command,
+                ]
+            result = subprocess.run(
+                command,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            artifact_exists = perf_data.is_file()
+            artifact = perf_data.read_bytes() if artifact_exists else b""
+            metrics_text = metrics.read_text(encoding="ascii") if metrics.is_file() else ""
+
+        return result, artifact_exists, artifact, metrics_text
+
+    def test_record_mode_rejects_successful_perf_without_an_artifact(self) -> None:
+        result, artifact_exists, _, _ = self.run_record_fixture("#!/bin/sh\nexit 0\n")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(artifact_exists)
+
+    def test_record_mode_rejects_a_perf_spawn_failure(self) -> None:
+        result, artifact_exists, _, _ = self.run_record_fixture("#!/does/not/exist\n")
+
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("perf could not be started", result.stderr)
+        self.assertFalse(artifact_exists)
+
+    def test_record_mode_accepts_a_nonempty_artifact_after_sigint(self) -> None:
+        result, artifact_exists, artifact, _ = self.run_record_fixture(
+            self.python_perf_program(
+                "import os\n"
+                "import signal\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "out = Path(sys.argv[sys.argv.index('-o') + 1])\n"
+                "out.write_bytes(b'profile')\n"
+                "signal.signal(signal.SIGINT, lambda *_: sys.exit(130))\n"
+                "Path(os.environ['PERF_FIXTURE_READY']).touch()\n"
+                "signal.pause()\n"
+            ),
+            wait_for_perf_start=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(artifact_exists)
+        self.assertEqual(artifact, b"profile")
+
+    def test_record_mode_propagates_the_workload_failure(self) -> None:
+        result, artifact_exists, artifact, _ = self.run_record_fixture(
+            self.python_perf_program(
+                "import os\n"
+                "import signal\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "out = Path(sys.argv[sys.argv.index('-o') + 1])\n"
+                "out.write_bytes(b'profile')\n"
+                "signal.signal(signal.SIGINT, lambda *_: sys.exit(130))\n"
+                "Path(os.environ['PERF_FIXTURE_READY']).touch()\n"
+                "signal.pause()\n"
+            ),
+            child_exit=7,
+            wait_for_perf_start=True,
+        )
+
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertTrue(artifact_exists)
+        self.assertEqual(artifact, b"profile")
+
+    def test_record_mode_rejects_a_zero_byte_artifact(self) -> None:
+        result, artifact_exists, artifact, _ = self.run_record_fixture(
+            self.python_perf_program(
+                "import sys\n"
+                "from pathlib import Path\n"
+                "Path(sys.argv[sys.argv.index('-o') + 1]).touch()\n"
+            )
+        )
+
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(artifact_exists)
+        self.assertEqual(artifact, b"")
+
+    def test_record_mode_rejects_a_non_sigint_failure_with_an_artifact(self) -> None:
+        result, artifact_exists, artifact, _ = self.run_record_fixture(
+            self.python_perf_program(
+                "import sys\n"
+                "from pathlib import Path\n"
+                "Path(sys.argv[sys.argv.index('-o') + 1]).write_bytes(b'partial')\n"
+                "raise SystemExit(7)\n"
+            )
+        )
+
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertTrue(artifact_exists)
+        self.assertEqual(artifact, b"partial")
+
+    def test_metrics_wrapper_propagates_a_capture_failure(self) -> None:
+        result, artifact_exists, _, metrics = self.run_record_fixture(
+            "#!/bin/sh\nexit 0\n", metrics_wrapper=True
+        )
+
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertFalse(artifact_exists)
+        self.assertIn("exit_code=3", metrics)
+
     def test_dwarf_call_graph_is_passed_to_perf_record(self) -> None:
         command = perf_record_command(
             Path("/results/profile.perf.data"), "99", "dwarf", "command", [123, 456]
@@ -145,6 +328,40 @@ class PhasePerfMarkerTests(unittest.TestCase):
         self.assertEqual(
             dict(pairs)[selected],
             directory / "cachetag_low_fanout_unique_load.warm.end",
+        )
+
+    def test_load_phase_accepts_the_load_driver_marker_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            pairs = phase_marker_pairs(directory, "cachetag_mostly_unique_bound", "load")
+
+        self.assertEqual(
+            pairs,
+            [
+                (
+                    directory / "cachetag_mostly_unique_bound.load.start",
+                    directory / "cachetag_mostly_unique_bound.load.end",
+                ),
+                (
+                    directory / "cachetag_mostly_unique_bound_load.load.start",
+                    directory / "cachetag_mostly_unique_bound_load.load.end",
+                ),
+            ],
+        )
+
+    def test_client_sweep_phase_accepts_the_load_driver_marker_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            pairs = phase_marker_pairs(
+                directory, "cachetag_mostly_unique_bound", "warm_sweep_clients_64"
+            )
+
+        self.assertEqual(
+            pairs[-1],
+            (
+                directory / "cachetag_mostly_unique_bound_load.warm_sweep_clients_64.start",
+                directory / "cachetag_mostly_unique_bound_load.warm_sweep_clients_64.end",
+            ),
         )
 
     def test_non_warm_phase_does_not_invent_a_split_prefix(self) -> None:

@@ -106,6 +106,12 @@ def phase_marker_pairs(marker_dir: Path, marker_prefix: str, phase: str) -> list
         # load invocation, which names its markers `<workload>_load`.
         prefixes.append(f"{marker_prefix}_warm")
         prefixes.append(f"{marker_prefix}_load")
+    elif phase == "load" or phase.startswith("warm_sweep_clients_"):
+        # The load phase and the resident-hit client sweep are both emitted
+        # by the load driver invocation, so their markers carry the `_load`
+        # prefix as well. Without this, `--phase load` waited for a marker
+        # that never appeared and the row silently produced no profile.
+        prefixes.append(f"{marker_prefix}_load")
     return [
         (
             marker_dir / f"{prefix}.{phase}.start",
@@ -139,6 +145,13 @@ def stop_perf(proc: subprocess.Popen[bytes]) -> int:
     except subprocess.TimeoutExpired:
         proc.kill()
         return proc.wait()
+
+
+def record_artifact_ready(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def perf_record_command(
@@ -232,6 +245,7 @@ def main() -> int:
     child = subprocess.Popen(command, env=env)
     perf_proc: subprocess.Popen[bytes] | None = None
     perf_rc = 0
+    perf_stop_requested = False
     missing_marker = False
 
     try:
@@ -287,6 +301,7 @@ def main() -> int:
                 wait_for_any_marker([end_marker], child, args.poll_seconds)
     finally:
         if perf_proc is not None:
+            perf_stop_requested = perf_proc.poll() is None
             perf_rc = stop_perf(perf_proc)
 
     child_rc = child.wait()
@@ -311,7 +326,18 @@ def main() -> int:
                 file=sys.stderr,
             )
         return 0
-    if perf_rc != 0 and output_path.exists() and output_path.stat().st_size > 0:
+
+    # A completed workload does not prove capture: perf can fail before it
+    # creates its output, or exit successfully without recording any samples.
+    if perf_proc is None:
+        print("phase perf record did not start", file=sys.stderr)
+        return 3
+    if not record_artifact_ready(output_path):
+        print(f"phase perf record produced no artifact: {output_path}", file=sys.stderr)
+        return 3
+    if perf_rc == 0:
+        return 0
+    if perf_stop_requested and perf_rc in (128 + signal.SIGINT, -signal.SIGINT):
         return 0
     return perf_rc
 
