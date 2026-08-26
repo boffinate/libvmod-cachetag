@@ -58,6 +58,12 @@ grep -F 'bench_build_cflags=%s' "$script" >/dev/null
 grep -F "CACHE_TAG_BENCH_PERF_RECORD_CALL_GRAPH=%s" "$script" >/dev/null
 grep -F 'export BENCH_PERF_RECORD_CALL_GRAPH="\$CACHE_TAG_BENCH_PERF_RECORD_CALL_GRAPH"' "$script" >/dev/null
 grep -F 'envs="\$envs BENCH_CONCURRENT_TARGET_RPS=\$CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS"' "$script" >/dev/null
+grep -F 'CACHE_TAG_BENCH_WARM_CLIENT_SWEEP=%s' "$script" >/dev/null
+grep -F 'envs="\$envs BENCH_WARM_CLIENT_SWEEP=\$CACHE_TAG_BENCH_WARM_CLIENT_SWEEP"' "$script" >/dev/null
+grep -F 'CACHE_TAG_RESIDENT_HIT_DRIVER=%s' "$script" >/dev/null
+grep -F 'envs="\$envs BENCH_RESIDENT_HIT_DRIVER=\$CACHE_TAG_RESIDENT_HIT_DRIVER"' "$script" >/dev/null
+grep -F 'CACHE_TAG_OHA_WORKER_THREADS=%s' "$script" >/dev/null
+grep -F 'envs="\$envs BENCH_OHA_WORKER_THREADS=\$CACHE_TAG_OHA_WORKER_THREADS"' "$script" >/dev/null
 grep -F 'envs="\$envs OBJECTS=\$CACHE_TAG_BENCH_OBJECTS"' "$script" >/dev/null
 grep -F 'envs="\$envs PERF_MODE=off"' "$script" >/dev/null
 grep -F 'export BENCH_PERF_STAT="\$CACHE_TAG_BENCH_PERF_STAT"' "$script" >/dev/null

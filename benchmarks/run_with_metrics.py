@@ -515,7 +515,7 @@ def tracked_process_matches(
             if sample.comm == "cache-main" and base == "vinyld":
                 matches.append(sample)
         elif label == "driver":
-            if base == "cachetag-http-workload-driver":
+            if base in {"cachetag-http-workload-driver", "oha"}:
                 matches.append(sample)
         elif label == "backend":
             if base == "cachetag-benchmark-backend":

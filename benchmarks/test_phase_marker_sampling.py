@@ -9,10 +9,26 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from run_with_metrics import SystemSampler, ThreadCpuSample  # noqa: E402
+from run_with_metrics import SystemSampler, ThreadCpuSample, tracked_process_matches  # noqa: E402
 
 
 class PhaseMarkerSamplingTests(unittest.TestCase):
+    def test_oha_is_attributed_to_the_driver_process_group(self) -> None:
+        oha = ThreadCpuSample(
+            pid=43,
+            tid=43,
+            ppid=42,
+            comm="oha",
+            exe="/usr/local/bin/oha",
+            start_time_ticks=8,
+            cpu_ticks=100,
+            rss_kb=64,
+            memory_kb={},
+            cpus_allowed_list="2-3",
+        )
+        matches = tracked_process_matches("driver", 42, {43: oha})
+        self.assertEqual(matches, [oha])
+
     def test_markers_follow_embedded_time_not_filename_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)

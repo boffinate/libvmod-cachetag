@@ -199,6 +199,12 @@ Environment:
                            Headroom probe duration in seconds
   CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS
                            Generic offered RPS override for the selected row
+  CACHE_TAG_BENCH_WARM_CLIENT_SWEEP
+                           Comma-separated resident-hit client sweep
+  CACHE_TAG_RESIDENT_HIT_DRIVER
+                           go (default) or oha for the 100k resident-hit sweep
+  CACHE_TAG_OHA_WORKER_THREADS
+                           Native worker threads for the oha resident-hit driver
   CACHE_TAG_BENCH_COMPARISON_MEMORY_ENDPOINTS
                            Enable comparison cache-main endpoint captures
   CACHE_TAG_BENCH_MEMORY_POST_LOAD_QUIET_SECONDS
@@ -472,6 +478,9 @@ bench_workload_filter_override=${CACHE_TAG_BENCH_WORKLOAD_FILTER:-}
 bench_validate_residency_override=${CACHE_TAG_BENCH_VALIDATE_RESIDENCY:-}
 bench_warm_seconds_override=${CACHE_TAG_BENCH_WARM_SECONDS:-}
 bench_warm_passes_override=${CACHE_TAG_BENCH_WARM_PASSES:-}
+bench_warm_client_sweep_override=${CACHE_TAG_BENCH_WARM_CLIENT_SWEEP:-}
+resident_hit_driver_override=${CACHE_TAG_RESIDENT_HIT_DRIVER:-}
+oha_worker_threads_override=${CACHE_TAG_OHA_WORKER_THREADS:-}
 bench_skip_purge_override=${CACHE_TAG_BENCH_SKIP_PURGE:-}
 bench_restart_tag_profile_override=${CACHE_TAG_BENCH_RESTART_TAG_PROFILE:-}
 bench_restart_touch_percent_override=${CACHE_TAG_BENCH_RESTART_TOUCH_PERCENT:-}
@@ -553,6 +562,9 @@ remote_sh() {
 		printf 'CACHE_TAG_BENCH_RUNTIME_SET_INTERNING=%s\n' "$(quote "$bench_runtime_set_interning_override")"
 		printf 'CACHE_TAG_BENCH_LEGACY_SET_INTERNING=%s\n' "$(quote "$bench_legacy_set_interning_override")"
 		printf 'CACHE_TAG_BENCH_WARM_PASSES=%s\n' "$(quote "$bench_warm_passes_override")"
+		printf 'CACHE_TAG_BENCH_WARM_CLIENT_SWEEP=%s\n' "$(quote "$bench_warm_client_sweep_override")"
+		printf 'CACHE_TAG_RESIDENT_HIT_DRIVER=%s\n' "$(quote "$resident_hit_driver_override")"
+		printf 'CACHE_TAG_OHA_WORKER_THREADS=%s\n' "$(quote "$oha_worker_threads_override")"
 		printf 'CACHE_TAG_BENCH_BUILD_CFLAGS=%s\n' "$(quote "$bench_build_cflags_override")"
 		printf 'CACHE_TAG_DECISION_SHARED_LOAD_BUDGET_PERCENT=%s\n' "$(quote "$decision_shared_load_budget")"
 		printf 'CACHE_TAG_DECISION_SHARED_WARM_BUDGET_PERCENT=%s\n' "$(quote "$decision_shared_warm_budget")"
@@ -1196,6 +1208,15 @@ fi
 if [ -n "\$CACHE_TAG_BENCH_WARM_PASSES" ]; then
 	envs="\$envs BENCH_WARM_PASSES=\$CACHE_TAG_BENCH_WARM_PASSES"
 fi
+if [ -n "\$CACHE_TAG_BENCH_WARM_CLIENT_SWEEP" ]; then
+	envs="\$envs BENCH_WARM_CLIENT_SWEEP=\$CACHE_TAG_BENCH_WARM_CLIENT_SWEEP"
+fi
+if [ -n "\$CACHE_TAG_RESIDENT_HIT_DRIVER" ]; then
+	envs="\$envs BENCH_RESIDENT_HIT_DRIVER=\$CACHE_TAG_RESIDENT_HIT_DRIVER"
+fi
+if [ -n "\$CACHE_TAG_OHA_WORKER_THREADS" ]; then
+	envs="\$envs BENCH_OHA_WORKER_THREADS=\$CACHE_TAG_OHA_WORKER_THREADS"
+fi
 if [ -n "\$CACHE_TAG_RUNS_OVERRIDE" ]; then
 	envs="\$envs RUNS=\$CACHE_TAG_RUNS_OVERRIDE"
 fi
@@ -1419,6 +1440,9 @@ printf '%s\n' "\$result_dir" > "\$remote_dir/fetch/last-result-dir"
 	printf 'bench_runtime_set_interning_requested=%s\n' "\${CACHE_TAG_BENCH_RUNTIME_SET_INTERNING:-}"
 	printf 'bench_legacy_set_interning=%s\n' "\${CACHE_TAG_BENCH_LEGACY_SET_INTERNING:-}"
 	printf 'bench_warm_passes=%s\n' "\${CACHE_TAG_BENCH_WARM_PASSES:-}"
+	printf 'bench_warm_client_sweep=%s\n' "\${CACHE_TAG_BENCH_WARM_CLIENT_SWEEP:-}"
+	printf 'bench_resident_hit_driver=%s\n' "\${CACHE_TAG_RESIDENT_HIT_DRIVER:-}"
+	printf 'bench_oha_worker_threads=%s\n' "\${CACHE_TAG_OHA_WORKER_THREADS:-}"
 	printf 'remote_dir=%s\n' "\$remote_dir"
 	printf 'docker_command=%s\n' "\$docker_cmd"
 	printf 'docker_run_args=%s\n' "\$REMOTE_DOCKER_RUN_ARGS"

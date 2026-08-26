@@ -4,11 +4,81 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestOhaWarmPointUsesResidentProbeAndPreservesJSON(t *testing.T) {
+	if _, err := exec.LookPath("oha"); err != nil {
+		t.Fatalf("oha is required by the benchmark image: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Bench-Resident-Probe") != "1" {
+			t.Errorf("resident probe header=%q, want 1", r.Header.Get("X-Bench-Resident-Probe"))
+		}
+		if !strings.HasPrefix(r.URL.Path, "/obj/000") || len(r.URL.Path) != len("/obj/00000000") {
+			t.Errorf("resident probe path=%q is outside the 100k object shape", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	markers := t.TempDir()
+	metricsPath := filepath.Join(t.TempDir(), "oha.driver")
+	cfg := config{
+		clients: 1, warmSeconds: 1, httpTimeout: 2, ohaWorkerThreads: 1,
+		phaseMarkerDir: markers, phaseMarkerPrefix: "oha-test", metricsPath: metricsPath,
+	}
+	lines := metrics{}
+	result, err := runOhaWarmHits(server.URL, cfg, &lines, "warm-sweep-clients-1", "driver_warm_sweep_clients_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.requests == 0 || result.hits != result.requests || result.errors != 0 || result.misses != 0 {
+		t.Fatalf("oha result=%+v, want only successful resident hits", result)
+	}
+	joined := strings.Join(lines, "\n")
+	for _, field := range []string{
+		"driver_warm_sweep_clients_1_driver=oha-v1.16.0",
+		"driver_warm_sweep_clients_1_access_pattern=random-uniform-100k-regex-v1",
+		"driver_warm_sweep_clients_1_oha_status_code_distribution=200:",
+		"driver_warm_sweep_clients_1_latency_p99_seconds=",
+	} {
+		if !strings.Contains(joined, field) {
+			t.Fatalf("oha metrics missing %q: %s", field, joined)
+		}
+	}
+	if _, err := os.Stat(ohaResultPath(metricsPath, "driver_warm_sweep_clients_1")); err != nil {
+		t.Fatalf("oha JSON result missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(markers, "oha-test.warm_sweep_clients_1.end")); err != nil {
+		t.Fatalf("oha end marker missing: %v", err)
+	}
+}
+
+func TestOhaWarmPointRejectsResidentMiss(t *testing.T) {
+	if _, err := exec.LookPath("oha"); err != nil {
+		t.Fatalf("oha is required by the benchmark image: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	cfg := config{
+		clients: 1, warmSeconds: 1, httpTimeout: 2, ohaWorkerThreads: 1,
+		phaseMarkerDir: t.TempDir(), phaseMarkerPrefix: "oha-miss-test", metricsPath: filepath.Join(t.TempDir(), "oha.driver"),
+	}
+	lines := metrics{}
+	result, err := runOhaWarmHits(server.URL, cfg, &lines, "warm-sweep-clients-1", "driver_warm_sweep_clients_1")
+	if err == nil {
+		t.Fatalf("oha accepted resident miss result=%+v", result)
+	}
+	if result.requests == 0 || result.hits != 0 || result.misses != result.requests || result.errors != 0 {
+		t.Fatalf("oha miss result=%+v, want only non-200 responses", result)
+	}
+}
 
 func TestRunLoadRecordsAndValidatesBackendWorkVolume(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +249,79 @@ func TestPacingMetricSchema(t *testing.T) {
 		if !strings.Contains(joined, field) {
 			t.Fatalf("metrics missing %q: %s", field, joined)
 		}
+	}
+}
+
+func TestEnvAscendingPositiveIntList(t *testing.T) {
+	t.Setenv("BENCH_WARM_CLIENT_SWEEP", "1, 2,4")
+	values, err := envAscendingPositiveIntList("BENCH_WARM_CLIENT_SWEEP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := commaSeparatedInts(values), "1,2,4"; got != want {
+		t.Fatalf("parsed clients=%q, want %q", got, want)
+	}
+	for _, raw := range []string{"2,1", "1,1", "0,1", "one"} {
+		t.Setenv("BENCH_WARM_CLIENT_SWEEP", raw)
+		if _, err := envAscendingPositiveIntList("BENCH_WARM_CLIENT_SWEEP"); err == nil {
+			t.Fatalf("clients %q unexpectedly parsed", raw)
+		}
+	}
+}
+
+func TestWarmClientSweepEmitsResidentHitMetricsAndMarkers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Bench-Cache", "hit")
+		w.Header().Set("X-Origin-Generation", "1")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	markers := t.TempDir()
+	cfg := config{
+		objects: 16, buckets: 1, clients: 1, warmSeconds: 1, warmClientSweep: []int{1, 2},
+		warmValidateHit: true, phaseMarkerDir: markers, phaseMarkerPrefix: "warm-sweep-test",
+	}
+	lines := metrics{}
+	if err := runWarmClientSweep(server.Client(), server.URL, cfg, &lines); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(lines, "\n")
+	for _, field := range []string{
+		"driver_warm_enabled=true", "driver_warm_fixed_work=false", "driver_warm_client_sweep_clients=1,2",
+		"driver_warm_requests=", "driver_warm_hits=", "driver_warm_misses=0", "driver_warm_errors=0",
+		"driver_warm_sweep_clients_1_requests=", "driver_warm_sweep_clients_1_latency_p50_seconds=",
+		"driver_warm_sweep_clients_1_latency_p99_seconds=", "driver_warm_sweep_clients_2_requests=",
+	} {
+		if !strings.Contains(joined, field) {
+			t.Fatalf("warm sweep metrics missing %q: %s", field, joined)
+		}
+	}
+	for _, name := range []string{
+		"warm-sweep-test.warm_sweep_clients_1.start", "warm-sweep-test.warm_sweep_clients_1.end",
+		"warm-sweep-test.warm_sweep_clients_2.start", "warm-sweep-test.warm_sweep_clients_2.end",
+	} {
+		if _, err := os.Stat(filepath.Join(markers, name)); err != nil {
+			t.Fatalf("warm sweep marker %q: %v", name, err)
+		}
+	}
+}
+
+func TestWarmClientSweepWritesEndMarkerAfterNonHitResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+	markers := t.TempDir()
+	cfg := config{
+		objects: 1, buckets: 1, clients: 1, warmSeconds: 1, warmClientSweep: []int{1},
+		warmValidateHit: true, phaseMarkerDir: markers, phaseMarkerPrefix: "warm-sweep-negative",
+	}
+	lines := metrics{}
+	if err := runWarmClientSweep(server.Client(), server.URL, cfg, &lines); err == nil {
+		t.Fatalf("non-hit response unexpectedly succeeded: %s", strings.Join(lines, "\n"))
+	}
+	if _, err := os.Stat(filepath.Join(markers, "warm-sweep-negative.warm_sweep_clients_1.end")); err != nil {
+		t.Fatalf("missing end marker after non-hit response: %v", err)
 	}
 }
 

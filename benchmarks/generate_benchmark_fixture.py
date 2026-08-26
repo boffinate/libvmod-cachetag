@@ -19,18 +19,29 @@ SCENARIOS = (
 )
 
 
-def records_for(scenario: str, objects: int, tags_per_object: int) -> list[FixtureRecord]:
+def bound_tag(kind: str, obj: int, slot: int, tags_per_object: int, tag_length_class: str) -> str:
+    if tag_length_class == "short":
+        if kind == "unique":
+            return f"u{obj * tags_per_object + slot:x}"
+        return f"s{slot:x}"
+    if tag_length_class == "long":
+        if kind == "unique":
+            return f"benchmark-long-cachetag-unique-object-{obj:010d}-slot-{slot:02d}-edge"
+        return f"benchmark-long-cachetag-shared-slot-{slot:02d}-global-edge"
+    if kind == "unique":
+        return f"bench-default-unique-object-{obj:010d}-slot-{slot:02d}"
+    return f"bench-default-shared-slot-{slot:02d}-global"
+
+
+def records_for(scenario: str, objects: int, tags_per_object: int, tag_length_class: str = "default") -> list[FixtureRecord]:
     rows: list[FixtureRecord] = []
     shared_universe = max(tags_per_object, min(64, max(1, objects // 8)))
     for obj in range(objects):
         if scenario == "mostly-unique-bound":
-            tags = tuple(
-                f"bench-default-unique-object-{obj:010d}-slot-{slot:02d}"
-                for slot in range(tags_per_object)
-            )
+            tags = tuple(bound_tag("unique", obj, slot, tags_per_object, tag_length_class) for slot in range(tags_per_object))
         elif scenario == "mostly-shared-bound":
             tags = tuple(
-                f"bench-default-shared-slot-{slot % shared_universe:02d}-global"
+                bound_tag("shared", obj, slot % shared_universe, tags_per_object, tag_length_class)
                 for slot in range(tags_per_object)
             )
         elif scenario == "uniform-cyclic":
@@ -51,11 +62,12 @@ def main() -> None:
     parser.add_argument("--scenario", choices=SCENARIOS, required=True)
     parser.add_argument("--objects", type=int, default=1000)
     parser.add_argument("--tags-per-object", type=int, default=4)
+    parser.add_argument("--tag-length-class", choices=("short", "default", "long"), default="default")
     parser.add_argument("--out-dir", type=Path, required=True)
     args = parser.parse_args()
     if args.objects <= 0 or args.tags_per_object <= 0:
         raise SystemExit("--objects and --tags-per-object must be positive")
-    records = records_for(args.scenario, args.objects, args.tags_per_object)
+    records = records_for(args.scenario, args.objects, args.tags_per_object, args.tag_length_class)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     payload = args.out_dir / f"{args.scenario}.jsonl"
     payload.write_text("".join(json.dumps({"id": row.object_id, "tags": list(row.tags)}, separators=(",", ":")) + "\n" for row in records), encoding="utf-8")

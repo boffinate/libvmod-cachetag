@@ -13,12 +13,15 @@ for script in "$repo_dir"/scripts/*.sh; do
 	sh -n "$script"
 done
 
+grep -F 'BENCH_WARM_CLIENT_SWEEP= \' "$repo_dir/scripts/benchmark-cachetag-vmod.sh" >/dev/null
+
 "$docker_cmd" run --rm \
 	-v "$repo_dir:/cachetag-host:ro" \
 	-w /cachetag-host/benchmarks \
 	"$image" \
 	sh -c '
 set -eu
+go test http_workload_driver.go http_workload_driver_test.go
 status=0
 for test in test_*.py; do
 	printf "== %s\n" "$test"

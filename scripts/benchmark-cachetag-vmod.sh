@@ -78,6 +78,16 @@ Environment:
                         load profiles, 0 to disable (default: 5)
   BENCH_WARM_PASSES     Fixed complete cyclic warm passes. Required by the
                         runtime interning decision contract (default: 0)
+  BENCH_WARM_CLIENT_SWEEP
+                        Comma-separated, sequential resident-hit client sweep
+                        after one prefill; requires unpaced warm traffic
+                        (default: blank)
+  BENCH_RESIDENT_HIT_DRIVER
+                        go (default) or oha. oha is limited to the 100k-object
+                        warm-client sweep and keeps Go prefill/residency checks.
+  BENCH_OHA_WORKER_THREADS
+                        Native oha worker threads for resident-hit sweeps
+                        (default: BENCH_DRIVER_GOMAXPROCS)
   BENCH_FELLOW_VOLATILE_FALLBACK
                         1 to create duplicate persistent provider identities
                         and force deterministic volatile fallback (default: 0)
@@ -410,6 +420,7 @@ bench_buckets=${BENCH_BUCKETS:-1024}
 bench_clients=${BENCH_CLIENTS:-1}
 bench_warm_seconds=${BENCH_WARM_SECONDS:-5}
 bench_warm_passes=${BENCH_WARM_PASSES:-0}
+bench_warm_client_sweep=${BENCH_WARM_CLIENT_SWEEP:-}
 bench_fellow_volatile_fallback=${BENCH_FELLOW_VOLATILE_FALLBACK:-0}
 bench_warm_validate_hit=${BENCH_WARM_VALIDATE_HIT:-1}
 bench_residency_validate_objects=${BENCH_RESIDENCY_VALIDATE_OBJECTS:-0}
@@ -513,6 +524,8 @@ bench_driver_gogc=${BENCH_DRIVER_GOGC:-100}
 bench_backend_gogc=${BENCH_BACKEND_GOGC:-100}
 bench_driver_gomemlimit=${BENCH_DRIVER_GOMEMLIMIT:-off}
 bench_backend_gomemlimit=${BENCH_BACKEND_GOMEMLIMIT:-off}
+bench_resident_hit_driver=${BENCH_RESIDENT_HIT_DRIVER:-go}
+bench_oha_worker_threads=${BENCH_OHA_WORKER_THREADS:-$bench_driver_gomaxprocs}
 benchmark_contract=${BENCHMARK_CONTRACT:-development-v1}
 bench_runtime_interning_decision=0
 if [ "$benchmark_contract" = runtime-interning-decision-v1 ]; then
@@ -566,6 +579,19 @@ done
 case "$bench_driver_gomaxprocs:$bench_backend_gomaxprocs:$bench_driver_gogc:$bench_backend_gogc" in
 	*[!0-9:]*) echo "GOMAXPROCS and GOGC controls must be non-negative integers" >&2; exit 2 ;;
 esac
+case "$bench_resident_hit_driver" in
+	go|oha) ;;
+	*) echo "BENCH_RESIDENT_HIT_DRIVER must be go or oha" >&2; exit 2 ;;
+esac
+case "$bench_oha_worker_threads" in
+	''|*[!0-9]*|0) echo "BENCH_OHA_WORKER_THREADS must be a positive integer" >&2; exit 2 ;;
+esac
+if [ "$bench_resident_hit_driver" = oha ]; then
+	[ "$objects" = 100000 ] || { echo "BENCH_RESIDENT_HIT_DRIVER=oha requires OBJECTS=100000" >&2; exit 2; }
+	[ -n "$bench_warm_client_sweep" ] || { echo "BENCH_RESIDENT_HIT_DRIVER=oha requires BENCH_WARM_CLIENT_SWEEP" >&2; exit 2; }
+	[ "$bench_warm_validate_hit" = 1 ] || { echo "BENCH_RESIDENT_HIT_DRIVER=oha requires BENCH_WARM_VALIDATE_HIT=1" >&2; exit 2; }
+	[ "$bench_validate_residency" = 1 ] && [ "$bench_residency_validate_objects" = 0 ] || { echo "BENCH_RESIDENT_HIT_DRIVER=oha requires full Go residency validation" >&2; exit 2; }
+fi
 bench_driver_headroom_required=${BENCH_DRIVER_HEADROOM_REQUIRED:-0}
 bench_driver_headroom_target_rps=${BENCH_DRIVER_HEADROOM_TARGET_RPS:-}
 bench_driver_headroom_proven_rps=${BENCH_DRIVER_HEADROOM_PROVEN_RPS:-}
@@ -964,6 +990,9 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "BENCH_CLIENTS=$bench_clients" \
 	-e "BENCH_WARM_SECONDS=$bench_warm_seconds" \
 	-e "BENCH_WARM_PASSES=$bench_warm_passes" \
+	-e "BENCH_WARM_CLIENT_SWEEP=$bench_warm_client_sweep" \
+	-e "BENCH_RESIDENT_HIT_DRIVER=$bench_resident_hit_driver" \
+	-e "BENCH_OHA_WORKER_THREADS=$bench_oha_worker_threads" \
 	-e "BENCH_WARM_VALIDATE_HIT=$bench_warm_validate_hit" \
 	-e "BENCH_RESIDENCY_VALIDATE_OBJECTS=$bench_residency_validate_objects" \
 	-e "BENCH_HTTP_TIMEOUT=$bench_http_timeout" \
@@ -1312,7 +1341,8 @@ for scenario in mostly-unique-bound mostly-shared-bound uniform-cyclic hot-set o
 		*,$scenario,*)
 			python3 /cachetag-host/benchmarks/generate_benchmark_fixture.py \
 				--scenario "$scenario" --objects "$OBJECTS" \
-				--tags-per-object "$TAGS_PER_OBJECT" --out-dir /results/fixtures
+				--tags-per-object "$TAGS_PER_OBJECT" \
+				--tag-length-class "$BENCH_TAG_LENGTH_CLASS" --out-dir /results/fixtures
 			;;
 	esac
 done
@@ -1320,6 +1350,10 @@ done
 if ! command -v go >/dev/null 2>&1; then
 	echo "the benchmark harness requires Go inside the benchmark container; run scripts/remote-benchmark.sh setup to build the current image" >&2
 	exit 1
+fi
+if [ "${BENCH_RESIDENT_HIT_DRIVER}" = oha ]; then
+	command -v oha >/dev/null 2>&1 || { echo "BENCH_RESIDENT_HIT_DRIVER=oha requires oha in the benchmark image" >&2; exit 1; }
+	oha --version | grep -Fx "oha 1.16.0" >/dev/null || { echo "benchmark image has an unexpected oha version" >&2; exit 1; }
 fi
 export GOCACHE=/work/go-cache
 mkdir -p "$GOCACHE"
@@ -1329,14 +1363,56 @@ go build -o /work/cachetag-benchmark-backend \
 	/cachetag-host/benchmarks/http_backend.go
 driver_command="env GOMAXPROCS=${BENCH_DRIVER_GOMAXPROCS} GOGC=${BENCH_DRIVER_GOGC} GOMEMLIMIT=${BENCH_DRIVER_GOMEMLIMIT} /work/cachetag-http-workload-driver"
 backend_command="env GOMAXPROCS=${BENCH_BACKEND_GOMAXPROCS} GOGC=${BENCH_BACKEND_GOGC} GOMEMLIMIT=${BENCH_BACKEND_GOMEMLIMIT} /work/cachetag-benchmark-backend"
+oha_command="oha"
 if [ -n "${BENCH_DRIVER_CPUSET_CPUS}" ]; then
 	driver_command="taskset -c ${BENCH_DRIVER_CPUSET_CPUS} ${driver_command}"
+	oha_command="taskset -c ${BENCH_DRIVER_CPUSET_CPUS} oha"
 fi
 if [ -n "${BENCH_BACKEND_CPUSET_CPUS}" ]; then
 	backend_command="taskset -c ${BENCH_BACKEND_CPUSET_CPUS} ${backend_command}"
 fi
 
-if [ "${BENCH_DRIVER_HEADROOM_REQUIRED}" = 1 ]; then
+if [ "${BENCH_DRIVER_HEADROOM_REQUIRED}" = 1 ] && [ "${BENCH_RESIDENT_HIT_DRIVER}" = oha ]; then
+	headroom_required_rps=$(( (BENCH_DRIVER_HEADROOM_TARGET_RPS * 120 + 99) / 100 ))
+	headroom_connections=$(printf "%s\n" "$BENCH_WARM_CLIENT_SWEEP" | tr "," "\n" | tail -n 1)
+	[ -n "$headroom_connections" ] || headroom_connections=$BENCH_CLIENTS
+	$backend_command 127.0.0.1 18081 0 > /results/driver-headroom.backend.log 2>&1 &
+	headroom_backend_pid=$!
+	for attempt in $(seq 1 100); do
+		grep -q "^ready " /results/driver-headroom.backend.log 2>/dev/null && break
+		sleep 0.05
+	done
+	grep -q "^ready " /results/driver-headroom.backend.log || { kill "$headroom_backend_pid" 2>/dev/null || true; echo "headroom backend failed to start" >&2; exit 1; }
+	if ! $oha_command -z "${BENCH_DRIVER_HEADROOM_SECONDS}s" -c "$headroom_connections" \
+		--worker-threads "$BENCH_OHA_WORKER_THREADS" --http-version 1.1 --no-tui --no-color --no-pre-lookup \
+		-w -t 2s --connect-timeout 1s --disable-compression --output-format json \
+		http://127.0.0.1:18081/__bench_trivial > /results/driver-headroom.oha.json; then
+		kill "$headroom_backend_pid" 2>/dev/null || true
+		echo "oha driver headroom workload failed" >&2
+		exit 1
+	fi
+	kill "$headroom_backend_pid" 2>/dev/null || true
+	wait "$headroom_backend_pid" 2>/dev/null || true
+	headroom_achieved=$(python3 - <<PY
+import json
+with open("/results/driver-headroom.oha.json", encoding="utf-8") as handle:
+    result = json.load(handle)
+if result["statusCodeDistribution"] != {"200": sum(result["statusCodeDistribution"].values())}:
+    raise SystemExit("oha headroom observed a non-200 response")
+if sum(result["errorDistribution"].values()) != 0:
+    raise SystemExit("oha headroom recorded request errors")
+print(result["summary"]["requestsPerSec"])
+PY
+)
+	awk -v actual="$headroom_achieved" -v required="$headroom_required_rps" "BEGIN { exit !(actual >= required) }" || {
+		echo "oha driver headroom achieved $headroom_achieved RPS, requires $headroom_required_rps" >&2
+		exit 1
+	}
+	BENCH_DRIVER_HEADROOM_PROVEN_RPS=$headroom_achieved
+	export BENCH_DRIVER_HEADROOM_PROVEN_RPS
+fi
+
+if [ "${BENCH_DRIVER_HEADROOM_REQUIRED}" = 1 ] && [ "${BENCH_RESIDENT_HIT_DRIVER}" != oha ]; then
 	headroom_required_rps=$(( (BENCH_DRIVER_HEADROOM_TARGET_RPS * 120 + 99) / 100 ))
 	# Probe above the admission boundary. A finite slot schedule at exactly the
 	# required rate reports fractionally less once start/stop overhead is part
@@ -1355,6 +1431,7 @@ if [ "${BENCH_DRIVER_HEADROOM_REQUIRED}" = 1 ]; then
 	if ! BENCH_CONCURRENT_TARGET_RPS="$headroom_probe_rps" \
 		BENCH_CONCURRENT_SECONDS="$BENCH_DRIVER_HEADROOM_SECONDS" \
 		BENCH_CONCURRENT_READERS="$BENCH_CLIENTS" BENCH_HEADROOM_PATH=/__bench_trivial \
+		BENCH_WARM_CLIENT_SWEEP= \
 		$driver_command 127.0.0.1 18081 1 driver-headroom explicit-purge 1 none /results/driver-headroom.driver; then
 		kill "$headroom_backend_pid" 2>/dev/null || true
 		echo "driver headroom workload failed" >&2
@@ -1670,6 +1747,9 @@ fi
 	printf "bench_clients=%s\n" "$BENCH_CLIENTS"
 		printf "bench_warm_seconds=%s\n" "$BENCH_WARM_SECONDS"
 		printf "bench_warm_passes=%s\n" "$BENCH_WARM_PASSES"
+		printf "bench_warm_client_sweep=%s\n" "$BENCH_WARM_CLIENT_SWEEP"
+		printf "bench_resident_hit_driver=%s\n" "$BENCH_RESIDENT_HIT_DRIVER"
+		printf "bench_oha_worker_threads=%s\n" "$BENCH_OHA_WORKER_THREADS"
 		printf "bench_fellow_volatile_fallback=%s\n" "$BENCH_FELLOW_VOLATILE_FALLBACK"
 	printf "bench_warm_validate_hit=%s\n" "$BENCH_WARM_VALIDATE_HIT"
 	printf "bench_residency_validate_objects=%s\n" "$BENCH_RESIDENCY_VALIDATE_OBJECTS"

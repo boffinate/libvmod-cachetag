@@ -103,6 +103,23 @@ class MatchedArmVclTest(unittest.TestCase):
         self.assertIn("set beresp.grace = 0s;", vcl)
         self.assertIn("set beresp.keep = 0s;", vcl)
 
+    def test_resident_probe_converts_a_miss_to_a_non_success_response_in_all_arms(self) -> None:
+        cachetag = cachetag_vcl()
+        xkey = StringIO()
+        write_xkey_vcl(
+            xkey, "256m", "24h", 4, "127.0.0.1", 18080, "default",
+            "1G", "1M", "64K", "1G", 0, "", "", "",
+        )
+        noindex = StringIO()
+        write_noindex_vcl(
+            noindex, "256m", 4, "127.0.0.1", 18080, "default",
+            "1G", "1M", "64K", "1G", 0, "", "", "",
+        )
+        expected = 'if (req.http.X-Bench-Resident-Probe == "1") {\n\t\t\treturn (synth(503));'
+        for arm, vcl in (("cachetag", cachetag), ("xkey", xkey.getvalue()), ("noindex", noindex.getvalue())):
+            with self.subTest(arm=arm):
+                self.assertIn(expected, vcl)
+
 
 class StaleDeliverKnobTest(unittest.TestCase):
     """BENCH_STALE_DELIVER selects the documented two-call `stale()` shape."""

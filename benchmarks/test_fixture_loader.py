@@ -44,6 +44,12 @@ class FixtureLoaderTest(unittest.TestCase):
                 self.assertGreaterEqual(min(lengths), 20)
                 self.assertLessEqual(max(lengths), 50)
 
+    def test_bound_tags_match_the_declared_long_length_class(self) -> None:
+        for scenario in ("mostly-unique-bound", "mostly-shared-bound"):
+            with self.subTest(scenario=scenario):
+                rows = records_for(scenario, objects=2, tags_per_object=4, tag_length_class="long")
+                self.assertGreaterEqual(min(len(tag) for row in rows for tag in row.tags), 50)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -34,6 +37,9 @@ type config struct {
 	clients                      int
 	warmSeconds                  int
 	warmPasses                   int
+	warmClientSweep              []int
+	residentHitDriver            string
+	ohaWorkerThreads             int
 	warmValidateHit              bool
 	residencyValidate            int
 	churnCycles                  int
@@ -374,6 +380,36 @@ func envPercent(name string, def int) (int, error) {
 	return value, nil
 }
 
+func envAscendingPositiveIntList(name string) ([]int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil, nil
+	}
+	values := strings.Split(raw, ",")
+	result := make([]int, 0, len(values))
+	previous := 0
+	for _, value := range values {
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || parsed <= 0 {
+			return nil, fmt.Errorf("%s must be a comma-separated list of positive integers", name)
+		}
+		if parsed <= previous {
+			return nil, fmt.Errorf("%s must be strictly ascending", name)
+		}
+		result = append(result, parsed)
+		previous = parsed
+	}
+	return result, nil
+}
+
+func commaSeparatedInts(values []int) string {
+	parts := make([]string, len(values))
+	for index, value := range values {
+		parts[index] = strconv.Itoa(value)
+	}
+	return strings.Join(parts, ",")
+}
+
 func usageSeconds(tv syscall.Timeval) float64 {
 	return float64(tv.Sec) + float64(tv.Usec)/1_000_000
 }
@@ -663,6 +699,33 @@ func parseConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	warmClientSweep, err := envAscendingPositiveIntList("BENCH_WARM_CLIENT_SWEEP")
+	if err != nil {
+		return config{}, err
+	}
+	if len(warmClientSweep) > 0 && warmPasses > 0 {
+		return config{}, fmt.Errorf("BENCH_WARM_CLIENT_SWEEP cannot be combined with BENCH_WARM_PASSES")
+	}
+	if len(warmClientSweep) > 0 && warmSeconds <= 0 {
+		return config{}, fmt.Errorf("BENCH_WARM_CLIENT_SWEEP requires positive BENCH_WARM_SECONDS")
+	}
+	residentHitDriver := os.Getenv("BENCH_RESIDENT_HIT_DRIVER")
+	if residentHitDriver == "" {
+		residentHitDriver = "go"
+	}
+	if residentHitDriver != "go" && residentHitDriver != "oha" {
+		return config{}, fmt.Errorf("BENCH_RESIDENT_HIT_DRIVER must be go or oha")
+	}
+	if residentHitDriver == "oha" && len(warmClientSweep) == 0 {
+		return config{}, fmt.Errorf("BENCH_RESIDENT_HIT_DRIVER=oha requires BENCH_WARM_CLIENT_SWEEP")
+	}
+	if residentHitDriver == "oha" && objects != 100000 {
+		return config{}, fmt.Errorf("BENCH_RESIDENT_HIT_DRIVER=oha requires OBJECTS=100000 for its exact /obj/000[0-9]{5} resident set")
+	}
+	ohaWorkerThreads, err := envInt("BENCH_OHA_WORKER_THREADS", runtime.GOMAXPROCS(0))
+	if err != nil {
+		return config{}, err
+	}
 	phaseControlRequired, err := envBool("BENCH_PHASE_CONTROL_REQUIRED", false)
 	if err != nil {
 		return config{}, err
@@ -671,6 +734,9 @@ func parseConfig() (config, error) {
 	phaseControlAckFIFO := os.Getenv("BENCH_PHASE_CONTROL_ACK_FIFO")
 	if phaseControlRequired && (phaseControlRequestFIFO == "" || phaseControlAckFIFO == "") {
 		return config{}, fmt.Errorf("BENCH_PHASE_CONTROL_REQUIRED needs request and acknowledgement FIFOs")
+	}
+	if phaseControlRequired && len(warmClientSweep) > 0 {
+		return config{}, fmt.Errorf("BENCH_WARM_CLIENT_SWEEP cannot use BENCH_PHASE_CONTROL_REQUIRED")
 	}
 	warmValidateHit, err := envBool("BENCH_WARM_VALIDATE_HIT", true)
 	if err != nil {
@@ -779,6 +845,9 @@ func parseConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	if len(warmClientSweep) > 0 && concurrentTargetRPS != 0 {
+		return config{}, fmt.Errorf("BENCH_WARM_CLIENT_SWEEP requires BENCH_CONCURRENT_TARGET_RPS=0")
+	}
 	purgeStormRate, err := envInt("BENCH_PURGE_STORM_RATE", concurrentPurgeRate)
 	if err != nil {
 		return config{}, err
@@ -871,6 +940,9 @@ func parseConfig() (config, error) {
 	validateResidency, err := envBool("BENCH_VALIDATE_RESIDENCY", true)
 	if err != nil {
 		return config{}, err
+	}
+	if residentHitDriver == "oha" && (!validateResidency || residencyValidate != 0) {
+		return config{}, fmt.Errorf("BENCH_RESIDENT_HIT_DRIVER=oha requires full Go residency validation")
 	}
 	evictionValidate, err := envInt("BENCH_EVICTION_VALIDATE_OBJECTS", 1000)
 	if err != nil {
@@ -965,8 +1037,11 @@ func parseConfig() (config, error) {
 		metricsPath:                  os.Args[8],
 		buckets:                      buckets,
 		clients:                      clients,
-			warmSeconds:                  warmSeconds,
-			warmPasses:                   warmPasses,
+		warmSeconds:                  warmSeconds,
+		warmPasses:                   warmPasses,
+		warmClientSweep:              warmClientSweep,
+		residentHitDriver:            residentHitDriver,
+		ohaWorkerThreads:             ohaWorkerThreads,
 		warmValidateHit:              warmValidateHit,
 		residencyValidate:            residencyValidate,
 		churnCycles:                  churnCycles,
@@ -1010,10 +1085,10 @@ func parseConfig() (config, error) {
 		evictionValidate:             evictionValidate,
 		disableKeepAlives:            disableKeepAlives,
 		phaseMarkerDir:               os.Getenv("BENCH_PHASE_MARKER_DIR"),
-			phaseMarkerPrefix:            os.Getenv("BENCH_PHASE_MARKER_PREFIX"),
-			phaseControlRequired:         phaseControlRequired,
-			phaseControlRequestFIFO:      phaseControlRequestFIFO,
-			phaseControlAckFIFO:          phaseControlAckFIFO,
+		phaseMarkerPrefix:            os.Getenv("BENCH_PHASE_MARKER_PREFIX"),
+		phaseControlRequired:         phaseControlRequired,
+		phaseControlRequestFIFO:      phaseControlRequestFIFO,
+		phaseControlAckFIFO:          phaseControlAckFIFO,
 		churnCompactEachCycle:        churnCompactEachCycle,
 		storageKind:                  storageKind,
 		cacheTagPersist:              cacheTagPersist,
@@ -2608,50 +2683,204 @@ func runFixedWarmHits(client *http.Client, baseURL string, cfg config, lines *me
 	return finishErr
 }
 
-func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics) error {
-	if cfg.warmPasses > 0 {
-		return runFixedWarmHits(client, baseURL, cfg, lines)
+type warmTimedResult struct {
+	requests    int64
+	hits        int64
+	misses      int64
+	errors      int64
+	wallSeconds float64
+}
+
+type ohaResult struct {
+	Summary struct {
+		RequestsPerSecond float64 `json:"requestsPerSec"`
+		Slowest           float64 `json:"slowest"`
+	} `json:"summary"`
+	LatencyPercentiles map[string]float64 `json:"latencyPercentiles"`
+	StatusCodes        map[string]int64   `json:"statusCodeDistribution"`
+	Errors             map[string]int64   `json:"errorDistribution"`
+}
+
+func ohaResultPath(metricsPath, prefix string) string {
+	return strings.TrimSuffix(metricsPath, ".driver") + "." + strings.TrimPrefix(prefix, "driver_") + ".oha.json"
+}
+
+func emitOhaLatency(prefix, jsonPath string, result ohaResult, lines *metrics) {
+	lines.add(prefix+"_latency_sampling_method", "oha-json-histogram-v1")
+	lines.add(prefix+"_oha_json_path", jsonPath)
+	lines.add(prefix+"_latency_p50_seconds", result.LatencyPercentiles["p50"])
+	lines.add(prefix+"_latency_p95_seconds", result.LatencyPercentiles["p95"])
+	lines.add(prefix+"_latency_p99_seconds", result.LatencyPercentiles["p99"])
+	lines.add(prefix+"_latency_p999_seconds", result.LatencyPercentiles["p99.9"])
+	lines.add(prefix+"_latency_max_seconds", result.Summary.Slowest)
+}
+
+// runOhaWarmHits keeps prefill and residency validation in the Go driver, so
+// oha only measures the concurrent resident request stream. The probe header
+// turns any unexpected miss into a non-2xx response in the generated VCL.
+func runOhaWarmHits(baseURL string, cfg config, lines *metrics, phase, prefix string) (result warmTimedResult, err error) {
+	start := beginPhase(lines, phase)
+	if err = writePhaseMarker(cfg, phase, "start"); err != nil {
+		return result, err
 	}
-	if cfg.warmSeconds <= 0 {
-		lines.add("driver_warm_enabled", false)
-		return nil
+	jsonPath := ohaResultPath(cfg.metricsPath, prefix)
+	defer func() {
+		if markerErr := writePhaseMarker(cfg, phase, "end"); err == nil {
+			err = markerErr
+		}
+		result.wallSeconds = time.Since(start).Seconds()
+		lines.add(prefix+"_enabled", true)
+		lines.add(prefix+"_seconds_requested", cfg.warmSeconds)
+		lines.add(prefix+"_target_rps", 0)
+		lines.add(prefix+"_validate_hit", true)
+		lines.add(prefix+"_driver", "oha-v1.16.0")
+		lines.add(prefix+"_worker_threads", cfg.ohaWorkerThreads)
+		lines.add(prefix+"_access_pattern", "random-uniform-100k-regex-v1")
+		lines.add(prefix+"_wall_seconds", result.wallSeconds)
+		lines.add(prefix+"_requests", result.requests)
+		if result.wallSeconds > 0 {
+			lines.add(prefix+"_requests_per_second", float64(result.requests)/result.wallSeconds)
+		}
+		lines.add(prefix+"_hits", result.hits)
+		lines.add(prefix+"_misses", result.misses)
+		lines.add(prefix+"_errors", result.errors)
+		lines.add(prefix+"_pacing_schema", "unpaced-oha-v1")
+		recordPhaseSeconds(lines, phase, start)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.warmSeconds+cfg.httpTimeout+30)*time.Second)
+	defer cancel()
+	args := []string{
+		"-z", fmt.Sprintf("%ds", cfg.warmSeconds),
+		"-c", strconv.Itoa(cfg.clients),
+		"--worker-threads", strconv.Itoa(cfg.ohaWorkerThreads),
+		"--http-version", "1.1",
+		"--no-tui",
+		"--no-color",
+		"--no-pre-lookup",
+		"--wait-ongoing-requests-after-deadline",
+		"-t", "2s",
+		"--connect-timeout", "1s",
+		"--disable-compression",
+		"--stats-success-breakdown",
+		"--output-format", "json",
+		"--rand-regex-url",
+		"-H", "X-Bench-Resident-Probe: 1",
+		baseURL + "/obj/000[0-9]{5}",
 	}
-	start, err := startMeasuredPhase(cfg, lines, "warm")
+	command := exec.CommandContext(ctx, "oha", args...)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, commandErr := command.Output()
+	if writeErr := os.WriteFile(jsonPath, output, 0644); writeErr != nil {
+		return result, fmt.Errorf("write oha JSON: %w", writeErr)
+	}
+	if commandErr != nil {
+		return result, fmt.Errorf("oha failed: %w: %s", commandErr, strings.TrimSpace(stderr.String()))
+	}
+	var parsed ohaResult
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		return result, fmt.Errorf("decode oha JSON: %w", err)
+	}
+	var statusRequests int64
+	for _, count := range parsed.StatusCodes {
+		statusRequests += count
+	}
+	for _, count := range parsed.Errors {
+		result.errors += count
+	}
+	result.requests = statusRequests + result.errors
+	result.hits = parsed.StatusCodes["200"]
+	result.misses = statusRequests - result.hits
+	emitOhaLatency(prefix, jsonPath, parsed, lines)
+	lines.add(prefix+"_oha_reported_requests_per_second", parsed.Summary.RequestsPerSecond)
+	lines.add(prefix+"_oha_status_code_distribution", formatCountMap(parsed.StatusCodes))
+	lines.add(prefix+"_oha_error_distribution", formatCountMap(parsed.Errors))
+	if result.requests == 0 || result.errors != 0 || len(parsed.StatusCodes) != 1 || result.hits != statusRequests {
+		return result, fmt.Errorf("oha resident-hit validation failed requests=%d hits=%d non_200=%d errors=%d", result.requests, result.hits, result.misses, result.errors)
+	}
+	return result, nil
+}
+
+func formatCountMap(counts map[string]int64) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+":"+strconv.FormatInt(counts[key], 10))
+	}
+	return strings.Join(parts, ",")
+}
+
+func runTimedWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics, phase, prefix string, controlled bool) (result warmTimedResult, err error) {
+	var start time.Time
+	if controlled {
+		start, err = startMeasuredPhase(cfg, lines, phase)
+	} else {
+		start = beginPhase(lines, phase)
+		err = writePhaseMarker(cfg, phase, "start")
+	}
 	if err != nil {
-		return err
+		return result, err
 	}
-	deadline := time.Now().Add(time.Duration(cfg.warmSeconds) * time.Second)
 	latencies := newLatencyRecorder(200000)
+	pacing := pacingStats{}
+	defer func() {
+		if !controlled {
+			if finishErr := writePhaseMarker(cfg, phase, "end"); err == nil {
+				err = finishErr
+			}
+		}
+		result.wallSeconds = time.Since(start).Seconds()
+		lines.add(prefix+"_enabled", true)
+		lines.add(prefix+"_seconds_requested", cfg.warmSeconds)
+		lines.add(prefix+"_target_rps", cfg.concurrentTargetRPS)
+		lines.add(prefix+"_validate_hit", cfg.warmValidateHit)
+		lines.add(prefix+"_wall_seconds", result.wallSeconds)
+		lines.add(prefix+"_requests", result.requests)
+		if result.wallSeconds > 0 {
+			lines.add(prefix+"_requests_per_second", float64(result.requests)/result.wallSeconds)
+		}
+		lines.add(prefix+"_hits", result.hits)
+		lines.add(prefix+"_misses", result.misses)
+		lines.add(prefix+"_errors", result.errors)
+		pacing.emit(prefix+"_pacing", cfg.concurrentTargetRPS, result.wallSeconds, lines)
+		latencies.emit(prefix, lines)
+		if !controlled {
+			recordPhaseSeconds(lines, phase, start)
+		}
+	}()
+	deadline := time.Now().Add(time.Duration(cfg.warmSeconds) * time.Second)
 	type warmWorkerResult struct {
-		recorder *latencyRecorder
-		requests int64
-		hits     int64
-		misses   int64
-		errors   int64
+		recorder                       *latencyRecorder
+		requests, hits, misses, errors int64
 	}
 	workerResults := make([]warmWorkerResult, cfg.clients)
 	perWorkerLimit := workerLatencyLimit(latencies.limit, cfg.clients)
 	gate := newOperationGate(cfg.concurrentTargetRPS)
-	pacing := pacingStats{}
 	var firstErr error
 	var firstErrMu sync.Mutex
 	stop := make(chan struct{})
 	var stopOnce sync.Once
 	var wg sync.WaitGroup
-
-	recordErr := func(local *warmWorkerResult, err error) {
-		if err == nil {
+	recordErr := func(local *warmWorkerResult, workErr error) {
+		if workErr == nil {
 			return
 		}
 		local.errors++
 		firstErrMu.Lock()
 		if firstErr == nil {
-			firstErr = err
+			firstErr = workErr
 		}
 		firstErrMu.Unlock()
 		stopOnce.Do(func() { close(stop) })
 	}
-
 	for worker := 0; worker < cfg.clients; worker++ {
 		wg.Add(1)
 		go func(workerID int) {
@@ -2674,11 +2903,11 @@ func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics
 				// A worker-local stride avoids an atomic request allocator on every
 				// warm request while retaining deterministic coverage of all objects.
 				t0 := time.Now()
-				resp, err := objectRequest(client, baseURL, cfg, obj)
+				resp, requestErr := objectRequest(client, baseURL, cfg, obj)
 				local.recorder.add(time.Since(t0))
-				if err != nil {
+				if requestErr != nil {
 					pacing.completed(false)
-					recordErr(&local, err)
+					recordErr(&local, requestErr)
 					return
 				}
 				local.requests++
@@ -2699,40 +2928,84 @@ func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics
 		}(worker)
 	}
 	wg.Wait()
-	var requests, hits, misses, errors int64
 	for worker := range workerResults {
 		local := &workerResults[worker]
-		requests += local.requests
-		hits += local.hits
-		misses += local.misses
-		errors += local.errors
+		result.requests += local.requests
+		result.hits += local.hits
+		result.misses += local.misses
+		result.errors += local.errors
 		latencies.mergeRecorder(local.recorder)
 	}
-	finishErr := finishMeasuredPhase(cfg, "warm")
-
-	seconds := time.Since(start).Seconds()
-	lines.add("driver_warm_enabled", true)
-	lines.add("driver_warm_seconds_requested", cfg.warmSeconds)
-	lines.add("driver_warm_target_rps", cfg.concurrentTargetRPS)
-	lines.add("driver_warm_validate_hit", cfg.warmValidateHit)
-	lines.add("driver_warm_wall_seconds", seconds)
-	lines.add("driver_warm_requests", requests)
-	if seconds > 0 {
-		lines.add("driver_warm_requests_per_second", float64(requests)/seconds)
-	}
-	lines.add("driver_warm_hits", hits)
-	lines.add("driver_warm_misses", misses)
-	lines.add("driver_warm_errors", errors)
-	pacing.emit("driver_warm_pacing", cfg.concurrentTargetRPS, seconds, lines)
-	latencies.emit("driver_warm", lines)
-
 	firstErrMu.Lock()
 	err = firstErr
 	firstErrMu.Unlock()
-	if err != nil {
-		return err
+	if controlled {
+		if finishErr := finishMeasuredPhase(cfg, phase); err == nil {
+			err = finishErr
+		}
 	}
-	return finishErr
+	return result, err
+}
+
+func runWarmClientSweep(client *http.Client, baseURL string, cfg config, lines *metrics) (err error) {
+	var aggregate warmTimedResult
+	lines.add("driver_warm_enabled", true)
+	lines.add("driver_warm_fixed_work", false)
+	lines.add("driver_warm_client_sweep_enabled", true)
+	lines.add("driver_warm_client_sweep_clients", commaSeparatedInts(cfg.warmClientSweep))
+	lines.add("driver_warm_client_sweep_points", len(cfg.warmClientSweep))
+	lines.add("driver_warm_seconds_requested", cfg.warmSeconds)
+	lines.add("driver_warm_target_rps", 0)
+	lines.add("driver_warm_validate_hit", cfg.warmValidateHit)
+	lines.add("driver_warm_aggregate_rps_semantics", "sequential-point-total-requests/total-point-wall")
+	lines.add("driver_warm_aggregate_latency_semantics", "not-combined; see per-point latency metrics")
+	defer func() {
+		lines.add("driver_warm_requests", aggregate.requests)
+		lines.add("driver_warm_hits", aggregate.hits)
+		lines.add("driver_warm_misses", aggregate.misses)
+		lines.add("driver_warm_errors", aggregate.errors)
+		lines.add("driver_warm_wall_seconds", aggregate.wallSeconds)
+		if aggregate.wallSeconds > 0 {
+			lines.add("driver_warm_requests_per_second", float64(aggregate.requests)/aggregate.wallSeconds)
+		}
+	}()
+	for _, clients := range cfg.warmClientSweep {
+		pointCfg := cfg
+		pointCfg.clients = clients
+		phase := fmt.Sprintf("warm-sweep-clients-%d", clients)
+		prefix := fmt.Sprintf("driver_warm_sweep_clients_%d", clients)
+		var point warmTimedResult
+		var pointErr error
+		if pointCfg.residentHitDriver == "oha" {
+			point, pointErr = runOhaWarmHits(baseURL, pointCfg, lines, phase, prefix)
+		} else {
+			point, pointErr = runTimedWarmHits(client, baseURL, pointCfg, lines, phase, prefix, false)
+		}
+		aggregate.requests += point.requests
+		aggregate.hits += point.hits
+		aggregate.misses += point.misses
+		aggregate.errors += point.errors
+		aggregate.wallSeconds += point.wallSeconds
+		if pointErr != nil {
+			return pointErr
+		}
+	}
+	return nil
+}
+
+func runWarmHits(client *http.Client, baseURL string, cfg config, lines *metrics) error {
+	if len(cfg.warmClientSweep) > 0 {
+		return runWarmClientSweep(client, baseURL, cfg, lines)
+	}
+	if cfg.warmPasses > 0 {
+		return runFixedWarmHits(client, baseURL, cfg, lines)
+	}
+	if cfg.warmSeconds <= 0 {
+		lines.add("driver_warm_enabled", false)
+		return nil
+	}
+	_, err := runTimedWarmHits(client, baseURL, cfg, lines, "warm", "driver_warm", true)
+	return err
 }
 
 func runLoad(client *http.Client, baseURL string, cfg config, lines *metrics) error {
@@ -5490,7 +5763,13 @@ func main() {
 	}
 	setLatencyArtifactMetricsPath(cfg.metricsPath)
 	cfg.originEpoch = newOriginEpochController()
-	maxConns := cfg.clients + cfg.concurrentReaders + cfg.concurrentWriters + cfg.concurrentPurgers + 4
+	maxWarmClients := cfg.clients
+	for _, clients := range cfg.warmClientSweep {
+		if clients > maxWarmClients {
+			maxWarmClients = clients
+		}
+	}
+	maxConns := maxWarmClients + cfg.concurrentReaders + cfg.concurrentWriters + cfg.concurrentPurgers + 4
 	transport := &http.Transport{
 		MaxIdleConns:        maxConns * 2,
 		MaxIdleConnsPerHost: maxConns * 2,
@@ -5526,6 +5805,9 @@ func main() {
 	lines.add("driver_runtime_gomemlimit", os.Getenv("GOMEMLIMIT"))
 	lines.add("driver_warm_seconds_configured", cfg.warmSeconds)
 	lines.add("driver_warm_passes_configured", cfg.warmPasses)
+	lines.add("driver_warm_client_sweep_configured", commaSeparatedInts(cfg.warmClientSweep))
+	lines.add("driver_resident_hit_driver", cfg.residentHitDriver)
+	lines.add("driver_oha_worker_threads", cfg.ohaWorkerThreads)
 	lines.add("driver_warm_validate_hit_configured", cfg.warmValidateHit)
 	lines.add("driver_allow_stale_after_purge", cfg.allowStaleAfterPurge)
 	lines.add("driver_validate_residency", cfg.validateResidency)
