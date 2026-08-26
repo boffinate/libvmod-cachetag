@@ -236,6 +236,8 @@ emit_record() {
 	build_cflags=$(require_flag_env BUILD_PROVENANCE_CFLAGS)
 	build_cppflags=$(require_flag_env BUILD_PROVENANCE_CPPFLAGS)
 	build_ldflags=$(require_flag_env BUILD_PROVENANCE_LDFLAGS)
+	build_vinyl_profile=$(require_env BUILD_PROVENANCE_VINYL_PROFILE)
+	build_vinyl_cflags=$(require_flag_env BUILD_PROVENANCE_VINYL_CFLAGS)
 	harness_src=$(require_env BUILD_PROVENANCE_HARNESS_SRC)
 	code_generation=$(require_env BUILD_PROVENANCE_CODE_GENERATION)
 	legacy_set_interning=$(require_env BUILD_PROVENANCE_LEGACY_SET_INTERNING)
@@ -284,6 +286,8 @@ emit_record() {
 	printf 'build_cflags=%s\n' "$build_cflags"
 	printf 'build_cppflags=%s\n' "$build_cppflags"
 	printf 'build_ldflags=%s\n' "$build_ldflags"
+	printf 'build_vinyl_profile=%s\n' "$build_vinyl_profile"
+	printf 'build_vinyl_cflags=%s\n' "$build_vinyl_cflags"
 	printf 'code_generation=%s\n' "$code_generation"
 	printf 'legacy_set_interning=%s\n' "$legacy_set_interning"
 	printf 'cachetag_configure_args=%s\n' "$cachetag_configure_args"
@@ -348,7 +352,7 @@ verify_record() {
 	check_hash vinyl_binary_sha256 "$(sha_file "$vinyl_binary")"
 	check_hash xkey_binary_sha256 "$(sha_file "$xkey_binary")"
 	check_hash build_commands_sha256 "$(sha_file "$commands")"
-	for key in BUILD_PROVENANCE_CFLAGS BUILD_PROVENANCE_CPPFLAGS BUILD_PROVENANCE_LDFLAGS; do
+	for key in BUILD_PROVENANCE_CFLAGS BUILD_PROVENANCE_CPPFLAGS BUILD_PROVENANCE_LDFLAGS BUILD_PROVENANCE_VINYL_PROFILE BUILD_PROVENANCE_VINYL_CFLAGS; do
 		value=$(require_flag_env "$key")
 		record_key=$(printf '%s' "$key" | sed 's/^BUILD_PROVENANCE_/build_/; y/ABCDEFGHIJKLMNOPQRSTUVWXYZ/abcdefghijklmnopqrstuvwxyz/')
 		test "$value" = "$(read_field "$record_key" "$file")" || die "$record_key changed"

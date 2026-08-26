@@ -54,6 +54,10 @@ Environment:
   CACHE_TAG_BENCH_BUILD_CFLAGS
                            Override BENCH_BUILD_CFLAGS for the cachetag/xkey
                            VMOD build (default: benchmark default)
+  CACHE_TAG_VINYL_BUILD_PROFILE
+                           BENCH_VINYL_BUILD_PROFILE for the Vinyl build:
+                           optimized (-O2, default) or debug (historic
+                           --enable-debugging-symbols, -O0 -fno-inline)
   CACHE_TAG_BENCH_PERF_RECORD
                            Pass BENCH_PERF_RECORD to the benchmark container
                            for opt-in perf record profiling (default: empty)
@@ -459,6 +463,7 @@ bench_code_generation_override=${CACHE_TAG_BENCH_CODE_GENERATION:-}
 bench_runtime_set_interning_override=${CACHE_TAG_BENCH_RUNTIME_SET_INTERNING:-}
 bench_legacy_set_interning_override=${CACHE_TAG_BENCH_LEGACY_SET_INTERNING:-}
 bench_build_cflags_override=${CACHE_TAG_BENCH_BUILD_CFLAGS:-}
+vinyl_build_profile_override=${CACHE_TAG_VINYL_BUILD_PROFILE:-}
 # Retained only because the quoted remote environment line is a stable public
 # transport surface. The benchmark harness no longer consumes or honours it.
 allow_stale_build=
@@ -566,6 +571,7 @@ remote_sh() {
 		printf 'CACHE_TAG_RESIDENT_HIT_DRIVER=%s\n' "$(quote "$resident_hit_driver_override")"
 		printf 'CACHE_TAG_OHA_WORKER_THREADS=%s\n' "$(quote "$oha_worker_threads_override")"
 		printf 'CACHE_TAG_BENCH_BUILD_CFLAGS=%s\n' "$(quote "$bench_build_cflags_override")"
+		printf 'CACHE_TAG_VINYL_BUILD_PROFILE=%s\n' "$(quote "$vinyl_build_profile_override")"
 		printf 'CACHE_TAG_DECISION_SHARED_LOAD_BUDGET_PERCENT=%s\n' "$(quote "$decision_shared_load_budget")"
 		printf 'CACHE_TAG_DECISION_SHARED_WARM_BUDGET_PERCENT=%s\n' "$(quote "$decision_shared_warm_budget")"
 		printf 'CACHE_TAG_DECISION_UNIQUE_LOAD_BUDGET_PERCENT=%s\n' "$(quote "$decision_unique_load_budget")"
@@ -669,7 +675,6 @@ sync_checkout() {
 		--exclude='config.log' \
 		--exclude='config.status' \
 		--exclude='configure' \
-		--exclude='docs' \
 		--exclude='benchmarks/results' \
 		--exclude='benchmarks/remote-results' \
 		--exclude='libvmod-cachetag-*.tar.gz' \
@@ -1217,6 +1222,9 @@ fi
 if [ -n "\$CACHE_TAG_OHA_WORKER_THREADS" ]; then
 	envs="\$envs BENCH_OHA_WORKER_THREADS=\$CACHE_TAG_OHA_WORKER_THREADS"
 fi
+if [ -n "\$CACHE_TAG_VINYL_BUILD_PROFILE" ]; then
+	envs="\$envs BENCH_VINYL_BUILD_PROFILE=\$CACHE_TAG_VINYL_BUILD_PROFILE"
+fi
 if [ -n "\$CACHE_TAG_RUNS_OVERRIDE" ]; then
 	envs="\$envs RUNS=\$CACHE_TAG_RUNS_OVERRIDE"
 fi
@@ -1448,6 +1456,7 @@ cat "\$result_dir/governor-gate.env"
 	printf 'bench_warm_client_sweep=%s\n' "\${CACHE_TAG_BENCH_WARM_CLIENT_SWEEP:-}"
 	printf 'bench_resident_hit_driver=%s\n' "\${CACHE_TAG_RESIDENT_HIT_DRIVER:-}"
 	printf 'bench_oha_worker_threads=%s\n' "\${CACHE_TAG_OHA_WORKER_THREADS:-}"
+	printf 'vinyl_build_profile=%s\n' "\${CACHE_TAG_VINYL_BUILD_PROFILE:-}"
 	printf 'remote_dir=%s\n' "\$remote_dir"
 	printf 'docker_command=%s\n' "\$docker_cmd"
 	printf 'docker_run_args=%s\n' "\$REMOTE_DOCKER_RUN_ARGS"

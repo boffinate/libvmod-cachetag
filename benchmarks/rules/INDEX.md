@@ -5,7 +5,7 @@ status. These exist because interpretation mistakes here have each cost half a
 day or more — read this index before designing or interpreting any benchmark.
 
 **Checklist convention:** every campaign note and report opens with a line
-`Rules reviewed: BR-001..BR-026; applicable: BR-xxx (complied), ...` citing the
+`Rules reviewed: BR-001..BR-027; applicable: BR-xxx (complied), ...` citing the
 rules that constrain that campaign. A rule that is applicable but not complied
 with must say why.
 
@@ -46,6 +46,7 @@ feature.
 - [BR-024](BR-024-same-code-noise-floor.md) — establish a repeated same-code noise floor and complete metric-specific coverage before judging deltas
 - [BR-025](BR-025-cpu-frequency-and-power-state.md) — record CPU governor/boost state; drift is a cohort change
 - [BR-026](BR-026-campaign-scope-and-evidence-budget.md) — freeze how much evidence is enough before remote execution; do not silently promote a screen into an acceptance campaign
+- [BR-027](BR-027-measured-binary-optimisation-level.md) — record the optimisation flags of every measured binary; never judge or profile a `-O0`/`-fno-inline` build
 
 ## Memory interpretation
 

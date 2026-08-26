@@ -46,6 +46,14 @@ Environment:
                         and xkey VMODs (default: empty)
   BENCH_BUILD_LDFLAGS   Explicit common linker flags for the cachetag and
                         xkey VMODs (default: empty)
+  BENCH_VINYL_BUILD_PROFILE
+                        optimized to configure Vinyl without
+                        --enable-debugging-symbols and with
+                        CFLAGS="-O2 -g -fno-omit-frame-pointer", or debug for
+                        the historic --enable-debugging-symbols build, which
+                        Vinyl's configure.ac turns into -O0 -g -fno-inline
+                        (default: optimized). debug rows are not performance
+                        evidence (benchmarks/rules/BR-027).
   RUN_NOINDEX           1 to run no-index load baseline, 0 to skip
                         (default: 1)
   BENCHMARK_CONTRACT    development-v1, comparison-v1,
@@ -673,6 +681,14 @@ bench_stale_deliver=${BENCH_STALE_DELIVER:-0}
 bench_build_cflags=${BENCH_BUILD_CFLAGS:--O2 -g}
 bench_build_cppflags=${BENCH_BUILD_CPPFLAGS:-}
 bench_build_ldflags=${BENCH_BUILD_LDFLAGS:-}
+bench_vinyl_build_profile=${BENCH_VINYL_BUILD_PROFILE:-optimized}
+case "$bench_vinyl_build_profile" in
+	optimized|debug) ;;
+	*)
+		echo "unknown BENCH_VINYL_BUILD_PROFILE=$bench_vinyl_build_profile (optimized or debug)" >&2
+		exit 2
+		;;
+esac
 if [ "$run_xkey" = 1 ]; then
 	xkey_src=$(CDPATH= cd -- "$xkey_src" && pwd)
 else
@@ -1124,6 +1140,7 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "BENCH_BUILD_CFLAGS=$bench_build_cflags" \
 	-e "BENCH_BUILD_CPPFLAGS=$bench_build_cppflags" \
 	-e "BENCH_BUILD_LDFLAGS=$bench_build_ldflags" \
+	-e "BENCH_VINYL_BUILD_PROFILE=$bench_vinyl_build_profile" \
 	-e "BENCH_DOCKER_IMAGE_REF=$image" \
 	-e "BENCH_DOCKER_IMAGE_ID=$image_id" \
 	"$image" \
@@ -1142,6 +1159,27 @@ build_commands=$cachetag_build_commands
 build_cflags=${BENCH_BUILD_CFLAGS:?BENCH_BUILD_CFLAGS is required}
 build_cppflags=${BENCH_BUILD_CPPFLAGS-}
 build_ldflags=${BENCH_BUILD_LDFLAGS-}
+vinyl_build_profile=${BENCH_VINYL_BUILD_PROFILE:?BENCH_VINYL_BUILD_PROFILE is required}
+# Vinyl configure.ac turns --enable-debugging-symbols into -O0 -g -fno-inline
+# appended after the autoconf default -g -O2, and gcc honours the last -O.
+# Every cohort before 2026-08-26 measured that unoptimised vinyld, so the
+# optimized profile sets CFLAGS explicitly instead of trusting configure
+# defaults. Frame pointers stay on so the default fp call-graph unwinder keeps
+# working for perf record.
+case "$vinyl_build_profile" in
+optimized)
+	vinyl_build_cflags="-O2 -g -fno-omit-frame-pointer"
+	vinyl_configure_debug_args=
+	;;
+debug)
+	vinyl_build_cflags=
+	vinyl_configure_debug_args=--enable-debugging-symbols
+	;;
+*)
+	echo "unknown BENCH_VINYL_BUILD_PROFILE=$vinyl_build_profile" >&2
+	exit 2
+	;;
+esac
 
 case "$BENCH_CODE_GENERATION:$BENCH_LEGACY_SET_INTERNING:$BENCH_RUNTIME_SET_INTERNING" in
 legacy:0:) cachetag_configure_arg=--disable-set-interning ;;
@@ -1211,9 +1249,15 @@ if [ "${SKIP_BUILD}" != 1 ]; then
 		cd "$vinyl_src_copy"
 		sh ./autogen.sh
 	)
-	run_logged "$vinyl_src_copy"/configure --prefix="$prefix" --with-unwind \
-		--enable-developer-warnings --enable-debugging-symbols \
-		--disable-stack-protector --with-persistent-storage
+	if [ -n "$vinyl_build_cflags" ]; then
+		run_logged env CFLAGS="$vinyl_build_cflags" "$vinyl_src_copy"/configure --prefix="$prefix" --with-unwind \
+			--enable-developer-warnings $vinyl_configure_debug_args \
+			--disable-stack-protector --with-persistent-storage
+	else
+		run_logged "$vinyl_src_copy"/configure --prefix="$prefix" --with-unwind \
+			--enable-developer-warnings $vinyl_configure_debug_args \
+			--disable-stack-protector --with-persistent-storage
+	fi
 	run_logged make -j"$(nproc)" V=1
 	run_logged make install V=1
 
@@ -1536,6 +1580,8 @@ provenance_env=(
 	BUILD_PROVENANCE_CFLAGS="$build_cflags"
 	BUILD_PROVENANCE_CPPFLAGS="$build_cppflags"
 	BUILD_PROVENANCE_LDFLAGS="$build_ldflags"
+	BUILD_PROVENANCE_VINYL_PROFILE="$vinyl_build_profile"
+	BUILD_PROVENANCE_VINYL_CFLAGS="$vinyl_build_cflags"
 	BUILD_PROVENANCE_HARNESS_SRC=/cachetag-host
 	BUILD_PROVENANCE_CODE_GENERATION="$BENCH_CODE_GENERATION"
 	BUILD_PROVENANCE_LEGACY_SET_INTERNING="${BENCH_LEGACY_SET_INTERNING:-none}"
@@ -1877,6 +1923,8 @@ fi
 	printf "bench_build_cflags=%s\n" "$BENCH_BUILD_CFLAGS"
 	printf "bench_build_cppflags=%s\n" "$BENCH_BUILD_CPPFLAGS"
 	printf "bench_build_ldflags=%s\n" "$BENCH_BUILD_LDFLAGS"
+	printf "vinyl_build_profile=%s\n" "$vinyl_build_profile"
+	printf "vinyl_build_cflags=%s\n" "$vinyl_build_cflags"
 	printf "image=%s\n" "'"$image"'"
 	printf "image_id=%s\n" "$BENCH_DOCKER_IMAGE_ID"
 	printf "docker_command=%s\n" "'"$docker_cmd"'"

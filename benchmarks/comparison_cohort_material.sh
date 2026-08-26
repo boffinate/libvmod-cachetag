@@ -31,7 +31,8 @@ done
 for key in \
 	vinyl_build_input_sha256 cachetag_build_input_sha256 xkey_build_input_sha256 \
 	xkey_compat_artifact_sha256 xkey_config_sha256 dockerfile_sha256 \
-	docker_image_id build_cflags build_cppflags build_ldflags
+	docker_image_id build_cflags build_cppflags build_ldflags \
+	build_vinyl_profile build_vinyl_cflags
 do
 	emit_required "$provenance_env" "$key"
 done

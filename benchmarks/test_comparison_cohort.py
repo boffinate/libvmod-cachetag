@@ -35,7 +35,8 @@ class ComparisonCohortTest(unittest.TestCase):
                 "xkey_build_input_sha256=x\nxkey_compat_artifact_sha256=compat\n"
                 "xkey_config_sha256=config\ndockerfile_sha256=dockerfile\n"
                 "docker_image_id=image\nbuild_cflags=-O2 -g\nbuild_cppflags=none\n"
-                "build_ldflags=none\n"
+                "build_ldflags=none\nbuild_vinyl_profile=optimized\n"
+                "build_vinyl_cflags=-O2 -g -fno-omit-frame-pointer\n"
                 + provenance_extra,
                 encoding="utf-8",
             )

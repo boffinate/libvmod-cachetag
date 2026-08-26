@@ -300,6 +300,7 @@ Remote matrix defaults can be tuned with environment variables:
 - `CACHE_TAG_BENCH_PERF_RECORD`: pass `BENCH_PERF_RECORD` through to the Docker benchmark wrapper for opt-in `perf record` profiling.
 - `CACHE_TAG_BENCH_PERF_RECORD_SCOPE`: `command` or `system`; `system` adds `perf record -a`.
 - `CACHE_TAG_BENCH_BUILD_CFLAGS`: exact `BENCH_BUILD_CFLAGS` override for cachetag/xkey VMOD builds; use a fresh build and retain this as a separate cohort whenever it changes.
+- `CACHE_TAG_VINYL_BUILD_PROFILE`: `BENCH_VINYL_BUILD_PROFILE` for the Vinyl build. `optimized` (default) configures without `--enable-debugging-symbols` and with `CFLAGS="-O2 -g -fno-omit-frame-pointer"`; `debug` reproduces the historic `--enable-debugging-symbols` build, which Vinyl's `configure.ac` turns into `-O0 -g -fno-inline`. Rows with different profiles are different cohorts and `debug` rows are never performance evidence ([BR-027](rules/BR-027-measured-binary-optimisation-level.md)).
 - `CACHE_TAG_BENCH_PERF_RECORD_PHASE`: `command` for the whole `vinyltest` command or `warm` for driver warm-phase-only capture.
 - `CACHE_TAG_BENCH_PERF_RECORD_TARGET`: `vinyld` or `descendants` for phase profiles.
 - `CACHE_TAG_BENCH_PERF_RECORD_CALL_GRAPH`: `fp` or `dwarf`; use `dwarf` for production binaries built without frame pointers.
