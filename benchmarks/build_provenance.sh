@@ -238,6 +238,11 @@ emit_record() {
 	build_ldflags=$(require_flag_env BUILD_PROVENANCE_LDFLAGS)
 	build_vinyl_profile=$(require_env BUILD_PROVENANCE_VINYL_PROFILE)
 	build_vinyl_cflags=$(require_flag_env BUILD_PROVENANCE_VINYL_CFLAGS)
+	if [ "$slash_src" = none ]; then
+		slash_patch_set=none
+	else
+		slash_patch_set=$(require_env BUILD_PROVENANCE_SLASH_PATCH_SET)
+	fi
 	harness_src=$(require_env BUILD_PROVENANCE_HARNESS_SRC)
 	code_generation=$(require_env BUILD_PROVENANCE_CODE_GENERATION)
 	legacy_set_interning=$(require_env BUILD_PROVENANCE_LEGACY_SET_INTERNING)
@@ -247,7 +252,7 @@ emit_record() {
 	*) die "code generation and configure arguments disagree" ;;
 	esac
 
-	printf 'build_provenance_version=5\n'
+	printf 'build_provenance_version=6\n'
 	printf 'build_provenance_mode=%s\n' "$provenance_mode"
 	if [ "$provenance_mode" = strict ]; then
 		printf 'build_provenance_eligible=1\n'
@@ -272,6 +277,7 @@ emit_record() {
 	else
 		printf 'slash_build_input_sha256=%s\n' "$(tree_hash "$slash_src" src include configure.ac Makefile.am bootstrap)"
 	fi
+	printf 'slash_patch_set=%s\n' "$slash_patch_set"
 	if [ "$xkey_src" = none ]; then
 		printf 'xkey_build_input_sha256=none\n'
 	else
@@ -308,7 +314,7 @@ verify_record() {
 	file=$6
 	harness_src=$(require_env BUILD_PROVENANCE_HARNESS_SRC)
 	test -f "$file" || die "no provenance file at $file"
-	test "$(read_field build_provenance_version "$file")" = 5 || die "unsupported provenance version"
+	test "$(read_field build_provenance_version "$file")" = 6 || die "unsupported provenance version"
 	test "$(read_field build_provenance_mode "$file")" = "$provenance_mode" || die "provenance mode changed"
 	if [ "$provenance_mode" = strict ]; then
 		test "$(read_field build_provenance_eligible "$file")" = 1 || die "cached build is not comparison-eligible"
@@ -337,6 +343,12 @@ verify_record() {
 	if [ "$slash_src" = none ]; then slash_hash=none; else slash_hash=$(tree_hash "$slash_src" src include configure.ac Makefile.am bootstrap); fi
 	if [ "$xkey_src" = none ]; then xkey_hash=none; else xkey_hash=$(tree_hash "$xkey_src" src configure.ac Makefile.am bootstrap); fi
 	check_hash slash_build_input_sha256 "$slash_hash"
+	if [ "$slash_src" = none ]; then
+		slash_patch_set=none
+	else
+		slash_patch_set=$(require_env BUILD_PROVENANCE_SLASH_PATCH_SET)
+	fi
+	test "$slash_patch_set" = "$(read_field slash_patch_set "$file")" || die "Slash patch set changed"
 	check_hash xkey_build_input_sha256 "$xkey_hash"
 
 	compat=$(require_env BUILD_PROVENANCE_XKEY_COMPAT_ARTIFACT)

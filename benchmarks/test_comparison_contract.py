@@ -373,7 +373,7 @@ class ComparisonContractTest(unittest.TestCase):
             provenance = root / "build-provenance.env"
             provenance.write_text(
                 provenance.read_text(encoding="utf-8")
-                .replace("build_provenance_version=3", "build_provenance_version=5")
+                .replace("build_provenance_version=3", "build_provenance_version=6")
                 .replace("xkey_dirty_state=clean", "xkey_dirty_state=not-applicable")
                 .replace("xkey_build_input_sha256=" + self.fingerprint, "xkey_build_input_sha256=none")
                 .replace("cachetag_configure_args=--disable-set-interning", "cachetag_configure_args=none"),

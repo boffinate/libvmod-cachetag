@@ -1297,8 +1297,11 @@ def purge_latency_contract_validity(
     if "-O0" in values.get("vinyl_build_cflags", "") or "-fno-inline" in values.get("vinyl_build_cflags", ""):
         reasons.append("purge_latency_vinyl_optimisation_invalid")
 
-    if provenance.get("build_provenance_version") != "5":
+    provenance_version = provenance.get("build_provenance_version")
+    if provenance_version not in {"5", "6"}:
         reasons.append("purge_latency_provenance_version_invalid")
+    elif provenance_version == "6" and provenance.get("slash_patch_set") != "reference-fellow-14":
+        reasons.append("purge_latency_provenance_slash_patch_set_invalid")
     if provenance.get("build_provenance_mode") != "strict" or provenance.get("build_provenance_eligible") != "1":
         reasons.append("purge_latency_provenance_not_strict")
     for key in (
@@ -1638,7 +1641,7 @@ def comparison_contract_validity(
             "dockerfile_sha256", "docker_image_id",
         ):
             if key == "build_provenance_version":
-                if provenance.get(key) != "5":
+                if provenance.get(key) not in {"5", "6"}:
                     reasons.append(f"provenance_missing:{key}")
             elif key == "docker_image_id":
                 if not provenance.get(key) or provenance.get(key) == "none":
@@ -1691,9 +1694,10 @@ def comparison_contract_validity(
             "xkey_config_sha256",
         ]
         required_provenance.insert(8, "xkey_binary_sha256")
+    provenance_version = provenance.get("build_provenance_version")
     for key in required_provenance:
         if key == "build_provenance_version":
-            accepted_versions = {"5"} if interning_screen else {"3", "4", "5"}
+            accepted_versions = {"5", "6"} if interning_screen else {"3", "4", "5", "6"}
             if provenance.get(key) not in accepted_versions:
                 reasons.append(f"provenance_missing:{key}")
         elif key == "docker_image_id":
@@ -1701,6 +1705,15 @@ def comparison_contract_validity(
                 reasons.append(f"provenance_missing:{key}")
         else:
             _required_hash(reasons, provenance, key)
+    storage_kind = metadata.get("bench_storage_kind") or remote.get("bench_storage_kind")
+    if provenance_version == "6" and storage_kind in {"buddy", "fellow"}:
+        patch_set = provenance.get("slash_patch_set")
+        expected_patch_set = {
+            "buddy": "buddy-current-vinyl-compat-0001",
+            "fellow": "reference-fellow-14",
+        }[storage_kind]
+        if patch_set != expected_patch_set:
+            reasons.append("provenance_slash_patch_set_mismatch")
     if provenance.get("build_provenance_mode") != "strict" or provenance.get("build_provenance_eligible") != "1":
         reasons.append("provenance_not_comparison_eligible")
     for source in (("cachetag", "vinyl") if interning_screen else ("cachetag", "vinyl", "xkey")):

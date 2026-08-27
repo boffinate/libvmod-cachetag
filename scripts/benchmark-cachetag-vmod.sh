@@ -1290,14 +1290,19 @@ if [ "${SKIP_BUILD}" != 1 ]; then
 	if [ "${BENCH_STORAGE_KIND}" = fellow ] || [ "${BENCH_STORAGE_KIND}" = buddy ]; then
 		tar -C /slash-host --exclude=.git -cf - . | tar -C "$slash_src" -xf -
 		cd "$slash_src"
-		apply_fellow_patch_stack() {
+		apply_slash_patch_stack() {
 			local patch_dir=$1
 			local patch tmp status
 			local -a patches reverse_patches
+			shift
 
-			shopt -s nullglob
-			patches=("$patch_dir"/*.patch)
-			shopt -u nullglob
+			if [ "$#" -gt 0 ]; then
+				patches=("$@")
+			else
+				shopt -s nullglob
+				patches=("$patch_dir"/*.patch)
+				shopt -u nullglob
+			fi
 			if [ "${#patches[@]}" -eq 0 ]; then
 				return 0
 			fi
@@ -1337,7 +1342,14 @@ if [ "${SKIP_BUILD}" != 1 ]; then
 				fi
 			done
 		}
-		apply_fellow_patch_stack /cachetag-build-host/patches/fellow
+		if [ "${BENCH_STORAGE_KIND}" = fellow ]; then
+			apply_slash_patch_stack /cachetag-build-host/patches/fellow
+		else
+			# Buddy is the allocator control; only the header-rename compatibility
+			# patch is needed to build it against the pinned Vinyl revision.
+			apply_slash_patch_stack /cachetag-build-host/patches/fellow \
+				/cachetag-build-host/patches/fellow/0001-slash-accept-renamed-vinyl-internal-header.patch
+		fi
 		mkdir -p m4
 		cp "$vinyl_src_copy"/m4/ax_*.m4 m4/
 		cat > m4/ax_execinfo.m4 <<'"'"'M4EOF'"'"'
@@ -1581,8 +1593,14 @@ build_commands=/work/benchmark-build-commands.log
 cat "$cachetag_build_commands" "$xkey_build_commands" > "$build_commands"
 
 provenance_slash=none
+provenance_slash_patch_set=none
 if [ "${BENCH_STORAGE_KIND}" = fellow ] || [ "${BENCH_STORAGE_KIND}" = buddy ]; then
 	provenance_slash=/slash-host
+	if [ "${BENCH_STORAGE_KIND}" = fellow ]; then
+		provenance_slash_patch_set=reference-fellow-14
+	else
+		provenance_slash_patch_set=buddy-current-vinyl-compat-0001
+	fi
 fi
 if [ "${RUN_XKEY}" = 1 ]; then
 	provenance_xkey_binary=/results/xkey-build/libvmod_xkey.so
@@ -1604,6 +1622,7 @@ provenance_env=(
 	BUILD_PROVENANCE_LDFLAGS="$build_ldflags"
 	BUILD_PROVENANCE_VINYL_PROFILE="$vinyl_build_profile"
 	BUILD_PROVENANCE_VINYL_CFLAGS="$vinyl_build_cflags"
+	BUILD_PROVENANCE_SLASH_PATCH_SET="$provenance_slash_patch_set"
 	BUILD_PROVENANCE_HARNESS_SRC=/cachetag-host
 	BUILD_PROVENANCE_CODE_GENERATION="$BENCH_CODE_GENERATION"
 	BUILD_PROVENANCE_LEGACY_SET_INTERNING="${BENCH_LEGACY_SET_INTERNING:-none}"

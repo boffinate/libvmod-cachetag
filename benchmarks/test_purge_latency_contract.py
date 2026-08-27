@@ -40,7 +40,7 @@ class PurgeLatencyContractTest(unittest.TestCase):
             encoding="utf-8",
         )
         provenance = {
-            "build_provenance_version": "5",
+            "build_provenance_version": "6",
             "build_provenance_mode": "strict",
             "build_provenance_eligible": "1",
             "docker_image_id": "sha256:image",
@@ -55,6 +55,7 @@ class PurgeLatencyContractTest(unittest.TestCase):
             "build_commands_sha256", "dockerfile_sha256",
         ):
             provenance[key] = self.digest
+        provenance["slash_patch_set"] = "reference-fellow-14"
         (root / "build-provenance.env").write_text(
             "\n".join(f"{key}={value}" for key, value in provenance.items()) + "\n",
             encoding="utf-8",

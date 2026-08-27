@@ -45,7 +45,7 @@ BENCH_STORAGE_KIND=fellow SLASH_SRC=../slash \
   scripts/benchmark-cachetag-vmod.sh ../vinyl-cache
 ```
 
-The benchmark harness applies the cachetag Slash patch stack before it builds Slash for both storage kinds. That shared benchmark build does not make the patches a requirement for a standalone Buddy installation. Fellow lanes enable persistent cachetag metadata by default; Buddy lanes do not.
+The benchmark harness applies only the Vinyl header compatibility patch when building Slash for Buddy. Fellow builds receive the full Fellow patch stack, including cachetag integration. The selected patch set is recorded in build provenance. Fellow lanes enable persistent cachetag metadata by default; Buddy lanes do not.
 
 Use a native Linux host for measurements you intend to compare or publish. A development machine is useful for smoke runs, but virtualized environments often cannot provide hardware counters and may distort filesystem, memory, and timing results.
 
