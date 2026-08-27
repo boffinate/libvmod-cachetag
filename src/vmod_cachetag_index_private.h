@@ -185,6 +185,9 @@ struct cachetag_index {
 	pthread_mutex_t replay_mtx;
 	unsigned replay_done;
 	unsigned test_fail_next_key_purge_wal;
+#if CACHE_TAG_TEST_HOOKS
+	unsigned test_fail_next_key_purge_batch_alloc;
+#endif
 	unsigned test_fail_next_persist_prepare;
 	unsigned test_abort_next_sweep;
 #if CACHE_TAG_TEST_HOOKS
@@ -227,6 +230,8 @@ cachetag_elapsed_usec(uint64_t start, uint64_t end)
 }
 
 int cachetag_digest_snapshot(struct cachetag_index *, const char *,
+    struct cachetag_registration_snapshot *);
+int cachetag_digest_snapshot_len(struct cachetag_index *, const char *, size_t,
     struct cachetag_registration_snapshot *);
 struct cachetag_purgemap *cachetag_purgemap_data(const struct cachetag_index *);
 void cachetag_purgemap_data_set(struct cachetag_index *,

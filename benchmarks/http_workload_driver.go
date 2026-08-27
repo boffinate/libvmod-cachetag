@@ -3650,6 +3650,10 @@ func runBulkPurge(client *http.Client, baseURL string, cfg config, lines *metric
 	attemptedRequests := 0
 	completedRequests := 0
 	publishedRequests := 0
+	// The persistent-purge latency contract times the serial client-observed
+	// request boundary.  This deliberately excludes the later settle and
+	// freshness probes, whose work is not part of one durable header publish.
+	latencies := newLatencyRecorder(cfg.purgeRequests)
 	if err := func() error {
 		start := beginPhase(lines, "bulk-purge")
 		defer func() {
@@ -3664,6 +3668,7 @@ func runBulkPurge(client *http.Client, baseURL string, cfg config, lines *metric
 			lines.add("driver_bulk_purge_expected", totalExpected)
 			lines.add("driver_bulk_purge_actual", totalActual)
 			lines.add("driver_bulk_purge_actual_unknown", publishedRequests > 0)
+			latencies.emit("driver_bulk_purge", lines)
 			recordPhaseSeconds(lines, "bulk-purge", start)
 		}()
 		for request := 0; request < cfg.purgeRequests; request++ {
@@ -3681,7 +3686,9 @@ func runBulkPurge(client *http.Client, baseURL string, cfg config, lines *metric
 			totalExpected += expected
 			totalKeys += len(keys)
 			attemptedRequests++
+			requestStart := time.Now()
 			purged, err := purge(client, baseURL, strings.Join(keys, " "), expected, false, modeIsCachetag(cfg.mode))
+			latencies.add(time.Since(requestStart))
 			if err != nil {
 				return err
 			}

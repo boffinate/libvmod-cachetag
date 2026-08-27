@@ -304,6 +304,10 @@ else
 		$cachetag_src/src/vtc/cachetag_p00021.vtc
 		$cachetag_src/src/vtc/cachetag_p00022.vtc
 		$cachetag_src/src/vtc/cachetag_p00023.vtc
+		$cachetag_src/src/vtc/cachetag_p00024.vtc
+		$cachetag_src/src/vtc/cachetag_p00025.vtc
+		$cachetag_src/src/vtc/cachetag_p00026.vtc
+		$cachetag_src/src/vtc/cachetag_p00027.vtc
 		$cachetag_src/src/vtc/cachetag_p00090.vtc
 		$cachetag_src/src/vtc/cachetag_x00000.vtc"
 fi

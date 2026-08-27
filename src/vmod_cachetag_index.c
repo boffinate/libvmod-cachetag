@@ -1050,19 +1050,28 @@ cachetag_digest(const struct cachetag_index *idx, const char *key, size_t len,
 }
 
 int
-cachetag_digest_snapshot(struct cachetag_index *idx, const char *key,
-    struct cachetag_registration_snapshot *snap)
+cachetag_digest_snapshot_len(struct cachetag_index *idx, const char *key,
+    size_t len, struct cachetag_registration_snapshot *snap)
 {
-	size_t len;
+
 	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
-	if (key == NULL || *key == '\0')
+	if (key == NULL || len == 0)
 		return (EINVAL);
-	len = strlen(key);
 	if (len > idx->limits.max_key_length)
 		return (E2BIG);
 	memset(snap, 0, sizeof *snap);
 	cachetag_digest(idx, key, len, &snap->digest_hi, &snap->digest_lo);
 	return (0);
+}
+
+int
+cachetag_digest_snapshot(struct cachetag_index *idx, const char *key,
+    struct cachetag_registration_snapshot *snap)
+{
+
+	if (key == NULL)
+		return (EINVAL);
+	return (cachetag_digest_snapshot_len(idx, key, strlen(key), snap));
 }
 
 uint64_t
@@ -4083,6 +4092,17 @@ cachetag_test_fail_next_key_purge_wal(struct cachetag_index *idx)
 	return (1);
 }
 
+#if CACHE_TAG_TEST_HOOKS
+int
+cachetag_test_fail_next_key_purge_batch_alloc(struct cachetag_index *idx)
+{
+
+	__atomic_store_n(&idx->test_fail_next_key_purge_batch_alloc, 1,
+	    __ATOMIC_RELEASE);
+	return (1);
+}
+#endif
+
 int
 cachetag_test_fail_next_persist_prepare(struct cachetag_index *idx)
 {
@@ -4742,6 +4762,55 @@ cachetag_persist_key_purge_digest(struct cachetag_index *idx,
 }
 
 int
+cachetag_persist_key_purge_batch(struct cachetag_index *idx,
+    const struct cachetag_purge_key *keys, unsigned nkeys,
+    enum cachetag_purge_mode mode, uint64_t seq)
+{
+	unsigned char *payload;
+	uint64_t payload_len, wal_seq;
+	unsigned u;
+	int r;
+
+	AN(keys);
+	assert(nkeys > 0);
+	if (!cachetag_wal_enabled(idx->wal))
+		return (0);
+	if (nkeys == 1)
+		return (cachetag_persist_key_purge_digest(idx, keys[0].digest_hi,
+		    keys[0].digest_lo, mode, seq));
+	if (__atomic_exchange_n(&idx->test_fail_next_key_purge_wal, 0,
+	    __ATOMIC_ACQ_REL)) {
+		cachetag_counter_add(idx, &idx->counters.persist_failures, 1);
+		return (EIO);
+	}
+	if (nkeys > (SIZE_MAX - 24) / 16)
+		return (EFBIG);
+	payload_len = 24 + (uint64_t)nkeys * 16;
+#if CACHE_TAG_TEST_HOOKS
+	if (__atomic_exchange_n(&idx->test_fail_next_key_purge_batch_alloc, 0,
+	    __ATOMIC_ACQ_REL))
+		return (ENOMEM);
+#endif
+	payload = calloc(1, (size_t)payload_len);
+	if (payload == NULL)
+		return (ENOMEM);
+	cachetag_le16enc(payload, 1);
+	payload[2] = mode == TAG_PURGE_HARD ? 1 : 2;
+	cachetag_le64enc(payload + 8, nkeys);
+	cachetag_le64enc(payload + 16, seq);
+	for (u = 0; u < nkeys; u++) {
+		cachetag_le64enc(payload + 24 + (size_t)u * 16,
+		    keys[u].digest_hi);
+		cachetag_le64enc(payload + 32 + (size_t)u * 16,
+		    keys[u].digest_lo);
+	}
+	r = cachetag_wal_append(idx->wal, TAG_REPLAY_KEY_PURGE_BATCH,
+	    payload, payload_len, &wal_seq);
+	free(payload);
+	return (r == 0 ? 0 : EIO);
+}
+
+int
 cachetag_decode_key_purge_record(const void *payload, uint64_t payload_len,
     uint64_t *digest_hi, uint64_t *digest_lo, enum cachetag_purge_mode *mode,
     uint64_t *seq)
@@ -4765,12 +4834,74 @@ cachetag_decode_key_purge_record(const void *payload, uint64_t payload_len,
 }
 
 static int
+cachetag_purge_key_compare(const void *a, const void *b)
+{
+	const struct cachetag_purge_key *ka = a, *kb = b;
+
+	if (ka->digest_hi != kb->digest_hi)
+		return (ka->digest_hi < kb->digest_hi ? -1 : 1);
+	if (ka->digest_lo != kb->digest_lo)
+		return (ka->digest_lo < kb->digest_lo ? -1 : 1);
+	return (0);
+}
+
+int
+cachetag_decode_key_purge_batch_record(const void *payload,
+    uint64_t payload_len, struct cachetag_purge_key **keysp,
+    unsigned *nkeysp, enum cachetag_purge_mode *mode, uint64_t *seq)
+{
+	const unsigned char *p = payload;
+	struct cachetag_purge_key *keys;
+	uint64_t nkeys;
+	unsigned u;
+
+	AN(keysp);
+	AN(nkeysp);
+	*keysp = NULL;
+	*nkeysp = 0;
+	if (payload_len < 24 || cachetag_le16dec(p) != 1)
+		return (EINVAL);
+	nkeys = cachetag_le64dec(p + 8);
+	if (nkeys < 2 || nkeys > UINT_MAX ||
+	    nkeys > (UINT64_MAX - 24) / 16 ||
+	    payload_len != 24 + nkeys * 16)
+		return (EINVAL);
+	*seq = cachetag_le64dec(p + 16);
+	if (*seq == 0 || *seq == UINT64_MAX)
+		return (EINVAL);
+	if (p[2] == 1)
+		*mode = TAG_PURGE_HARD;
+	else if (p[2] == 2)
+		*mode = TAG_PURGE_SOFT;
+	else
+		return (EINVAL);
+	keys = calloc((size_t)nkeys, sizeof *keys);
+	if (keys == NULL)
+		return (ENOMEM);
+	for (u = 0; u < nkeys; u++) {
+		keys[u].digest_hi = cachetag_le64dec(p + 24 + (size_t)u * 16);
+		keys[u].digest_lo = cachetag_le64dec(p + 32 + (size_t)u * 16);
+	}
+	qsort(keys, (size_t)nkeys, sizeof *keys, cachetag_purge_key_compare);
+	for (u = 1; u < nkeys; u++) {
+		if (cachetag_purge_key_compare(&keys[u - 1], &keys[u]) == 0) {
+			free(keys);
+			return (EINVAL);
+		}
+	}
+	*keysp = keys;
+	*nkeysp = (unsigned)nkeys;
+	return (0);
+}
+
+static int
 cachetag_wal_replay_cb(void *priv, const struct cachetag_wal_record *record)
 {
 	struct cachetag_index *idx = priv;
 	int r;
 
-	if (record->type != TAG_REPLAY_KEY_PURGE)
+	if (record->type != TAG_REPLAY_KEY_PURGE &&
+	    record->type != TAG_REPLAY_KEY_PURGE_BATCH)
 		return (0);
 	r = cachetag_purgemap_replay(idx, record);
 	if (r == 0)

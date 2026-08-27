@@ -56,8 +56,9 @@ Environment:
                         evidence (benchmarks/rules/BR-027).
   RUN_NOINDEX           1 to run no-index load baseline, 0 to skip
                         (default: 1)
-  BENCHMARK_CONTRACT    development-v1, comparison-v1,
-                        interning-screen-v1, or runtime-interning-decision-v1
+  BENCHMARK_CONTRACT    development-v1, comparison-v1, interning-screen-v1,
+                        runtime-interning-decision-v1, or
+                        persistent-purge-latency-screen-v1
                         (default: development-v1)
   OBJECTS               Objects to insert per workload (default: 1000)
   TAGS_PER_OBJECT       Tags attached in cachetag workload (default: 4)
@@ -440,6 +441,7 @@ bench_hot_set_objects=${BENCH_HOT_SET_OBJECTS:-0}
 bench_tag_length_class=${BENCH_TAG_LENGTH_CLASS:-default}
 bench_validate_tag_shape=${BENCH_VALIDATE_TAG_SHAPE:-0}
 bench_purge_requests=${BENCH_PURGE_REQUESTS:-100}
+bench_purge_latency_expected_wal_records_per_header=${BENCH_PURGE_LATENCY_EXPECTED_WAL_RECORDS_PER_HEADER:-}
 bench_skip_purge=${BENCH_SKIP_PURGE:-0}
 bench_expect_fellow_attr_bytes_per_object=${BENCH_EXPECT_FELLOW_ATTR_BYTES_PER_OBJECT:-}
 bench_purge_keys_per_request=${BENCH_PURGE_KEYS_PER_REQUEST:-10}
@@ -537,6 +539,16 @@ bench_backend_gomemlimit=${BENCH_BACKEND_GOMEMLIMIT:-off}
 bench_resident_hit_driver=${BENCH_RESIDENT_HIT_DRIVER:-go}
 bench_oha_worker_threads=${BENCH_OHA_WORKER_THREADS:-$bench_driver_gomaxprocs}
 benchmark_contract=${BENCHMARK_CONTRACT:-development-v1}
+case "$benchmark_contract" in
+	persistent-purge-latency-screen-v1:1)
+		benchmark_contract=persistent-purge-latency-screen-v1
+		bench_purge_latency_expected_wal_records_per_header=1
+		;;
+	persistent-purge-latency-screen-v1:10)
+		benchmark_contract=persistent-purge-latency-screen-v1
+		bench_purge_latency_expected_wal_records_per_header=10
+		;;
+esac
 bench_runtime_interning_decision=0
 if [ "$benchmark_contract" = runtime-interning-decision-v1 ]; then
 	bench_runtime_interning_decision=1
@@ -552,15 +564,30 @@ if [ "$run_xkey" = auto ]; then
 		run_xkey=0
 	fi
 fi
+if [ -n "${RUN_NOINDEX+x}" ]; then
+	run_noindex=$RUN_NOINDEX
+else
+	case ",$bench_profile," in
+		*,phase6-fill-drain,*) run_noindex=0 ;;
+		*) run_noindex=1 ;;
+	esac
+fi
 bench_fixture_manifest=${BENCH_FIXTURE_MANIFEST:-/cachetag-host/benchmarks/fixtures/cms-trace-static-v1.manifest.json}
 bench_comparison_memory_endpoints=${BENCH_COMPARISON_MEMORY_ENDPOINTS:-0}
 bench_memory_post_load_quiet_seconds=${BENCH_MEMORY_POST_LOAD_QUIET_SECONDS:-30}
 bench_memory_confirmation_quiet_seconds=${BENCH_MEMORY_CONFIRMATION_QUIET_SECONDS:-10}
 case "$benchmark_contract" in
-	comparison-v1|interning-screen-v1|runtime-interning-decision-v1) build_provenance_mode=strict ;;
+	comparison-v1|interning-screen-v1|runtime-interning-decision-v1|persistent-purge-latency-screen-v1) build_provenance_mode=strict ;;
 	development-v1) build_provenance_mode=development ;;
-	*) echo "BENCHMARK_CONTRACT must be comparison-v1, interning-screen-v1, runtime-interning-decision-v1, or development-v1" >&2; exit 2 ;;
+	*) echo "BENCHMARK_CONTRACT must be comparison-v1, interning-screen-v1, runtime-interning-decision-v1, persistent-purge-latency-screen-v1, or development-v1" >&2; exit 2 ;;
 esac
+if [ "$benchmark_contract" = persistent-purge-latency-screen-v1 ]; then
+	[ "$bench_profile" = bulk-purge-bursts ] || { echo "persistent-purge-latency-screen-v1 requires BENCH_PROFILE=bulk-purge-bursts" >&2; exit 2; }
+	[ "$objects" = 10000 ] && [ "$bench_buckets" = 64 ] && [ "$bench_purge_requests" = 100 ] && [ "$bench_purge_keys_per_request" = 10 ] || { echo "persistent-purge-latency-screen-v1 requires fixed 10k/64/100x10 work" >&2; exit 2; }
+	[ "$bench_storage_kind" = fellow ] && [ "$bench_cache_tag_persist" = 1 ] && [ "$bench_cache_tag_wal_fsync" = strict ] || { echo "persistent-purge-latency-screen-v1 requires persistent Fellow strict WAL" >&2; exit 2; }
+	[ "$run_xkey" = 0 ] && [ "$run_noindex" = 0 ] && [ "$bench_runtime_set_interning" = 0 ] || { echo "persistent-purge-latency-screen-v1 requires cachetag direct mode only" >&2; exit 2; }
+	case "$bench_purge_latency_expected_wal_records_per_header" in 1|10) ;; *) echo "persistent-purge-latency-screen-v1 requires BENCH_PURGE_LATENCY_EXPECTED_WAL_RECORDS_PER_HEADER=1 or 10" >&2; exit 2 ;; esac
+fi
 case "$bench_code_generation" in
 	runtime)
 		[ -z "$bench_legacy_set_interning" ] || { echo "BENCH_LEGACY_SET_INTERNING is invalid for runtime generation" >&2; exit 2; }
@@ -627,14 +654,6 @@ if [ "$bench_driver_headroom_required" = 1 ]; then
 		echo "driver headroom gate requires BENCH_DRIVER_CPUSET_CPUS" >&2
 		exit 2
 	fi
-fi
-if [ -n "${RUN_NOINDEX+x}" ]; then
-	run_noindex=$RUN_NOINDEX
-else
-	case ",$bench_profile," in
-		*,phase6-fill-drain,*) run_noindex=0 ;;
-		*) run_noindex=1 ;;
-	esac
 fi
 if [ "$benchmark_contract" = comparison-v1 ] || [ "$benchmark_contract" = interning-screen-v1 ]; then
 	[ "$bench_comparison_memory_endpoints" = 1 ] || { echo "$benchmark_contract requires BENCH_COMPARISON_MEMORY_ENDPOINTS=1" >&2; exit 2; }
@@ -1019,6 +1038,7 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "BENCH_TAG_LENGTH_CLASS=$bench_tag_length_class" \
 	-e "BENCH_VALIDATE_TAG_SHAPE=$bench_validate_tag_shape" \
 	-e "BENCH_PURGE_REQUESTS=$bench_purge_requests" \
+	-e "BENCH_PURGE_LATENCY_EXPECTED_WAL_RECORDS_PER_HEADER=$bench_purge_latency_expected_wal_records_per_header" \
 	-e "BENCH_SKIP_PURGE=$bench_skip_purge" \
 	-e "BENCH_EXPECT_FELLOW_ATTR_BYTES_PER_OBJECT=$bench_expect_fellow_attr_bytes_per_object" \
 	-e "BENCH_PURGE_KEYS_PER_REQUEST=$bench_purge_keys_per_request" \
@@ -1738,6 +1758,22 @@ if [ "$BENCHMARK_CONTRACT" = runtime-interning-decision-v1 ]; then
 		} | sha256sum | awk "{print \$1}"
 	)
 fi
+purge_latency_cohort_fingerprint=
+if [ "$BENCHMARK_CONTRACT" = persistent-purge-latency-screen-v1 ]; then
+	purge_latency_cohort_fingerprint=$(
+		{
+			sh /cachetag-host/benchmarks/purge_latency_cohort_material.sh \
+				"$cohort_system_env" /results/build-provenance.env
+			printf "%s\n" "$BENCH_VINYL_CPUSET_CPUS" "$BENCH_DRIVER_CPUSET_CPUS" "$BENCH_BACKEND_CPUSET_CPUS"
+			printf "%s\n" "$BENCH_DRIVER_GOMAXPROCS" "$BENCH_BACKEND_GOMAXPROCS" "$BENCH_DRIVER_GOGC" "$BENCH_BACKEND_GOGC" "$BENCH_DRIVER_GOMEMLIMIT" "$BENCH_BACKEND_GOMEMLIMIT"
+			printf "%s\n" "$BENCH_VINYL_THREAD_POOL_MAX" "$BENCH_VINYL_THREAD_POOLS"
+			printf "contract=%s\n" "$BENCHMARK_CONTRACT"
+			printf "shape=%s|%s|%s|%s|%s|%s|%s|%s|%s\n" "$BENCH_PROFILE" "$OBJECTS" "$BENCH_BUCKETS" "$TAGS_PER_OBJECT" "$BENCH_PURGE_REQUESTS" "$BENCH_PURGE_KEYS_PER_REQUEST" "$BENCH_STALE_DELIVER" "$BENCH_CODE_GENERATION" "$BENCH_RUNTIME_SET_INTERNING"
+			printf "fellow=%s|%s|%s|%s|%s|%s|%s\n" "$BENCH_STORAGE_KIND" "$BENCH_STORAGE" "$BENCH_FELLOW_SIZE" "$BENCH_FELLOW_SEGMENT_SIZE" "$BENCH_FELLOW_BLOCK_SIZE" "$BENCH_CACHE_TAG_PERSIST" "$BENCH_CACHE_TAG_WAL_FSYNC"
+			printf "runtime=%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" "$RUNS" "$RUN_XKEY" "$RUN_NOINDEX" "$BENCH_OHA_WORKER_THREADS" "$BENCH_FELLOW_VOLATILE_FALLBACK" "$BENCH_CACHE_TAG_PURGE_HISTORY_MAX_ENTRIES" "$BENCH_CACHE_TAG_SWEEP_INTERVAL" "$BENCH_CACHE_TAG_SWEEP_BATCH_OBJECTS" "$BENCH_CACHE_TAG_SWEEP_BATCH_HOLD" "$BENCH_CACHE_TAG_SWEEP_BATCH_YIELD"
+		} | sha256sum | awk "{print \$1}"
+	)
+fi
 metadata_fixture_manifest=none
 metadata_fixture_name=
 metadata_fixture_fingerprint=
@@ -1807,6 +1843,7 @@ fi
 	printf "bench_tag_length_class=%s\n" "$BENCH_TAG_LENGTH_CLASS"
 	printf "bench_validate_tag_shape=%s\n" "$BENCH_VALIDATE_TAG_SHAPE"
 	printf "bench_purge_requests=%s\n" "$BENCH_PURGE_REQUESTS"
+	printf "bench_purge_latency_expected_wal_records_per_header=%s\n" "$BENCH_PURGE_LATENCY_EXPECTED_WAL_RECORDS_PER_HEADER"
 	printf "bench_skip_purge=%s\n" "$BENCH_SKIP_PURGE"
 	printf "bench_expect_fellow_attr_bytes_per_object=%s\n" "$BENCH_EXPECT_FELLOW_ATTR_BYTES_PER_OBJECT"
 	printf "bench_purge_keys_per_request=%s\n" "$BENCH_PURGE_KEYS_PER_REQUEST"
@@ -1892,6 +1929,7 @@ fi
 	printf "bench_backend_gomemlimit=%s\n" "$BENCH_BACKEND_GOMEMLIMIT"
 	printf "benchmark_contract=%s\n" "$BENCHMARK_CONTRACT"
 	printf "decision_cohort_fingerprint=%s\n" "$decision_cohort_fingerprint"
+	printf "purge_latency_cohort_fingerprint=%s\n" "$purge_latency_cohort_fingerprint"
 	printf "benchmark_cohort_fingerprint=%s\n" "$benchmark_cohort_fingerprint"
 	printf "bench_fixture_manifest=%s\n" "$metadata_fixture_manifest"
 	printf "fixture_name=%s\n" "$metadata_fixture_name"

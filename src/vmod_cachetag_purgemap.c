@@ -818,6 +818,35 @@ cachetag_purgemap_upsert_locked(struct cachetag_index *idx,
 	return (0);
 }
 
+static int
+cachetag_purgemap_prepare_batch_locked(struct cachetag_index *idx,
+    struct cachetag_purgemap *pm, unsigned nfolds,
+    struct cachetag_purgemap_table **retiredp)
+{
+	struct cachetag_purgemap_table *tbl;
+	size_t nentry, need, nslot;
+	int grow, r;
+
+	AN(retiredp);
+	*retiredp = NULL;
+	tbl = __atomic_load_n(&pm->table, __ATOMIC_ACQUIRE);
+	nentry = __atomic_load_n(&pm->nentry, __ATOMIC_ACQUIRE);
+	if (nentry > SIZE_MAX - nfolds)
+		return (EOVERFLOW);
+	need = nentry + nfolds;
+	nslot = tbl == NULL ? TAG_PURGEMAP_INITIAL_SLOTS : tbl->nslot;
+	while (need * 100 > nslot * TAG_PURGEMAP_MAX_LOAD_PERCENT) {
+		if (nslot > SIZE_MAX / 2)
+			return (EOVERFLOW);
+		nslot *= 2;
+	}
+	grow = tbl == NULL || nslot > tbl->nslot;
+	if (!grow && !cachetag_purgemap_needs_same_size_rebuild(pm, tbl))
+		return (0);
+	r = cachetag_purgemap_rebuild_locked(idx, pm, nslot, grow, retiredp);
+	return (r);
+}
+
 static uint64_t
 cachetag_purgemap_entry_newest(const struct cachetag_purgemap_entry *ent)
 {
@@ -870,7 +899,7 @@ cachetag_purgemap_prune_locked(struct cachetag_index *idx,
 	struct cachetag_purgemap_entry ent;
 	uint64_t *newest;
 	uint64_t cutoff, hard_floor, soft_floor, seen, newbytes;
-	size_t target, pruned, need, kept, nslot, u;
+	size_t target, actual_pruned, pruned, need, kept, nslot, u;
 
 	AN(prunedp);
 	AN(retiredp);
@@ -905,8 +934,18 @@ cachetag_purgemap_prune_locked(struct cachetag_index *idx,
 		return (EINVAL);
 	}
 	cutoff = cachetag_purgemap_select(newest, kept, need - 1);
+	actual_pruned = 0;
+	for (u = 0; u < kept; u++) {
+		if (newest[u] <= cutoff)
+			actual_pruned++;
+	}
 	free(newest);
-	kept -= need;
+	/* A header batch intentionally shares one sequence. Retain no arbitrary
+	 * subset of a tied sequence: promoting the complete group to the floors
+	 * keeps all identities invalidated while still enforcing the cap. */
+	if (actual_pruned < need || actual_pruned > kept)
+		return (EINVAL);
+	kept -= actual_pruned;
 	nslot = TAG_PURGEMAP_INITIAL_SLOTS;
 	while (kept * 100 > nslot * TAG_PURGEMAP_MAX_LOAD_PERCENT)
 		nslot *= 2;
@@ -930,7 +969,7 @@ cachetag_purgemap_prune_locked(struct cachetag_index *idx,
 		} else
 			AZ(cachetag_purgemap_table_insert_existing(replacement, &ent));
 	}
-	if (pruned != need) {
+	if (pruned != actual_pruned) {
 		free(replacement);
 		return (EINVAL);
 	}
@@ -955,19 +994,29 @@ cachetag_purgemap_prune_locked(struct cachetag_index *idx,
 }
 
 int
-cachetag_registration_snapshot(struct cachetag_index *idx,
-    const char *key, struct cachetag_registration_snapshot *snap)
+cachetag_registration_snapshot_len(struct cachetag_index *idx,
+    const char *key, size_t len, struct cachetag_registration_snapshot *snap)
 {
 	struct cachetag_purgemap *pm;
 	int r;
 
-	r = cachetag_digest_snapshot(idx, key, snap);
+	r = cachetag_digest_snapshot_len(idx, key, len, snap);
 	if (r != 0)
 		return (r);
 	pm = cachetag_purgemap_data(idx);
 	if (pm != NULL)
 		snap->reg_seq = __atomic_load_n(&pm->seq, __ATOMIC_ACQUIRE);
 	return (0);
+}
+
+int
+cachetag_registration_snapshot(struct cachetag_index *idx,
+    const char *key, struct cachetag_registration_snapshot *snap)
+{
+
+	if (key == NULL)
+		return (EINVAL);
+	return (cachetag_registration_snapshot_len(idx, key, strlen(key), snap));
 }
 
 int
@@ -1577,6 +1626,92 @@ cachetag_purge(struct cachetag_index *idx, const char *key,
 }
 
 int
+cachetag_purge_batch(struct cachetag_index *idx,
+    const struct cachetag_purge_key *keys, unsigned nkeys,
+    enum cachetag_purge_mode mode)
+{
+	struct cachetag_purgemap *pm;
+	struct cachetag_purgemap_table *retired = NULL;
+	uint64_t *folds, cur, seq;
+	unsigned u;
+	int created, r;
+
+	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
+	AN(keys);
+	assert(nkeys > 0);
+	if (nkeys > SIZE_MAX / sizeof *folds) {
+		cachetag_counter_add(idx, &idx->counters.limit_rejections, 1);
+		return (-2);
+	}
+	folds = calloc(nkeys, sizeof *folds);
+	if (folds == NULL) {
+		cachetag_counter_add(idx, &idx->counters.limit_rejections, 1);
+		return (-2);
+	}
+	for (u = 0; u < nkeys; u++)
+		folds[u] = cachetag_fold_digest(keys[u].digest_hi,
+		    keys[u].digest_lo);
+	pm = cachetag_purgemap_get(idx);
+	if (pm == NULL) {
+		free(folds);
+		cachetag_counter_add(idx, &idx->counters.limit_rejections, 1);
+		return (-2);
+	}
+	PTOK(pthread_mutex_lock(&idx->purge_mtx));
+	cur = __atomic_load_n(&pm->seq, __ATOMIC_ACQUIRE);
+	if (cur == UINT64_MAX) {
+		PTOK(pthread_mutex_unlock(&idx->purge_mtx));
+		free(folds);
+		cachetag_counter_add(idx, &idx->counters.limit_rejections, 1);
+		return (-2);
+	}
+	seq = cur + 1;
+	r = cachetag_purgemap_prepare_batch_locked(idx, pm, nkeys, &retired);
+	if (r != 0) {
+		PTOK(pthread_mutex_unlock(&idx->purge_mtx));
+		free(folds);
+		cachetag_counter_add(idx, &idx->counters.limit_rejections, 1);
+		return (-2);
+	}
+	r = cachetag_persist_key_purge_batch(idx, keys, nkeys, mode, seq);
+	if (r != 0) {
+		free(folds);
+		cachetag_purgemap_retire_after_commit(idx, retired);
+		PTOK(pthread_mutex_unlock(&idx->purge_mtx));
+		if (r == ENOMEM || r == EFBIG) {
+			cachetag_counter_add(idx,
+			    &idx->counters.limit_rejections, 1);
+			return (-2);
+		}
+		return (-4);
+	}
+	/* Registrations that observe seq belong after the complete header purge.
+	 * The capacity check above makes every following in-place upsert infallible;
+	 * memo_seq remains unchanged until all entries are visible, so the existing
+	 * two-call stale contract cannot certify a prefix of this header. */
+	__atomic_store_n(&pm->seq, seq, __ATOMIC_RELEASE);
+#if CACHE_TAG_TEST_HOOKS
+	cachetag_test_pause_purge_publish(idx);
+#endif
+	for (u = 0; u < nkeys; u++)
+		cachetag_purgemap_apply_upsert_locked(pm, folds[u], seq, mode,
+		    &created);
+	free(folds);
+	cachetag_purgemap_retire_after_commit(idx, retired);
+	retired = NULL;
+	(void)cachetag_purgemap_prune_checkpoint_locked(idx, pm, 0, &retired);
+	if (mode == TAG_PURGE_HARD)
+		PTOK(pthread_cond_signal(&idx->sweep_cond));
+	cachetag_purgemap_retire_after_commit(idx, retired);
+	/* The memo token certifies every in-place update, not merely the sequence
+	 * allocation that made the purge visible to registrations. */
+	__atomic_store_n(&pm->memo_seq, seq, __ATOMIC_RELEASE);
+	PTOK(pthread_mutex_unlock(&idx->purge_mtx));
+	cachetag_purgemap_account(idx, pm, 0, 0);
+	return (-1);
+}
+
+int
 cachetag_stale(struct worker *wrk, struct cachetag_index *idx,
     struct objcore *oc, cachetag_pending_probe_f *pending_probe,
     void *pending_priv)
@@ -1651,6 +1786,47 @@ cachetag_purgemap_replay(struct cachetag_index *idx,
 
 	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
 	AN(record);
+	if (record->type == TAG_REPLAY_KEY_PURGE_BATCH) {
+		struct cachetag_purge_key *keys = NULL;
+		unsigned nkeys, u;
+
+		r = cachetag_decode_key_purge_batch_record(record->payload,
+		    record->payload_len, &keys, &nkeys, &mode, &seq);
+		if (r != 0)
+			return (r);
+		pm = cachetag_purgemap_get(idx);
+		if (pm == NULL) {
+			free(keys);
+			return (ENOMEM);
+		}
+		PTOK(pthread_mutex_lock(&idx->purge_mtx));
+		cur = __atomic_load_n(&pm->seq, __ATOMIC_ACQUIRE);
+		if (seq <= cur)
+			r = EINVAL;
+		else {
+			r = cachetag_purgemap_prepare_batch_locked(idx, pm, nkeys,
+			    &retired);
+			if (r == 0) {
+				__atomic_store_n(&pm->seq, seq, __ATOMIC_RELEASE);
+				for (u = 0; u < nkeys; u++) {
+					fold = cachetag_fold_digest(keys[u].digest_hi,
+					    keys[u].digest_lo);
+					cachetag_purgemap_apply_upsert_locked(pm, fold, seq,
+					    mode, &created);
+				}
+				cachetag_purgemap_retire_after_commit(idx, retired);
+				retired = NULL;
+				r = cachetag_purgemap_prune_locked(idx, pm, &pruned,
+				    &retired);
+			}
+		}
+		cachetag_purgemap_retire_after_commit(idx, retired);
+		PTOK(pthread_mutex_unlock(&idx->purge_mtx));
+		free(keys);
+		if (r == 0)
+			cachetag_purgemap_account(idx, pm, 0, 0);
+		return (r);
+	}
 	r = cachetag_decode_key_purge_record(record->payload,
 	    record->payload_len, &digest_hi, &digest_lo, &mode, &seq);
 	if (r != 0)

@@ -546,24 +546,8 @@ cachetag_pending_clear_keys(struct cachetag_pending *tp)
 }
 
 static int
-cachetag_pending_contains(const struct cachetag_pending *tp,
-    const struct cachetag_registration_snapshot *snap)
-{
-	unsigned u;
-
-	CHECK_OBJ_NOTNULL(tp, TAG_PENDING_MAGIC);
-	AN(snap);
-	for (u = 0; u < tp->nkeys; u++) {
-		if (tp->keys[u].digest_hi == snap->digest_hi &&
-		    tp->keys[u].digest_lo == snap->digest_lo)
-			return (1);
-	}
-	return (0);
-}
-
-static int
-cachetag_pending_collect_unique(struct cachetag_pending *tp,
-    const struct cachetag_registration_snapshot *snap)
+cachetag_pending_add_unique(struct cachetag_pending *tp,
+    const struct cachetag_registration_snapshot *snap, unsigned max_keys)
 {
 	struct cachetag_registration_snapshot copy;
 	struct cachetag_registration_snapshot *p;
@@ -576,6 +560,8 @@ cachetag_pending_collect_unique(struct cachetag_pending *tp,
 		    tp->keys[u].digest_lo == snap->digest_lo)
 			return (0);
 	}
+	if (tp->nkeys >= max_keys)
+		return (E2BIG);
 	if (tp->nkeys == tp->capkeys) {
 		cap = tp->capkeys * 2;
 		if (tp->keys == tp->inline_keys) {
@@ -1241,33 +1227,48 @@ cachetag_get_pending(VRT_CTX, struct vmod_cachetag_namespace *ns)
 	return (tp);
 }
 
-static char *
-cachetag_trimdup(const char *s, size_t l)
+static void
+cachetag_trim(const char *s, size_t l, const char **startp, size_t *lenp)
 {
 	const char *b, *e;
-	char *p;
-	size_t n;
 
+	AN(s);
+	AN(startp);
+	AN(lenp);
 	b = s;
 	e = s + l;
 	while (b < e && isspace((unsigned char)*b))
 		b++;
 	while (e > b && isspace((unsigned char)e[-1]))
 		e--;
-	n = (size_t)(e - b);
-	p = malloc(n + 1);
+	*startp = b;
+	*lenp = (size_t)(e - b);
+}
+
+static char *
+cachetag_trimdup(const char *s, size_t l)
+{
+	const char *trimmed;
+	char *p;
+	size_t trimmed_len;
+
+	cachetag_trim(s, l, &trimmed, &trimmed_len);
+	p = malloc(trimmed_len + 1);
 	if (p == NULL)
 		return (NULL);
-	memcpy(p, b, n);
-	p[n] = '\0';
+	memcpy(p, trimmed, trimmed_len);
+	p[trimmed_len] = '\0';
 	return (p);
 }
 
 static int
-cachetag_has_embedded_ws(const char *s)
+cachetag_has_embedded_ws_len(const char *s, size_t l)
 {
+	const char *e;
 
-	for (; *s != '\0'; s++) {
+	AN(s);
+	e = s + l;
+	for (; s < e; s++) {
 		if (isspace((unsigned char)*s))
 			return (1);
 	}
@@ -1275,17 +1276,23 @@ cachetag_has_embedded_ws(const char *s)
 }
 
 static int
-cachetag_add_key(VRT_CTX, struct vmod_cachetag_namespace *ns, const char *key)
+cachetag_has_embedded_ws(const char *s)
 {
-	struct cachetag_registration_snapshot snap;
+
+	AN(s);
+	return (cachetag_has_embedded_ws_len(s, strlen(s)));
+}
+
+static int
+cachetag_add_begin(VRT_CTX, struct vmod_cachetag_namespace *ns,
+    struct cachetag_pending **tpp)
+{
 	struct cachetag_pending *tp;
 	int r;
 
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
-	if (key == NULL || *key == '\0') {
-		VRT_fail(ctx, "cachetag.add(): empty key");
-		return (EINVAL);
-	}
+	AN(tpp);
+	*tpp = NULL;
 	if (ctx->bo != NULL && ctx->bo->fetch_objcore != NULL &&
 	    (ctx->bo->fetch_objcore->flags & OC_F_PRIVATE))
 		return (0);
@@ -1309,7 +1316,21 @@ cachetag_add_key(VRT_CTX, struct vmod_cachetag_namespace *ns, const char *key)
 		}
 		tp->publication_held = 1;
 	}
-	r = cachetag_registration_snapshot(ns->index, key, &snap);
+	*tpp = tp;
+	return (0);
+}
+
+static int
+cachetag_add_snapshot(VRT_CTX, struct vmod_cachetag_namespace *ns,
+    struct cachetag_pending *tp, const char *key, size_t keylen)
+{
+	struct cachetag_registration_snapshot snap;
+	int r;
+
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	CHECK_OBJ_NOTNULL(tp, TAG_PENDING_MAGIC);
+	AN(key);
+	r = cachetag_registration_snapshot_len(ns->index, key, keylen, &snap);
 	snap.reg_seq = tp->publication_seq;
 	if (r == EINVAL) {
 		VRT_fail(ctx, "cachetag.add(): invalid key");
@@ -1321,21 +1342,35 @@ cachetag_add_key(VRT_CTX, struct vmod_cachetag_namespace *ns, const char *key)
 		VRT_fail(ctx, "cachetag.add(): key allocation failed");
 		return (r);
 	}
-	/* The object limit counts unique keys, so a duplicate of an
-	 * already-pending key must be recognized before the limit check. */
-	if (cachetag_pending_contains(tp, &snap))
-		return (0);
-	if (tp->nkeys >= cachetag_get_limits(ns->index)->max_keys_per_object) {
+	r = cachetag_pending_add_unique(tp, &snap,
+	    cachetag_get_limits(ns->index)->max_keys_per_object);
+	if (r == E2BIG) {
 		cachetag_count_limit_rejection(ns->index);
 		VRT_fail(ctx, "cachetag.add(): too many keys for object");
 		return (E2BIG);
 	}
-	r = cachetag_pending_collect_unique(tp, &snap);
 	if (r != 0) {
 		VRT_fail(ctx, "cachetag.add(): pending allocation failed");
 		return (r);
 	}
 	return (r);
+}
+
+static int
+cachetag_add_key(VRT_CTX, struct vmod_cachetag_namespace *ns, const char *key)
+{
+	struct cachetag_pending *tp;
+	int r;
+
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	if (key == NULL || *key == '\0') {
+		VRT_fail(ctx, "cachetag.add(): empty key");
+		return (EINVAL);
+	}
+	r = cachetag_add_begin(ctx, ns, &tp);
+	if (r != 0 || tp == NULL)
+		return (r);
+	return (cachetag_add_snapshot(ctx, ns, tp, key, strlen(key)));
 }
 
 VCL_VOID v_matchproto_(td_cachetag_namespace_add)
@@ -1352,10 +1387,10 @@ static int
 cachetag_parse_add(VRT_CTX, struct vmod_cachetag_namespace *ns,
     VCL_STRING header, VCL_STRING sep)
 {
-	const char *p, *q;
-	char *tok;
-	size_t sepl, hl, tl;
-	int r;
+	const char *p, *q, *tok;
+	struct cachetag_pending *tp = NULL;
+	size_t sepl, hl, tl, tokl;
+	int r, skip = 0;
 
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	if (header == NULL || *header == '\0')
@@ -1372,30 +1407,44 @@ cachetag_parse_add(VRT_CTX, struct vmod_cachetag_namespace *ns,
 	for (p = header; ; p = q + sepl) {
 		q = strstr(p, sep);
 		tl = q == NULL ? strlen(p) : (size_t)(q - p);
-		tok = cachetag_trimdup(p, tl);
-		if (tok == NULL)
-			return (ENOMEM);
-		if (*tok != '\0') {
-			if (cachetag_has_embedded_ws(tok)) {
+		cachetag_trim(p, tl, &tok, &tokl);
+		if (tokl != 0) {
+			if (cachetag_has_embedded_ws_len(tok, tokl)) {
 				cachetag_count_parse_error(ns->index);
-				free(tok);
 				return (EINVAL);
 			}
-			/* Unique-key count is bounded fail-closed by
-			 * max_keys_per_object inside cachetag_add_key();
-			 * total parse work is bounded by max_header_bytes. */
-			r = cachetag_add_key(ctx, ns, tok);
-			if (r != 0) {
-				free(tok);
-				return (r);
+			if (tp == NULL && !skip) {
+				r = cachetag_add_begin(ctx, ns, &tp);
+				if (r != 0)
+					return (r);
+				if (tp == NULL)
+					skip = 1;
+			}
+			if (!skip) {
+				r = cachetag_add_snapshot(ctx, ns, tp, tok, tokl);
+				if (r != 0)
+					return (r);
 			}
 		}
-		free(tok);
 		if (q == NULL)
 			break;
 	}
 	return (0);
 }
+
+static int
+cachetag_purge_key_compare(const void *a, const void *b)
+{
+	const struct cachetag_purge_key *ka = a, *kb = b;
+
+	if (ka->digest_hi != kb->digest_hi)
+		return (ka->digest_hi < kb->digest_hi ? -1 : 1);
+	if (ka->digest_lo != kb->digest_lo)
+		return (ka->digest_lo < kb->digest_lo ? -1 : 1);
+	return (0);
+}
+
+static enum cachetag_purge_mode cachetag_parse_mode(VCL_ENUM);
 
 static VCL_INT
 cachetag_purge_header_tokens(VRT_CTX, struct vmod_cachetag_namespace *ns,
@@ -1404,7 +1453,9 @@ cachetag_purge_header_tokens(VRT_CTX, struct vmod_cachetag_namespace *ns,
 	const char *p, *q;
 	char *tok;
 	char **tokens, **grown;
-	size_t sepl, hl, tl, cap, nkeys = 0, u;
+	struct cachetag_purge_key *keys;
+	struct cachetag_registration_snapshot snap;
+	size_t sepl, hl, tl, cap, nkeys = 0, u, unique;
 	VCL_INT r;
 
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
@@ -1472,15 +1523,39 @@ cachetag_purge_header_tokens(VRT_CTX, struct vmod_cachetag_namespace *ns,
 		free(tokens);
 		return (0);
 	}
-	/* All syntax and per-key limits were checked above.  Durable publication
-	 * is intentionally sequential: a later WAL failure may leave earlier
-	 * tokens published, but is reported to the caller. */
-	r = -1;
-	for (u = 0; u < nkeys; u++) {
-		if (r == -1)
-			r = vmod_namespace_purge(ctx, ns, tokens[u], mode_e);
-		free(tokens[u]);
+	keys = calloc(nkeys, sizeof *keys);
+	if (keys == NULL) {
+		r = -2;
+		goto fail;
 	}
+	for (u = 0; u < nkeys; u++) {
+		r = cachetag_registration_snapshot_len(ns->index, tokens[u],
+		    strlen(tokens[u]), &snap);
+		if (r != 0) {
+			if (r == EINVAL)
+				cachetag_count_parse_error(ns->index);
+			else
+				cachetag_count_limit_rejection(ns->index);
+			free(keys);
+			r = r == EINVAL ? -3 : -2;
+			goto fail;
+		}
+		keys[u].digest_hi = snap.digest_hi;
+		keys[u].digest_lo = snap.digest_lo;
+	}
+	qsort(keys, nkeys, sizeof *keys, cachetag_purge_key_compare);
+	unique = 0;
+	for (u = 0; u < nkeys; u++) {
+		if (unique != 0 && keys[unique - 1].digest_hi == keys[u].digest_hi &&
+		    keys[unique - 1].digest_lo == keys[u].digest_lo)
+			continue;
+		keys[unique++] = keys[u];
+	}
+	r = cachetag_purge_batch(ns->index, keys, unique,
+	    cachetag_parse_mode(mode_e));
+	free(keys);
+	for (u = 0; u < nkeys; u++)
+		free(tokens[u]);
 	free(tokens);
 	return (r);
  fail:
@@ -1800,6 +1875,16 @@ vmod_namespace_test_fail_next_key_purge_wal(VRT_CTX,
 	(void)ctx;
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	return (cachetag_test_fail_next_key_purge_wal(ns->index));
+}
+
+VCL_BOOL v_matchproto_(td_cachetag_namespace_test_fail_next_key_purge_batch_alloc)
+vmod_namespace_test_fail_next_key_purge_batch_alloc(VRT_CTX,
+    struct vmod_cachetag_namespace *ns)
+{
+
+	(void)ctx;
+	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
+	return (cachetag_test_fail_next_key_purge_batch_alloc(ns->index));
 }
 
 VCL_BOOL v_matchproto_(td_cachetag_namespace_test_fail_next_persist_prepare)

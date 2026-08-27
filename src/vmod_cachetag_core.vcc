@@ -117,9 +117,10 @@ Parse and purge every tag in ``header``. All tokens are validated before any
 publication. The token count has no independent ceiling; the header value is
 bounded by ``max_tag_header_bytes`` and each token by ``max_key_length``.
 Accepted purges return ``-1`` only after every tag is published.
-Publication is sequential, so if a later durable publication fails, earlier
-tags remain purged and the error is returned. The same negative error codes as
-``purge()`` apply.
+The complete header is validated and deduplicated before publication. A
+successful multi-tag call is one durable WAL transaction and one sync: either
+every tag is recovered after restart or none is. The same negative error codes
+as ``purge()`` apply.
 
 $Restrict vcl_recv vcl_hit vcl_miss vcl_pass vcl_deliver vcl_synth vcl_backend_fetch vcl_backend_response vcl_backend_error
 

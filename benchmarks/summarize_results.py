@@ -1248,6 +1248,151 @@ def comparison_contract_active(result_dir: Path) -> bool:
     ) in {"comparison-v1", "interning-screen-v1", "runtime-interning-decision-v1"}
 
 
+def persistent_purge_latency_contract_active(result_dir: Path) -> bool:
+    """Return whether the artifact opts into the narrow serial-purge contract."""
+    metadata = parse_kv(result_dir / "metadata.env")
+    remote = parse_kv(result_dir / "remote-run.env")
+    return (
+        metadata.get("benchmark_contract") == "persistent-purge-latency-screen-v1"
+        or remote.get("benchmark_contract") == "persistent-purge-latency-screen-v1"
+    )
+
+
+def purge_latency_contract_validity(
+    result_dir: Path,
+    workload: str,
+    run: int,
+    driver: dict[str, str],
+    stats: dict[str, int],
+    time_values: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Validate fixed serial persistent-purge evidence without judging saturation."""
+    if not persistent_purge_latency_contract_active(result_dir):
+        return 1, "not_applicable"
+
+    metadata = parse_kv(result_dir / "metadata.env")
+    remote = parse_kv(result_dir / "remote-run.env")
+    provenance = parse_kv(result_dir / "build-provenance.env")
+    reasons: list[str] = []
+    values = {**remote, **metadata}
+    expected_metadata = {
+        "bench_profile": "bulk-purge-bursts",
+        "objects": "10000",
+        "tags_per_object": "4",
+        "bench_buckets": "64",
+        "bench_purge_requests": "100",
+        "bench_purge_keys_per_request": "10",
+        "bench_storage_kind": "fellow",
+        "bench_cache_tag_persist": "1",
+        "bench_cache_tag_wal_fsync": "strict",
+        "run_xkey": "0",
+        "run_noindex": "0",
+        "runs": "3",
+        "vinyl_build_profile": "optimized",
+        "bench_build_cflags": "-O2 -g",
+    }
+    for key, expected in expected_metadata.items():
+        if values.get(key) != expected:
+            reasons.append(f"purge_latency_metadata_invalid:{key}")
+    if "-O0" in values.get("vinyl_build_cflags", "") or "-fno-inline" in values.get("vinyl_build_cflags", ""):
+        reasons.append("purge_latency_vinyl_optimisation_invalid")
+
+    if provenance.get("build_provenance_version") != "5":
+        reasons.append("purge_latency_provenance_version_invalid")
+    if provenance.get("build_provenance_mode") != "strict" or provenance.get("build_provenance_eligible") != "1":
+        reasons.append("purge_latency_provenance_not_strict")
+    for key in (
+        "harness_input_sha256", "cachetag_build_input_sha256", "vinyl_build_input_sha256",
+        "slash_build_input_sha256", "cachetag_binary_sha256", "vinyl_binary_sha256",
+        "build_commands_sha256", "dockerfile_sha256",
+    ):
+        _required_hash(reasons, provenance, key)
+    if not provenance.get("docker_image_id") or provenance.get("docker_image_id") == "none":
+        reasons.append("purge_latency_provenance_missing:docker_image_id")
+    for source in ("cachetag", "vinyl", "slash", "harness"):
+        if provenance.get(f"{source}_dirty_state") != "clean":
+            reasons.append(f"purge_latency_provenance_{source}_not_clean")
+    if not _valid_sha256(metadata.get("purge_latency_cohort_fingerprint") or remote.get("purge_latency_cohort_fingerprint")):
+        reasons.append("purge_latency_cohort_fingerprint_missing")
+
+    if time_values is None:
+        reasons.append("purge_latency_time_telemetry_missing")
+    else:
+        if as_int(time_values, "swap_activity") != 0:
+            reasons.append("purge_latency_swap_activity")
+        if time_values.get("system_sampler_status") != "ok" or as_int(time_values, "system_sampler_under_sampled") != 0 or as_int(time_values, "system_sampler_thread_stalled") != 0:
+            reasons.append("purge_latency_sampler_invalid")
+
+    if workload != "cachetag_bulk_purge_bursts":
+        reasons.append("purge_latency_workload_invalid")
+    if as_int(driver, "driver_errors") != 0:
+        reasons.append("purge_latency_driver_errors")
+    if (
+        as_int(driver, "driver_load_requests") != 10000
+        or driver.get("driver_load_residency_validation") != "full-hit"
+        or as_int(driver, "driver_load_residency_requests") != 10000
+        or as_int(driver, "driver_load_residency_hits") != 10000
+    ):
+        reasons.append("purge_latency_load_residency_invalid")
+    expected = 100
+    for key in (
+        "driver_bulk_purge_requests", "driver_bulk_purge_attempted_requests",
+        "driver_bulk_purge_completed_requests", "driver_bulk_purge_published_requests",
+    ):
+        if as_int(driver, key) != expected:
+            reasons.append(f"purge_latency_request_count_invalid:{key}")
+    if driver.get("driver_bulk_purge_published") != "true" or as_int(driver, "driver_bulk_purge_keys") != 1000 or driver.get("driver_bulk_purge_expected_deduplicated") != "true":
+        reasons.append("purge_latency_fixed_work_invalid")
+    if driver.get("driver_bulk_purge_validation") != "sample-miss" or as_int(driver, "driver_bulk_purge_validation_requests") != 960 or as_int(driver, "driver_bulk_purge_validation_hits") != 0 or as_int(driver, "driver_bulk_purge_validation_misses") != 960:
+        reasons.append("purge_latency_freshness_invalid")
+
+    prefix = "driver_bulk_purge"
+    if as_int(driver, "driver_bulk_purge_unique_keys") != 64:
+        reasons.append("purge_latency_identity_set_invalid")
+    if driver.get(prefix + "_latency_sampling_method") != "deterministic-reservoir-v1":
+        reasons.append("purge_latency_sampling_method_invalid")
+    if any(as_int(driver, prefix + suffix) != expected for suffix in ("_latency_sampling_limit", "_latency_sampling_seen", "_latency_samples")) or as_int(driver, prefix + "_latency_sampling_dropped") != 0:
+        reasons.append("purge_latency_sampling_count_invalid")
+    raw_path = driver.get(prefix + "_latency_samples_path", "")
+    raw_name = Path(raw_path).name
+    if "." in raw_name:
+        stem, extension = raw_name.split(".", 1)
+        captured = result_dir / f"{stem}.run-{run}.{extension}"
+    else:
+        captured = result_dir / "missing-purge-latency-artifact"
+    if not raw_path or not captured.is_file():
+        reasons.append("purge_latency_raw_samples_missing")
+    else:
+        try:
+            raw_lines = captured.read_text(encoding="utf-8", errors="replace").splitlines()
+            samples = [float(value) for value in raw_lines[1:]] if raw_lines[:1] == ["seconds"] else []
+            if len(samples) != expected or any(not math.isfinite(value) or value < 0 for value in samples):
+                reasons.append("purge_latency_raw_samples_invalid")
+            else:
+                samples.sort()
+                for suffix, pct in (("p50", 0.50), ("p95", 0.95), ("p99", 0.99), ("max", 1.0)):
+                    reported = as_float(driver, f"{prefix}_latency_{suffix}_seconds")
+                    expected_value = samples[-1] if pct == 1.0 else percentile(samples, pct)
+                    if reported is None or not math.isfinite(reported) or abs(reported - expected_value) > 1e-8:
+                        reasons.append(f"purge_latency_summary_mismatch:{suffix}")
+        except (OSError, ValueError):
+            reasons.append("purge_latency_raw_samples_invalid")
+
+    expected_per_header = as_int(values, "bench_purge_latency_expected_wal_records_per_header")
+    if expected_per_header not in {1, 10}:
+        reasons.append("purge_latency_expected_wal_geometry_invalid")
+    else:
+        expected_wal_records = expected * expected_per_header
+        if cachetag_counter(stats, "persist_wal_records") != expected_wal_records:
+            reasons.append("purge_latency_wal_records_mismatch")
+        if cachetag_counter(stats, "purgemap_seq") != expected_wal_records:
+            reasons.append("purge_latency_sequence_mismatch")
+    for counter in ("persist_failures", "persist_degraded", "parse_errors", "limit_rejections"):
+        if cachetag_counter(stats, counter) != 0:
+            reasons.append(f"purge_latency_counter_invalid:{counter}")
+    return int(not reasons), "ok" if not reasons else ",".join(reasons)
+
+
 def controlled_perf_validity(result_dir: Path, workload: str, run: int) -> tuple[int, str]:
     """Verify the decision protocol's phase-scoped counter identity."""
     metadata = parse_kv(result_dir / "metadata.env")
@@ -1808,7 +1953,10 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
         comparison_valid, comparison_reason = comparison_contract_validity(
             result_dir, workload, run, time_values, driver_values, stats
         )
-        overall_valid = int(overall_valid == 1 and comparison_valid == 1)
+        purge_latency_valid, purge_latency_reason = purge_latency_contract_validity(
+            result_dir, workload, run, driver_values, stats, time_values
+        )
+        overall_valid = int(overall_valid == 1 and comparison_valid == 1 and purge_latency_valid == 1)
         phase_stats = {
             phase: parse_vsc_stats(path)
             for phase, path in phase_stats_files(result_dir, workload, run).items()
@@ -1921,6 +2069,8 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
             "raw_latency_validity_reason": raw_latency_reason,
             "comparison_contract_valid": comparison_valid,
             "comparison_contract_validity_reason": comparison_reason,
+            "purge_latency_contract_valid": purge_latency_valid,
+            "purge_latency_contract_validity_reason": purge_latency_reason,
             "overall_valid": overall_valid,
             "overall_validity_reason": "ok" if overall_valid else ",".join(
                 reason
@@ -1930,6 +2080,7 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
                     (system_memory_valid, "system_memory_invalid"),
                     (int(raw_latency_valid != 0), "raw_latency_invalid"),
                     (comparison_valid, comparison_reason),
+                    (purge_latency_valid, purge_latency_reason),
                 )
                 if valid != 1
             ),
@@ -2129,6 +2280,11 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
             "driver_load_pending_drain_seconds": as_float(
                 driver_values, "driver_load_pending_drain_seconds"
             ),
+            "driver_bulk_purge_wall_seconds": as_float(driver_values, "driver_bulk_purge_wall_seconds"),
+            "driver_bulk_purge_latency_p50_seconds": as_float(driver_values, "driver_bulk_purge_latency_p50_seconds"),
+            "driver_bulk_purge_latency_p95_seconds": as_float(driver_values, "driver_bulk_purge_latency_p95_seconds"),
+            "driver_bulk_purge_latency_p99_seconds": as_float(driver_values, "driver_bulk_purge_latency_p99_seconds"),
+            "driver_bulk_purge_latency_max_seconds": as_float(driver_values, "driver_bulk_purge_latency_max_seconds"),
             "cache_main_load_cpu_seconds": load_cache_main_cpu_seconds,
             "cache_main_load_cpu_seconds_per_object": ratio(
                 load_cache_main_cpu_seconds, load_backend_objects
@@ -2653,6 +2809,11 @@ def aggregate_workload_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "driver_load_requests_per_second",
             "driver_load_fixed_work_seconds",
             "driver_load_pending_drain_seconds",
+            "driver_bulk_purge_wall_seconds",
+            "driver_bulk_purge_latency_p50_seconds",
+            "driver_bulk_purge_latency_p95_seconds",
+            "driver_bulk_purge_latency_p99_seconds",
+            "driver_bulk_purge_latency_max_seconds",
             "cache_main_load_cpu_seconds",
             "cache_main_load_cpu_seconds_per_object",
             "driver_warm_requests_per_second",
@@ -2890,6 +3051,8 @@ def result_data(result_dir: Path) -> dict[str, Any]:
         "hardware": hardware_fingerprint(result_dir),
         "comparison_cohort_fingerprint": metadata.get("benchmark_cohort_fingerprint")
         or remote.get("benchmark_cohort_fingerprint"),
+        "purge_latency_cohort_fingerprint": metadata.get("purge_latency_cohort_fingerprint")
+        or remote.get("purge_latency_cohort_fingerprint"),
         # The measured VCL shape. It is inside the cohort fingerprint, so a
         # one-call row can never merge with a two-call row; this field is what
         # makes the difference readable instead of only enforced.
@@ -3821,6 +3984,11 @@ ARM_STATISTICAL_METRICS = (
     "driver_load_requests_per_second",
     "driver_load_fixed_work_seconds",
     "driver_load_pending_drain_seconds",
+    "driver_bulk_purge_wall_seconds",
+    "driver_bulk_purge_latency_p50_seconds",
+    "driver_bulk_purge_latency_p95_seconds",
+    "driver_bulk_purge_latency_p99_seconds",
+    "driver_bulk_purge_latency_max_seconds",
     "cache_main_load_cpu_seconds",
     "cache_main_load_cpu_seconds_per_object",
     "driver_warm_requests_per_second",
@@ -3863,6 +4031,11 @@ ARM_METRIC_DISPLAY: dict[str, tuple[float, str]] = {
     "cache_main_load_cpu_seconds_per_object": (1_000_000.0, "us/object"),
     "driver_warm_latency_p99_seconds": (1_000.0, "ms"),
     "driver_warm_latency_max_seconds": (1_000.0, "ms"),
+    "driver_bulk_purge_wall_seconds": (1_000.0, "ms"),
+    "driver_bulk_purge_latency_p50_seconds": (1_000.0, "ms"),
+    "driver_bulk_purge_latency_p95_seconds": (1_000.0, "ms"),
+    "driver_bulk_purge_latency_p99_seconds": (1_000.0, "ms"),
+    "driver_bulk_purge_latency_max_seconds": (1_000.0, "ms"),
     "cache_main_warm_cpu_seconds_per_hit": (1_000_000.0, "us/hit"),
     "vinyld_warm_instructions_per_hit": (1.0, "instructions/hit"),
     "vinyld_warm_cycles_per_hit": (1.0, "cycles/hit"),
@@ -3938,6 +4111,12 @@ def comparison_arm_cohort_validity(arms: dict[str, list[dict[str, Any]]]) -> tup
         for result in results
         if comparison_contract_active(Path(result["path"]))
     ]
+    purge_latency_results = [
+        result
+        for results in arms.values()
+        for result in results
+        if persistent_purge_latency_contract_active(Path(result["path"]))
+    ]
     decision_results = [
         result
         for results in arms.values()
@@ -3981,6 +4160,20 @@ def comparison_arm_cohort_validity(arms: dict[str, list[dict[str, Any]]]) -> tup
         if any(len(binaries) > 1 for binaries in arm_binaries.values()):
             return 0, "decision_arm_binary_hash_changed"
         return 1, "ok"
+    if purge_latency_results:
+        if active_results:
+            return 0, "purge_latency_campaign_mixed_with_generic_contract"
+        if len(purge_latency_results) != sum(len(results) for results in arms.values()):
+            return 0, "purge_latency_campaign_mixed_with_other_contract"
+        fingerprints = {
+            result.get("purge_latency_cohort_fingerprint")
+            for result in purge_latency_results
+        }
+        if not fingerprints or None in fingerprints or "" in fingerprints:
+            return 0, "purge_latency_cohort_fingerprint_missing"
+        if len(fingerprints) != 1:
+            return 0, "purge_latency_cohort_fingerprint_changed_across_arms"
+        return 1, "ok"
     fingerprints = {
         str(result.get("comparison_cohort_fingerprint"))
         for results in arms.values()
@@ -4020,6 +4213,7 @@ def render_arm_comparison(arms: dict[str, list[dict[str, Any]]]) -> str:
     rows_by_arm: dict[str, dict[str, list[dict[str, Any]]]] = {}
     judged_comparison = any(
         comparison_contract_active(Path(result["path"]))
+        or persistent_purge_latency_contract_active(Path(result["path"]))
         for results in arms.values()
         for result in results
     )

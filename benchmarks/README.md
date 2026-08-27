@@ -322,7 +322,7 @@ Remote matrix defaults can be tuned with environment variables:
 - `CACHE_TAG_WAL_FSYNC`: override `BENCH_CACHE_TAG_WAL_FSYNC`.
 - `CACHE_TAG_SWEEP_BATCH_OBJECTS`, `CACHE_TAG_SWEEP_BATCH_HOLD`, `CACHE_TAG_SWEEP_BATCH_YIELD`: override the matching `BENCH_CACHE_TAG_*` bounded-sweep knobs.
 - `CACHE_TAG_BENCH_PERF_FREQ`: `perf record` frequency.
-- `CACHE_TAG_BENCHMARK_CONTRACT`: `development-v1`, `comparison-v1`, or `interning-screen-v1`.
+- `CACHE_TAG_BENCHMARK_CONTRACT`: `development-v1`, `comparison-v1`, `interning-screen-v1`, or `persistent-purge-latency-screen-v1:1`/`:10`. The latency contract accepts only the fixed persistent Fellow `bulk-purge-bursts` shape and records whether each accepted header is expected to produce one or ten WAL records.
 - `CACHE_TAG_BENCH_CPUSET_CPUS`, `CACHE_TAG_BENCH_DRIVER_CPUSET_CPUS`, `CACHE_TAG_BENCH_BACKEND_CPUSET_CPUS`, `CACHE_TAG_BENCH_VINYL_CPUSET_CPUS`: whole-container and per-process CPU placement.
 - `CACHE_TAG_BENCH_DRIVER_HEADROOM_REQUIRED`, `CACHE_TAG_BENCH_DRIVER_HEADROOM_TARGET_RPS`, `CACHE_TAG_BENCH_DRIVER_HEADROOM_SECONDS`: executable trivial-endpoint headroom gate controls.
 - `CACHE_TAG_BENCH_CONCURRENT_TARGET_RPS`: generic offered-rate override; `CACHE_TAG_PRESSURE_TARGET_RPS` remains the pressure-matrix override.
@@ -349,7 +349,7 @@ benchmarks/summarize_results.py benchmarks/remote-results/host-a/full/*/*.tgz
 benchmarks/summarize_results.py benchmarks/remote-results/20260622_51.159.110.61/local-cost-*/*.tgz
 ```
 
-The summarizer reports pass/fail counts, driver errors, wall-time distribution, CPU saturation, busiest single core, memory headroom, cgroup peak memory, swap activity, disk IO deltas, an inferred limiting factor, and hardware fingerprint groups. Treat summaries that warn about low CPU and memory pressure as correctness or harness-overhead results, not throughput limits.
+The summarizer reports pass/fail counts, driver errors, wall-time distribution, CPU saturation, busiest single core, memory headroom, cgroup peak memory, swap activity, disk IO deltas, an inferred limiting factor, and hardware fingerprint groups. Treat summaries that warn about low CPU and memory pressure as correctness or harness-overhead results, not throughput limits. `persistent-purge-latency-screen-v1` is a separate serial-latency scope: it validates raw client-observed per-header samples, exact work, freshness, persistence, provenance, sampler health, and no swap, while still excluding throughput, CPU, and disk-util claims.
 
 The summarizer’s `cgroup_peak_bytes` field has the same lifetime-high-water caveat as the raw `.time` metric ([BR-001](rules/BR-001-build-inclusive-memory-peak.md)). For Phase 6 rows the summarizer also prints a per-cycle p99/max/RSS table and emits `[BR-005]`/`[BR-006]` interpretation warnings for non-production allocator configs and allocator decay-purge tail signatures.
 

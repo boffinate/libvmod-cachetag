@@ -16,7 +16,8 @@ enum cachetag_wal_fsync {
 };
 
 enum cachetag_wal_record_type {
-	TAG_REPLAY_KEY_PURGE = 3
+	TAG_REPLAY_KEY_PURGE = 3,
+	TAG_REPLAY_KEY_PURGE_BATCH = 4
 };
 
 struct cachetag_wal;

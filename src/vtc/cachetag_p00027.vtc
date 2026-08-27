@@ -1,0 +1,218 @@
+vtest "persistent soft purge_header batch and equal-sequence cap survive restart"
+
+server s1 {
+	rxreq
+	expect req.url == "/one"
+	txresp -hdr "Connection: close" -hdr "X-Source: one-old" -body "one-old"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/two"
+	txresp -hdr "Connection: close" -hdr "X-Source: two-old" -body "two-old"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/three"
+	txresp -hdr "Connection: close" -hdr "X-Source: three-old" -body "three-old"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/hold"
+	txresp -hdr "Connection: close" -hdr "X-Source: hold-old" -body "hold-old"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/one"
+	txresp -hdr "Connection: close" -hdr "X-Source: one-new" -body "one-new"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/two"
+	txresp -hdr "Connection: close" -hdr "X-Source: two-new" -body "two-new"
+	expect_close
+	accept
+
+	rxreq
+	expect req.url == "/three"
+	txresp -hdr "X-Source: three-new" -body "three-new"
+
+	rxreq
+	expect req.url == "/hold"
+	txresp -hdr "X-Source: hold-new" -body "hold-new"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/purgemap-soft-batch.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+	import cachetag;
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+		new tags = cachetag.namespace("soft_batch",
+		    persist_path = "${tmpdir}/tag-persist",
+		    purge_history_max_entries = 2,
+		    sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "SOFTPURGE") {
+			set req.http.result = tags.purge_header(req.http.Tags,
+			    mode = soft);
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/one") {
+			tags.add("one");
+		} else if (bereq.url == "/two") {
+			tags.add("two");
+		} else if (bereq.url == "/hold") {
+			tags.add("one");
+		} else {
+			tags.add("three");
+		}
+		set beresp.ttl = 1h;
+		set beresp.grace = 5s;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.result = req.http.result;
+		return (deliver);
+	}
+} -start
+
+client c_seed {
+	txreq -url "/one"
+	rxresp
+	expect resp.http.X-Source == "one-old"
+
+	txreq -url "/two"
+	rxresp
+	expect resp.http.X-Source == "two-old"
+
+	txreq -url "/three"
+	rxresp
+	expect resp.http.X-Source == "three-old"
+
+	txreq -url "/hold"
+	rxresp
+	expect resp.http.X-Source == "hold-old"
+} -run
+
+client c_soft_batch {
+	txreq -req SOFTPURGE -hdr "Tags: one,two"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.result == -1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_seq == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.persist_wal_records == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_entries == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_soft_floor == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_hard_floor == 0
+
+# Exercise WAL replay before a soft probe reduces either object's TTL to zero
+# and makes it ineligible for Fellow resurrection.
+vinyl v1 -stop
+vinyl v1 -start
+
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_seq == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_entries == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_soft_floor == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_hard_floor == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.fellow_replayed_records == 1
+
+client c_replayed_soft_batch {
+	txreq -url "/one"
+	rxresp
+	expect resp.http.X-Source == "one-old"
+
+	txreq -url "/two"
+	rxresp
+	expect resp.http.X-Source == "two-old"
+} -run
+
+delay 6
+
+client c_fresh_generation {
+	txreq -url "/one"
+	rxresp
+	expect resp.http.X-Source == "one-new"
+
+	txreq -url "/two"
+	rxresp
+	expect resp.http.X-Source == "two-new"
+} -run
+
+client c_soft_cap {
+	txreq -req SOFTPURGE -hdr "Tags: three"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.result == -1
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_seq == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_entries == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_soft_floor == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_hard_floor == 0
+
+vinyl v1 -stop
+vinyl v1 -start
+
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_seq == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_entries == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_soft_floor == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_hard_floor == 0
+
+client c_restarted_soft {
+	txreq -url "/one"
+	rxresp
+	expect resp.http.X-Source == "one-new"
+
+	txreq -url "/two"
+	rxresp
+	expect resp.http.X-Source == "two-new"
+
+	txreq -url "/three"
+	rxresp
+	expect resp.http.X-Source == "three-old"
+
+	# Fellow does not resurrect an object whose TTL was reduced to zero, even
+	# while it remains deliverable from grace. Leave this object untouched
+	# before restart so this request exercises the recovered soft floor.
+	txreq -url "/hold"
+	rxresp
+	expect resp.http.X-Source == "hold-old"
+} -run
+
+delay 6
+
+client c_restarted_fresh {
+	txreq -url "/three"
+	rxresp
+	expect resp.http.X-Source == "three-new"
+
+	txreq -url "/hold"
+	rxresp
+	expect resp.http.X-Source == "hold-new"
+} -run
+
+vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.fellow_replayed_records == 0
+
+server s1 -wait

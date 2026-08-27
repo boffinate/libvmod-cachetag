@@ -185,7 +185,8 @@ Environment:
                            (default: matrix default)
   CACHE_TAG_BENCHMARK_CONTRACT
                            Set BENCHMARK_CONTRACT (development-v1 or
-                           comparison-v1 or interning-screen-v1;
+                           comparison-v1, interning-screen-v1, or
+                           persistent-purge-latency-screen-v1:1 or :10;
                            default: development-v1)
   CACHE_TAG_BENCH_CPUSET_CPUS
                            Docker CPU set for the benchmark container

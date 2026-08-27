@@ -1,0 +1,35 @@
+vtest "cachetag add_header trims slices and deduplicates before its unique limit"
+
+server s1 {
+	rxreq
+	txresp -body "first"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("slices", max_keys_per_object = 3);
+	}
+
+	sub vcl_backend_response {
+		# Empty fields and surrounding whitespace must not change the three
+		# registered identities. The fourth non-empty field is a duplicate.
+		tags.add_header(" , alpha , beta, alpha , gamma , ");
+	}
+
+	sub vcl_deliver {
+		set resp.http.Tag-Objects = tags.objects();
+		set resp.http.Tag-Edges = tags.edges();
+	}
+} -start
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.status == 200
+	expect resp.http.Tag-Objects == 1
+	expect resp.http.Tag-Edges == 3
+} -run
+
+server s1 -wait

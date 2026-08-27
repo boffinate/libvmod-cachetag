@@ -9,6 +9,10 @@ $Method BOOL .test_fail_next_key_purge_wal()
 
 Make the next durable purge WAL append fail for regression tests.
 
+$Method BOOL .test_fail_next_key_purge_batch_alloc()
+
+Make the next durable multi-tag purge payload allocation fail for regression tests.
+
 $Method BOOL .test_fail_next_persist_prepare()
 
 Make the next persistence preparation fail for regression tests.

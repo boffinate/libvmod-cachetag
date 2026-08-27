@@ -139,6 +139,7 @@ VTC_TESTS_CORE = \
 	vtc/cachetag_c00026.vtc \
 	vtc/cachetag_c00027.vtc \
 	vtc/cachetag_c00028.vtc \
+	vtc/cachetag_c00029.vtc \
 	vtc/cachetag_r00001.vtc \
 	vtc/cachetag_r00002.vtc \
 	vtc/cachetag_r00003.vtc \
@@ -280,6 +281,10 @@ FELLOW_VTC_TESTS = \
 	vtc/cachetag_p00021.vtc \
 	vtc/cachetag_p00022.vtc \
 	vtc/cachetag_p00023.vtc \
+	vtc/cachetag_p00024.vtc \
+	vtc/cachetag_p00025.vtc \
+	vtc/cachetag_p00026.vtc \
+	vtc/cachetag_p00027.vtc \
 	vtc/cachetag_p00090.vtc \
 	vtc/cachetag_x00000.vtc
 

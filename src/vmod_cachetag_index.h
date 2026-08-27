@@ -66,6 +66,11 @@ enum cachetag_fellow_metric {
 
 struct cachetag_index;
 
+struct cachetag_purge_key {
+	uint64_t digest_hi;
+	uint64_t digest_lo;
+};
+
 typedef int cachetag_pending_probe_f(void *, struct objcore *,
     enum cachetag_purge_mode *, int *);
 
@@ -79,6 +84,8 @@ void cachetag_index_detach_all(struct cachetag_index *);
 
 int cachetag_registration_snapshot(struct cachetag_index *, const char *,
     struct cachetag_registration_snapshot *);
+int cachetag_registration_snapshot_len(struct cachetag_index *, const char *,
+    size_t, struct cachetag_registration_snapshot *);
 int cachetag_publication_enter(struct cachetag_index *, unsigned *, uint64_t *);
 void cachetag_publication_exit(struct cachetag_index *, unsigned);
 int cachetag_attach(struct cachetag_index *, struct objcore *,
@@ -90,6 +97,8 @@ void cachetag_note_stale_memo_hit(struct cachetag_index *);
 
 int cachetag_purge(struct cachetag_index *, const char *,
     enum cachetag_purge_mode);
+int cachetag_purge_batch(struct cachetag_index *,
+    const struct cachetag_purge_key *, unsigned, enum cachetag_purge_mode);
 int cachetag_generation(struct cachetag_index *, const char *, uint64_t *);
 int cachetag_stale(struct worker *, struct cachetag_index *, struct objcore *,
     cachetag_pending_probe_f *, void *);
@@ -112,6 +121,9 @@ void cachetag_note_fellow_metric(struct cachetag_index *,
     enum cachetag_fellow_metric, uint64_t);
 uint64_t cachetag_compact_all(struct cachetag_index *);
 int cachetag_test_fail_next_key_purge_wal(struct cachetag_index *);
+#if CACHE_TAG_TEST_HOOKS
+int cachetag_test_fail_next_key_purge_batch_alloc(struct cachetag_index *);
+#endif
 int cachetag_test_fail_next_persist_prepare(struct cachetag_index *);
 int cachetag_test_side_initial_buckets(struct cachetag_index *, uint32_t);
 int cachetag_test_abort_next_sweep(struct cachetag_index *);
@@ -146,8 +158,14 @@ int cachetag_persist_enabled(struct cachetag_index *);
 int cachetag_persist_prepare(struct cachetag_index *);
 int cachetag_persist_key_purge_digest(struct cachetag_index *, uint64_t,
     uint64_t, enum cachetag_purge_mode, uint64_t);
+int cachetag_persist_key_purge_batch(struct cachetag_index *,
+    const struct cachetag_purge_key *, unsigned, enum cachetag_purge_mode,
+    uint64_t);
 int cachetag_decode_key_purge_record(const void *, uint64_t, uint64_t *,
     uint64_t *, enum cachetag_purge_mode *, uint64_t *);
+int cachetag_decode_key_purge_batch_record(const void *, uint64_t,
+    struct cachetag_purge_key **, unsigned *, enum cachetag_purge_mode *,
+    uint64_t *);
 int cachetag_persist_replay(struct cachetag_index *);
 int cachetag_purgemap_checkpoint(struct cachetag_index *, int);
 void cachetag_purgemap_replay_complete(struct cachetag_index *);
