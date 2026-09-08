@@ -28,6 +28,7 @@ type config struct {
 	host                         string
 	port                         int
 	objects                      int
+	objectStart                  int
 	mode                         string
 	profile                      string
 	tagsPerObject                int
@@ -47,6 +48,7 @@ type config struct {
 	tagUniverse                  int
 	purgeRequests                int
 	purgeKeysPerRequest          int
+	bulkPurgeConcurrency         int
 	purgeValidate                int
 	purgeSettleDelay             int
 	purgeHitRecheckDelay         int
@@ -678,6 +680,10 @@ func parseConfig() (config, error) {
 	if err != nil || objects <= 0 {
 		return config{}, fmt.Errorf("OBJECTS must be positive")
 	}
+	objectStart, err := envIntAllowZero("BENCH_OBJECT_START", 0)
+	if err != nil {
+		return config{}, err
+	}
 	tagsPerObject, err := strconv.Atoi(os.Args[6])
 	if err != nil || tagsPerObject < 0 {
 		return config{}, fmt.Errorf("TAGS_PER_OBJECT must be non-negative")
@@ -773,6 +779,13 @@ func parseConfig() (config, error) {
 	purgeKeysPerRequest, err := envInt("BENCH_PURGE_KEYS_PER_REQUEST", 10)
 	if err != nil {
 		return config{}, err
+	}
+	bulkPurgeConcurrency, err := envInt("BENCH_BULK_PURGE_CONCURRENCY", 1)
+	if err != nil {
+		return config{}, err
+	}
+	if bulkPurgeConcurrency < 1 || bulkPurgeConcurrency > 8 {
+		return config{}, fmt.Errorf("BENCH_BULK_PURGE_CONCURRENCY must be between 1 and 8")
 	}
 	purgeValidate, err := envInt("BENCH_PURGE_VALIDATE_OBJECTS", 1000)
 	if err != nil {
@@ -972,6 +985,13 @@ func parseConfig() (config, error) {
 	default:
 		return config{}, fmt.Errorf("BENCH_CACHE_TAG_PERSIST must be boolean or auto")
 	}
+	if bulkPurgeConcurrency != 1 && profile != "bulk-purge-bursts" {
+		return config{}, fmt.Errorf("BENCH_BULK_PURGE_CONCURRENCY > 1 requires bulk-purge-bursts")
+	}
+	if bulkPurgeConcurrency != 1 &&
+		(!modeIsCachetag(os.Args[4]) || cacheTagPersist) {
+		return config{}, fmt.Errorf("BENCH_BULK_PURGE_CONCURRENCY > 1 requires volatile cachetag mode")
+	}
 	tagLengthClass := os.Getenv("BENCH_TAG_LENGTH_CLASS")
 	if tagLengthClass == "" {
 		tagLengthClass = "default"
@@ -1030,6 +1050,7 @@ func parseConfig() (config, error) {
 		host:                         os.Args[1],
 		port:                         port,
 		objects:                      objects,
+		objectStart:                  objectStart,
 		mode:                         os.Args[4],
 		profile:                      os.Args[5],
 		tagsPerObject:                tagsPerObject,
@@ -1049,6 +1070,7 @@ func parseConfig() (config, error) {
 		tagUniverse:                  tagUniverse,
 		purgeRequests:                purgeRequests,
 		purgeKeysPerRequest:          purgeKeysPerRequest,
+		bulkPurgeConcurrency:         bulkPurgeConcurrency,
 		purgeValidate:                purgeValidate,
 		purgeSettleDelay:             purgeSettleDelay,
 		purgeHitRecheckDelay:         purgeHitRecheckDelay,
@@ -1163,6 +1185,20 @@ func writePhaseMarker(cfg config, phase string, event string) error {
 		event,
 	)
 	return os.WriteFile(path, []byte(body), 0644)
+}
+
+func transportConnectionLimit(cfg config) int {
+	maxWarmClients := cfg.clients
+	for _, clients := range cfg.warmClientSweep {
+		if clients > maxWarmClients {
+			maxWarmClients = clients
+		}
+	}
+	limit := maxWarmClients + cfg.concurrentReaders + cfg.concurrentWriters + cfg.concurrentPurgers + 4
+	if cfg.bulkPurgeConcurrency > limit {
+		limit = cfg.bulkPurgeConcurrency
+	}
+	return limit
 }
 
 func phaseControlExchange(cfg config, phase string, event string) error {
@@ -3047,6 +3083,71 @@ func runWarmOnly(client *http.Client, baseURL string, cfg config, lines *metrics
 	return markerErr
 }
 
+func runSparseProbe(client *http.Client, baseURL string, cfg config, lines *metrics, expectHit bool) error {
+	phase := "sparse-miss-probe"
+	expectedState := "miss"
+	expectedEpoch := uint64(2)
+	if expectHit {
+		phase = "sparse-hit-probe"
+		expectedState = "hit"
+		expectedEpoch = 1
+	}
+	start := beginPhase(lines, phase)
+	if err := writePhaseMarker(cfg, phase, "start"); err != nil {
+		return err
+	}
+	for obj := cfg.objectStart; obj < cfg.objectStart+cfg.objects; obj++ {
+		resp, err := objectRequestAtEpoch(client, baseURL, cfg, obj, expectedEpoch)
+		if err != nil {
+			return err
+		}
+		if resp.cacheState != expectedState || resp.originGeneration != expectedEpoch {
+			return fmt.Errorf(
+				"%s failed object=%d cache=%q generation=%d expected_cache=%q expected_generation=%d",
+				phase, obj, resp.cacheState, resp.originGeneration, expectedState, expectedEpoch,
+			)
+		}
+	}
+	drainSeconds := 0.0
+	if !expectHit {
+		var err error
+		drainSeconds, err = waitForPendingZeroTimed(client, baseURL, cfg)
+		if err != nil {
+			return err
+		}
+	}
+	markerErr := writePhaseMarker(cfg, phase, "end")
+	lines.add("driver_sparse_object_start", cfg.objectStart)
+	lines.add("driver_sparse_objects", cfg.objects)
+	lines.add("driver_sparse_expected_cache", expectedState)
+	lines.add("driver_sparse_expected_generation", expectedEpoch)
+	lines.add("driver_sparse_pending_drain_seconds", drainSeconds)
+	recordPhaseSeconds(lines, phase, start)
+	return markerErr
+}
+
+func runSparsePurge(client *http.Client, baseURL string, cfg config, lines *metrics) error {
+	if cfg.profile != "interning-unique-five" {
+		return fmt.Errorf("sparse purge requires interning-unique-five")
+	}
+	start := beginPhase(lines, "sparse-purge")
+	if err := writePhaseMarker(cfg, "sparse-purge", "start"); err != nil {
+		return err
+	}
+	for obj := cfg.objectStart; obj < cfg.objectStart+cfg.objects; obj++ {
+		key := fmt.Sprintf("intern:unique:%d:0", obj)
+		if _, err := purge(client, baseURL, key, 1, true, true); err != nil {
+			return err
+		}
+	}
+	markerErr := writePhaseMarker(cfg, "sparse-purge", "end")
+	lines.add("driver_sparse_object_start", cfg.objectStart)
+	lines.add("driver_sparse_objects", cfg.objects)
+	lines.add("driver_sparse_purges", cfg.objects)
+	recordPhaseSeconds(lines, "sparse-purge", start)
+	return markerErr
+}
+
 func runEviction(client *http.Client, baseURL string, cfg config, lines *metrics) error {
 	if err := runLoadObjectsPhase(client, baseURL, cfg, lines); err != nil {
 		return err
@@ -3631,7 +3732,122 @@ func runPhase6FillDrain(client *http.Client, baseURL string, cfg config, lines *
 	return nil
 }
 
+type bulkPurgeRequest struct {
+	key      string
+	expected int
+}
+
+func prepareBulkPurgeRequests(cfg config) ([]bulkPurgeRequest, []string, int, int) {
+	seen := map[string]bool{}
+	uniqueKeys := make([]string, 0, cfg.buckets)
+	requests := make([]bulkPurgeRequest, 0, cfg.purgeRequests)
+	totalExpected := 0
+	totalKeys := 0
+	for request := 0; request < cfg.purgeRequests; request++ {
+		keys := make([]string, 0, cfg.purgeKeysPerRequest)
+		expected := 0
+		for n := 0; n < cfg.purgeKeysPerRequest; n++ {
+			key := fmt.Sprintf("bucket:%d", (request*cfg.purgeKeysPerRequest+n)%cfg.buckets)
+			keys = append(keys, key)
+			if !seen[key] {
+				expected += expectedCount(cfg, key)
+				seen[key] = true
+				uniqueKeys = append(uniqueKeys, key)
+			}
+		}
+		requests = append(requests, bulkPurgeRequest{
+			key:      strings.Join(keys, " "),
+			expected: expected,
+		})
+		totalExpected += expected
+		totalKeys += len(keys)
+	}
+	return requests, uniqueKeys, totalExpected, totalKeys
+}
+
+func executeBulkPurgeRequests(client *http.Client, baseURL string, cfg config,
+	requests []bulkPurgeRequest, latencies *latencyRecorder, workers int) (int, int, int, int, error) {
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(requests) {
+		workers = len(requests)
+	}
+	if workers == 0 {
+		return 0, 0, 0, 0, nil
+	}
+	if workers == 1 {
+		completed, published, actual := 0, 0, 0
+		for index, request := range requests {
+			requestStart := time.Now()
+			purged, err := purge(client, baseURL, request.key, request.expected,
+				false, modeIsCachetag(cfg.mode))
+			latencies.add(time.Since(requestStart))
+			if err != nil {
+				return index + 1, completed, published, actual, err
+			}
+			completed++
+			if purged == -1 {
+				published++
+			} else {
+				actual += purged
+			}
+		}
+		return len(requests), completed, published, actual, nil
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var completed, published, actual atomic.Int64
+	var errMu sync.Mutex
+	var firstErr error
+	worker := func() {
+		defer wg.Done()
+		for index := range jobs {
+			request := requests[index]
+			requestStart := time.Now()
+			purged, err := purge(client, baseURL, request.key, request.expected,
+				false, modeIsCachetag(cfg.mode))
+			latencies.add(time.Since(requestStart))
+			if err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+				continue
+			}
+			completed.Add(1)
+			if purged == -1 {
+				published.Add(1)
+			} else {
+				actual.Add(int64(purged))
+			}
+		}
+	}
+	for n := 0; n < workers; n++ {
+		wg.Add(1)
+		go worker()
+	}
+	for index := range requests {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+	errMu.Lock()
+	err := firstErr
+	errMu.Unlock()
+	return len(requests), int(completed.Load()), int(published.Load()),
+		int(actual.Load()), err
+}
+
 func runBulkPurge(client *http.Client, baseURL string, cfg config, lines *metrics) error {
+	workers := cfg.bulkPurgeConcurrency
+	if workers == 0 {
+		workers = 1
+	}
+	if workers > 1 && (!modeIsCachetag(cfg.mode) || cfg.cacheTagPersist) {
+		return fmt.Errorf("bulk purge concurrency > 1 requires volatile cachetag mode")
+	}
 	if err := runLoadObjectsPhase(client, baseURL, cfg, lines); err != nil {
 		return err
 	}
@@ -3642,22 +3858,26 @@ func runBulkPurge(client *http.Client, baseURL string, cfg config, lines *metric
 	if err := runWarmHits(client, baseURL, cfg, lines); err != nil {
 		return err
 	}
-	seen := map[string]bool{}
-	uniqueKeys := make([]string, 0, cfg.buckets)
-	totalExpected := 0
+	requests, uniqueKeys, totalExpected, totalKeys := prepareBulkPurgeRequests(cfg)
 	totalActual := 0
-	totalKeys := 0
 	attemptedRequests := 0
 	completedRequests := 0
 	publishedRequests := 0
-	// The persistent-purge latency contract times the serial client-observed
-	// request boundary.  This deliberately excludes the later settle and
-	// freshness probes, whose work is not part of one durable header publish.
+	// Phase timing covers only client purge requests. Request construction is
+	// precomputed above so the phase measures server work at the selected
+	// bounded concurrency; settle and freshness probes remain outside it.
 	latencies := newLatencyRecorder(cfg.purgeRequests)
-	if err := func() error {
+	if err := func() (resultErr error) {
 		start := beginPhase(lines, "bulk-purge")
+		if err := writePhaseMarker(cfg, "bulk-purge", "start"); err != nil {
+			return err
+		}
 		defer func() {
+			if markerErr := writePhaseMarker(cfg, "bulk-purge", "end"); resultErr == nil && markerErr != nil {
+				resultErr = markerErr
+			}
 			lines.add("driver_bulk_purge_requests", cfg.purgeRequests)
+			lines.add("driver_bulk_purge_concurrency", workers)
 			lines.add("driver_bulk_purge_attempted_requests", attemptedRequests)
 			lines.add("driver_bulk_purge_completed_requests", completedRequests)
 			lines.add("driver_bulk_purge_published_requests", publishedRequests)
@@ -3671,33 +3891,11 @@ func runBulkPurge(client *http.Client, baseURL string, cfg config, lines *metric
 			latencies.emit("driver_bulk_purge", lines)
 			recordPhaseSeconds(lines, "bulk-purge", start)
 		}()
-		for request := 0; request < cfg.purgeRequests; request++ {
-			keys := make([]string, 0, cfg.purgeKeysPerRequest)
-			expected := 0
-			for n := 0; n < cfg.purgeKeysPerRequest; n++ {
-				key := fmt.Sprintf("bucket:%d", (request*cfg.purgeKeysPerRequest+n)%cfg.buckets)
-				keys = append(keys, key)
-				if !seen[key] {
-					expected += expectedCount(cfg, key)
-					seen[key] = true
-					uniqueKeys = append(uniqueKeys, key)
-				}
-			}
-			totalExpected += expected
-			totalKeys += len(keys)
-			attemptedRequests++
-			requestStart := time.Now()
-			purged, err := purge(client, baseURL, strings.Join(keys, " "), expected, false, modeIsCachetag(cfg.mode))
-			latencies.add(time.Since(requestStart))
-			if err != nil {
-				return err
-			}
-			if purged == -1 {
-				publishedRequests++
-			} else {
-				totalActual += purged
-			}
-			completedRequests++
+		var runErr error
+		attemptedRequests, completedRequests, publishedRequests, totalActual, runErr =
+			executeBulkPurgeRequests(client, baseURL, cfg, requests, latencies, workers)
+		if runErr != nil {
+			return runErr
 		}
 		return nil
 	}(); err != nil {
@@ -5770,13 +5968,7 @@ func main() {
 	}
 	setLatencyArtifactMetricsPath(cfg.metricsPath)
 	cfg.originEpoch = newOriginEpochController()
-	maxWarmClients := cfg.clients
-	for _, clients := range cfg.warmClientSweep {
-		if clients > maxWarmClients {
-			maxWarmClients = clients
-		}
-	}
-	maxConns := maxWarmClients + cfg.concurrentReaders + cfg.concurrentWriters + cfg.concurrentPurgers + 4
+	maxConns := transportConnectionLimit(cfg)
 	transport := &http.Transport{
 		MaxIdleConns:        maxConns * 2,
 		MaxIdleConnsPerHost: maxConns * 2,
@@ -5798,6 +5990,7 @@ func main() {
 	lines.add("driver_pacing_schema", "slot-skipping-v1")
 	lines.add("driver_mode", cfg.mode)
 	lines.add("driver_profile", cfg.profile)
+	lines.add("driver_object_start", cfg.objectStart)
 	lines.add("driver_clients", cfg.clients)
 	lines.add("driver_bucket_modulus", cfg.buckets)
 	lines.add("driver_tags_per_object", cfg.tagsPerObject)
@@ -5854,6 +6047,12 @@ func main() {
 			err = runLoad(client, baseURL, cfg, &lines)
 		case "warm-only":
 			err = runWarmOnly(client, baseURL, cfg, &lines)
+		case "sparse-hit-probe":
+			err = runSparseProbe(client, baseURL, cfg, &lines, true)
+		case "sparse-purge":
+			err = runSparsePurge(client, baseURL, cfg, &lines)
+		case "sparse-miss-probe":
+			err = runSparseProbe(client, baseURL, cfg, &lines, false)
 		case "eviction":
 			err = runEviction(client, baseURL, cfg, &lines)
 		case "purge":

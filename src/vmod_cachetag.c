@@ -1245,22 +1245,6 @@ cachetag_trim(const char *s, size_t l, const char **startp, size_t *lenp)
 	*lenp = (size_t)(e - b);
 }
 
-static char *
-cachetag_trimdup(const char *s, size_t l)
-{
-	const char *trimmed;
-	char *p;
-	size_t trimmed_len;
-
-	cachetag_trim(s, l, &trimmed, &trimmed_len);
-	p = malloc(trimmed_len + 1);
-	if (p == NULL)
-		return (NULL);
-	memcpy(p, trimmed, trimmed_len);
-	p[trimmed_len] = '\0';
-	return (p);
-}
-
 static int
 cachetag_has_embedded_ws_len(const char *s, size_t l)
 {
@@ -1273,14 +1257,6 @@ cachetag_has_embedded_ws_len(const char *s, size_t l)
 			return (1);
 	}
 	return (0);
-}
-
-static int
-cachetag_has_embedded_ws(const char *s)
-{
-
-	AN(s);
-	return (cachetag_has_embedded_ws_len(s, strlen(s)));
 }
 
 static int
@@ -1446,16 +1422,23 @@ cachetag_purge_key_compare(const void *a, const void *b)
 
 static enum cachetag_purge_mode cachetag_parse_mode(VCL_ENUM);
 
+/* Validation and hashing complete before the purge is published, so these
+ * views can borrow the caller's header instead of allocating token copies. */
+struct cachetag_header_token {
+	const char *ptr;
+	size_t len;
+};
+
 static VCL_INT
 cachetag_purge_header_tokens(VRT_CTX, struct vmod_cachetag_namespace *ns,
     VCL_STRING header, VCL_STRING sep, VCL_ENUM mode_e)
 {
 	const char *p, *q;
-	char *tok;
-	char **tokens, **grown;
+	const char *tok;
+	struct cachetag_header_token *tokens, *grown;
 	struct cachetag_purge_key *keys;
 	struct cachetag_registration_snapshot snap;
-	size_t sepl, hl, tl, cap, nkeys = 0, u, unique;
+	size_t sepl, hl, tl, tokl, cap, nkeys = 0, u, unique;
 	VCL_INT r;
 
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
@@ -1478,44 +1461,36 @@ cachetag_purge_header_tokens(VRT_CTX, struct vmod_cachetag_namespace *ns,
 	for (p = header; ; p = q + sepl) {
 		q = strstr(p, sep);
 		tl = q == NULL ? strlen(p) : (size_t)(q - p);
-		tok = cachetag_trimdup(p, tl);
-		if (tok == NULL) {
-			r = -2;
-			goto fail;
-		}
-		if (*tok != '\0') {
-			if (cachetag_has_embedded_ws(tok)) {
+		cachetag_trim(p, tl, &tok, &tokl);
+		if (tokl != 0) {
+			if (cachetag_has_embedded_ws_len(tok, tokl)) {
 				cachetag_count_parse_error(ns->index);
-				free(tok);
 				r = -3;
 				goto fail;
 			}
-			if (strlen(tok) > cachetag_get_limits(ns->index)->max_key_length) {
+			if (tokl > cachetag_get_limits(ns->index)->max_key_length) {
 				cachetag_count_limit_rejection(ns->index);
-				free(tok);
 				r = -2;
 				goto fail;
 			}
 			if (nkeys == cap) {
 				if (cap > SIZE_MAX / 2 / sizeof *tokens) {
 					cachetag_count_limit_rejection(ns->index);
-					free(tok);
 					r = -2;
 					goto fail;
 				}
 				grown = realloc(tokens, 2 * cap * sizeof *tokens);
 				if (grown == NULL) {
-					free(tok);
 					r = -2;
 					goto fail;
 				}
 				tokens = grown;
 				cap *= 2;
 			}
-			tokens[nkeys++] = tok;
-			tok = NULL;
+			tokens[nkeys].ptr = tok;
+			tokens[nkeys].len = tokl;
+			nkeys++;
 		}
-		free(tok);
 		if (q == NULL)
 			break;
 	}
@@ -1529,8 +1504,8 @@ cachetag_purge_header_tokens(VRT_CTX, struct vmod_cachetag_namespace *ns,
 		goto fail;
 	}
 	for (u = 0; u < nkeys; u++) {
-		r = cachetag_registration_snapshot_len(ns->index, tokens[u],
-		    strlen(tokens[u]), &snap);
+		r = cachetag_registration_snapshot_len(ns->index, tokens[u].ptr,
+		    tokens[u].len, &snap);
 		if (r != 0) {
 			if (r == EINVAL)
 				cachetag_count_parse_error(ns->index);
@@ -1554,13 +1529,9 @@ cachetag_purge_header_tokens(VRT_CTX, struct vmod_cachetag_namespace *ns,
 	r = cachetag_purge_batch(ns->index, keys, unique,
 	    cachetag_parse_mode(mode_e));
 	free(keys);
-	for (u = 0; u < nkeys; u++)
-		free(tokens[u]);
 	free(tokens);
 	return (r);
  fail:
-	for (u = 0; u < nkeys; u++)
-		free(tokens[u]);
 	free(tokens);
 	return (r);
 }

@@ -117,6 +117,8 @@ Environment:
                         not match the requested tag count and cutover tag-length
                         class (default: 0)
   BENCH_PURGE_REQUESTS  Bulk purge requests per burst (default: 100)
+  BENCH_BULK_PURGE_CONCURRENCY
+                        Bulk purge worker count (default: 1; max: 8)
   BENCH_SKIP_PURGE      Generate only load plus shutdown for phased-purge
                         profiles; intended for shutdown probes (default: 0)
   BENCH_EXPECT_FELLOW_ATTR_BYTES_PER_OBJECT
@@ -328,6 +330,10 @@ Environment:
   RUNS                  Repetitions per workload (default: 3)
   BENCH_WORKLOAD_FILTER Optional exact workload basename to run after generation;
                         a nonempty filter which matches nothing is an error
+  BENCH_INTERN_LIFECYCLE_HEADER_BYTES
+                        24 or 32 enables the deterministic intern lifecycle
+                        workload with that byte-count oracle (default: 0/off).
+                        Requires its exact filter and volatile runtime interning.
   SKIP_BUILD            1 to reuse BUILD_DIR after a successful build (default: 0).
                         Reuse is provenance-checked: the run fails if the cached
                         build's recorded source hashes no longer match the
@@ -441,6 +447,7 @@ bench_hot_set_objects=${BENCH_HOT_SET_OBJECTS:-0}
 bench_tag_length_class=${BENCH_TAG_LENGTH_CLASS:-default}
 bench_validate_tag_shape=${BENCH_VALIDATE_TAG_SHAPE:-0}
 bench_purge_requests=${BENCH_PURGE_REQUESTS:-100}
+bench_bulk_purge_concurrency=${BENCH_BULK_PURGE_CONCURRENCY:-1}
 bench_purge_latency_expected_wal_records_per_header=${BENCH_PURGE_LATENCY_EXPECTED_WAL_RECORDS_PER_HEADER:-}
 bench_skip_purge=${BENCH_SKIP_PURGE:-0}
 bench_expect_fellow_attr_bytes_per_object=${BENCH_EXPECT_FELLOW_ATTR_BYTES_PER_OBJECT:-}
@@ -681,6 +688,11 @@ esac
 churn_cycles=${CHURN_CYCLES:-$churn_cycles_default}
 runs=${RUNS:-3}
 bench_workload_filter=${BENCH_WORKLOAD_FILTER:-}
+bench_intern_lifecycle_header_bytes=${BENCH_INTERN_LIFECYCLE_HEADER_BYTES:-0}
+case "$bench_intern_lifecycle_header_bytes" in
+	0|24|32) ;;
+	*) echo "BENCH_INTERN_LIFECYCLE_HEADER_BYTES must be 0, 24, or 32" >&2; exit 2 ;;
+esac
 skip_build=${SKIP_BUILD:-0}
 vtc_log_bytes=${VTC_LOG_BYTES:-20M}
 vtc_timeout=${VTC_TIMEOUT:-300}
@@ -930,6 +942,15 @@ case "$bench_cache_tag_persist" in
 		exit 2
 		;;
 esac
+if [ "$bench_intern_lifecycle_header_bytes" != 0 ]; then
+	[ "$bench_storage_kind" = default ] && [ "$bench_cache_tag_persist" = 0 ] &&
+		[ "$bench_code_generation" = runtime ] && [ "$bench_runtime_set_interning" = 1 ] &&
+		[ "$run_xkey" = 0 ] && [ "$run_noindex" = 0 ] &&
+		[ "$bench_workload_filter" = cachetag_intern_lifecycle ] || {
+		echo "intern lifecycle requires volatile Default runtime interning, cachetag only, and its exact workload filter" >&2
+		exit 2
+	}
+fi
 slash_mount_args=
 if [ "$bench_storage_kind" = fellow ] || [ "$bench_storage_kind" = buddy ]; then
 	default_slash_src="$repo_dir/../slash"
@@ -1038,6 +1059,7 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "BENCH_TAG_LENGTH_CLASS=$bench_tag_length_class" \
 	-e "BENCH_VALIDATE_TAG_SHAPE=$bench_validate_tag_shape" \
 	-e "BENCH_PURGE_REQUESTS=$bench_purge_requests" \
+	-e "BENCH_BULK_PURGE_CONCURRENCY=$bench_bulk_purge_concurrency" \
 	-e "BENCH_PURGE_LATENCY_EXPECTED_WAL_RECORDS_PER_HEADER=$bench_purge_latency_expected_wal_records_per_header" \
 	-e "BENCH_SKIP_PURGE=$bench_skip_purge" \
 	-e "BENCH_EXPECT_FELLOW_ATTR_BYTES_PER_OBJECT=$bench_expect_fellow_attr_bytes_per_object" \
@@ -1139,6 +1161,7 @@ $docker_cmd run $docker_run_args $docker_cpuset_args --rm \
 	-e "CHURN_CYCLES=$churn_cycles" \
 	-e "RUNS=$runs" \
 	-e "BENCH_WORKLOAD_FILTER=$bench_workload_filter" \
+	-e "BENCH_INTERN_LIFECYCLE_HEADER_BYTES=$bench_intern_lifecycle_header_bytes" \
 	-e "SKIP_BUILD=$skip_build" \
 	-e "RUN_XKEY=$run_xkey" \
 	-e "RUN_NOINDEX=$run_noindex" \
@@ -1708,6 +1731,22 @@ python3 /cachetag-host/benchmarks/generate_cachetag_benchmark_vtc.py \
 	$xkey_flag \
 	$fixture_flag
 
+if [ "$BENCH_INTERN_LIFECYCLE_HEADER_BYTES" != 0 ]; then
+	lifecycle_timing_arg=
+	if [ "$BENCH_INSTRUMENT_OBJ_MTX" = 1 ]; then
+		lifecycle_timing_arg=--expect-benchmark-timing
+	fi
+	python3 /cachetag-host/benchmarks/generate_intern_lifecycle_vtc.py \
+		--out-dir /results/workloads --objects "$OBJECTS" \
+		--storage "$BENCH_STORAGE" --clients "$BENCH_CLIENTS" \
+		--vinyl-thread-pool-max "$BENCH_VINYL_THREAD_POOL_MAX" \
+		--vinyl-thread-pools "$BENCH_VINYL_THREAD_POOLS" \
+		--driver-command "$driver_command" --backend-command "$backend_command" \
+		--backend-body-bytes "$BENCH_BACKEND_BODY_BYTES" \
+		--set-header-bytes "$BENCH_INTERN_LIFECYCLE_HEADER_BYTES" \
+		$lifecycle_timing_arg
+fi
+
 runtime_mode_manifest=/results/workloads/runtime-mode.env
 test -s "$runtime_mode_manifest" || { echo "generated runtime-mode manifest is missing" >&2; exit 1; }
 # shellcheck disable=SC1090
@@ -1787,7 +1826,7 @@ if [ "$BENCHMARK_CONTRACT" = persistent-purge-latency-screen-v1 ]; then
 			printf "%s\n" "$BENCH_DRIVER_GOMAXPROCS" "$BENCH_BACKEND_GOMAXPROCS" "$BENCH_DRIVER_GOGC" "$BENCH_BACKEND_GOGC" "$BENCH_DRIVER_GOMEMLIMIT" "$BENCH_BACKEND_GOMEMLIMIT"
 			printf "%s\n" "$BENCH_VINYL_THREAD_POOL_MAX" "$BENCH_VINYL_THREAD_POOLS"
 			printf "contract=%s\n" "$BENCHMARK_CONTRACT"
-			printf "shape=%s|%s|%s|%s|%s|%s|%s|%s|%s\n" "$BENCH_PROFILE" "$OBJECTS" "$BENCH_BUCKETS" "$TAGS_PER_OBJECT" "$BENCH_PURGE_REQUESTS" "$BENCH_PURGE_KEYS_PER_REQUEST" "$BENCH_STALE_DELIVER" "$BENCH_CODE_GENERATION" "$BENCH_RUNTIME_SET_INTERNING"
+			printf "shape=%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" "$BENCH_PROFILE" "$OBJECTS" "$BENCH_BUCKETS" "$TAGS_PER_OBJECT" "$BENCH_PURGE_REQUESTS" "$BENCH_PURGE_KEYS_PER_REQUEST" "$BENCH_BULK_PURGE_CONCURRENCY" "$BENCH_STALE_DELIVER" "$BENCH_CODE_GENERATION" "$BENCH_RUNTIME_SET_INTERNING"
 			printf "fellow=%s|%s|%s|%s|%s|%s|%s\n" "$BENCH_STORAGE_KIND" "$BENCH_STORAGE" "$BENCH_FELLOW_SIZE" "$BENCH_FELLOW_SEGMENT_SIZE" "$BENCH_FELLOW_BLOCK_SIZE" "$BENCH_CACHE_TAG_PERSIST" "$BENCH_CACHE_TAG_WAL_FSYNC"
 			printf "runtime=%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" "$RUNS" "$RUN_XKEY" "$RUN_NOINDEX" "$BENCH_OHA_WORKER_THREADS" "$BENCH_FELLOW_VOLATILE_FALLBACK" "$BENCH_CACHE_TAG_PURGE_HISTORY_MAX_ENTRIES" "$BENCH_CACHE_TAG_SWEEP_INTERVAL" "$BENCH_CACHE_TAG_SWEEP_BATCH_OBJECTS" "$BENCH_CACHE_TAG_SWEEP_BATCH_HOLD" "$BENCH_CACHE_TAG_SWEEP_BATCH_YIELD"
 		} | sha256sum | awk "{print \$1}"
@@ -1844,6 +1883,14 @@ fi
 		printf "rendered_cachetag_vcl_files=%s\n" "$rendered_cachetag_vcl_files"
 		printf "rendered_workloads_sha256=%s\n" "$rendered_workloads_sha256"
 		printf "generator_sha256=%s\n" "$generator_sha256"
+		if [ "$BENCH_INTERN_LIFECYCLE_HEADER_BYTES" != 0 ]; then
+			# The lifecycle VTC is generated after runtime-mode.env. Its separate
+			# identity prevents the placeholder profile from claiming provenance.
+			printf "intern_lifecycle_manifest_sha256=%s\n" "$(sha256sum /results/workloads/intern-lifecycle.env | cut -d " " -f 1)"
+			sed -n -e "s/^rendered_workloads_sha256=/intern_lifecycle_rendered_workloads_sha256=/p" \
+				-e "s/^generator_sha256=/intern_lifecycle_generator_sha256=/p" \
+				/results/workloads/intern-lifecycle.env
+		fi
 		printf "summarizer_sha256=%s\n" "$(sha256sum /cachetag-host/benchmarks/summarize_results.py | cut -d " " -f 1)"
 	printf "cachetag_configure_args=%s\n" "$cachetag_configure_args"
 	printf "bench_buckets=%s\n" "$BENCH_BUCKETS"
@@ -1862,6 +1909,7 @@ fi
 	printf "bench_tag_length_class=%s\n" "$BENCH_TAG_LENGTH_CLASS"
 	printf "bench_validate_tag_shape=%s\n" "$BENCH_VALIDATE_TAG_SHAPE"
 	printf "bench_purge_requests=%s\n" "$BENCH_PURGE_REQUESTS"
+	printf "bench_bulk_purge_concurrency=%s\n" "$BENCH_BULK_PURGE_CONCURRENCY"
 	printf "bench_purge_latency_expected_wal_records_per_header=%s\n" "$BENCH_PURGE_LATENCY_EXPECTED_WAL_RECORDS_PER_HEADER"
 	printf "bench_skip_purge=%s\n" "$BENCH_SKIP_PURGE"
 	printf "bench_expect_fellow_attr_bytes_per_object=%s\n" "$BENCH_EXPECT_FELLOW_ATTR_BYTES_PER_OBJECT"
@@ -1960,6 +2008,7 @@ fi
 	printf "churn_cycles=%s\n" "$CHURN_CYCLES"
 	printf "runs=%s\n" "$RUNS"
 	printf "bench_workload_filter=%s\n" "$BENCH_WORKLOAD_FILTER"
+	printf "bench_intern_lifecycle_header_bytes=%s\n" "$BENCH_INTERN_LIFECYCLE_HEADER_BYTES"
 	printf "run_xkey=%s\n" "$RUN_XKEY"
 	printf "run_noindex=%s\n" "$RUN_NOINDEX"
 	printf "vtc_log_bytes=%s\n" "$VTC_LOG_BYTES"

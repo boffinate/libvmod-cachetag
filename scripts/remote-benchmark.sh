@@ -20,6 +20,8 @@ Environment:
                            (default: benchmarks/remote-results/YYYYMMDD_host)
   VINYL_DOCKER_IMAGE       Docker image name (default: vinyl-cache-ubuntu-build)
   CACHE_TAG_REMOTE_SYNC    1 to rsync local checkouts before run (default: 1)
+  CACHE_TAG_WORKSPACE_DIR  Directory containing clean Vinyl and Slash checkouts
+                           (default: parent of this harness checkout)
   CACHE_TAG_BENCH_CLIENTS  Remote load/validation client count. Defaults to a
                            hardware-derived value capped at 8.
   CACHE_TAG_VINYL_THREAD_POOL_MAX
@@ -106,6 +108,14 @@ Environment:
   CACHE_TAG_BENCH_SKIP_PURGE
                            Override BENCH_SKIP_PURGE for phased-purge load-only
                            probes (default: matrix default)
+  CACHE_TAG_BENCH_PURGE_REQUESTS / CACHE_TAG_BENCH_PURGE_KEYS_PER_REQUEST
+                           Bulk purge request and header token counts
+  CACHE_TAG_BENCH_SWEEP_INTERVAL
+                           Namespace sweep interval for controlled workloads
+  CACHE_TAG_BENCH_BULK_PURGE_CONCURRENCY
+                           Fixed worker count for volatile bulk-purge screens
+  CACHE_TAG_BENCH_INTERN_LIFECYCLE_HEADER_BYTES
+                           Enable the intern lifecycle screen with a 24/32-byte oracle
   CACHE_TAG_BENCH_RESTART_TAG_PROFILE
                            Override BENCH_RESTART_TAG_PROFILE for restart
                            demand-load matrices (default: matrix default)
@@ -422,7 +432,7 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
-workspace_dir=$(CDPATH= cd -- "$repo_dir/.." && pwd)
+workspace_dir=$(CDPATH= cd -- "${CACHE_TAG_WORKSPACE_DIR:-$repo_dir/..}" && pwd)
 vmod_build_src_explicit=${CACHE_TAG_VMOD_BUILD_SRC:+1}
 vmod_build_src=${CACHE_TAG_VMOD_BUILD_SRC:-$repo_dir}
 legacy_direct_vmod_src=${CACHE_TAG_LEGACY_DIRECT_VMOD_SRC:-}
@@ -484,6 +494,11 @@ bench_workload_filter_override=${CACHE_TAG_BENCH_WORKLOAD_FILTER:-}
 bench_validate_residency_override=${CACHE_TAG_BENCH_VALIDATE_RESIDENCY:-}
 bench_warm_seconds_override=${CACHE_TAG_BENCH_WARM_SECONDS:-}
 bench_warm_passes_override=${CACHE_TAG_BENCH_WARM_PASSES:-}
+bench_purge_requests_override=${CACHE_TAG_BENCH_PURGE_REQUESTS:-}
+bench_purge_keys_override=${CACHE_TAG_BENCH_PURGE_KEYS_PER_REQUEST:-}
+bench_sweep_interval_override=${CACHE_TAG_BENCH_SWEEP_INTERVAL:-}
+bench_bulk_purge_concurrency_override=${CACHE_TAG_BENCH_BULK_PURGE_CONCURRENCY:-}
+bench_intern_lifecycle_header_bytes_override=${CACHE_TAG_BENCH_INTERN_LIFECYCLE_HEADER_BYTES:-}
 bench_warm_client_sweep_override=${CACHE_TAG_BENCH_WARM_CLIENT_SWEEP:-}
 resident_hit_driver_override=${CACHE_TAG_RESIDENT_HIT_DRIVER:-}
 oha_worker_threads_override=${CACHE_TAG_OHA_WORKER_THREADS:-}
@@ -568,6 +583,11 @@ remote_sh() {
 		printf 'CACHE_TAG_BENCH_RUNTIME_SET_INTERNING=%s\n' "$(quote "$bench_runtime_set_interning_override")"
 		printf 'CACHE_TAG_BENCH_LEGACY_SET_INTERNING=%s\n' "$(quote "$bench_legacy_set_interning_override")"
 		printf 'CACHE_TAG_BENCH_WARM_PASSES=%s\n' "$(quote "$bench_warm_passes_override")"
+		printf 'CACHE_TAG_BENCH_PURGE_REQUESTS=%s\n' "$(quote "$bench_purge_requests_override")"
+		printf 'CACHE_TAG_BENCH_PURGE_KEYS_PER_REQUEST=%s\n' "$(quote "$bench_purge_keys_override")"
+		printf 'CACHE_TAG_BENCH_SWEEP_INTERVAL=%s\n' "$(quote "$bench_sweep_interval_override")"
+		printf 'CACHE_TAG_BENCH_BULK_PURGE_CONCURRENCY=%s\n' "$(quote "$bench_bulk_purge_concurrency_override")"
+		printf 'CACHE_TAG_BENCH_INTERN_LIFECYCLE_HEADER_BYTES=%s\n' "$(quote "$bench_intern_lifecycle_header_bytes_override")"
 		printf 'CACHE_TAG_BENCH_WARM_CLIENT_SWEEP=%s\n' "$(quote "$bench_warm_client_sweep_override")"
 		printf 'CACHE_TAG_RESIDENT_HIT_DRIVER=%s\n' "$(quote "$resident_hit_driver_override")"
 		printf 'CACHE_TAG_OHA_WORKER_THREADS=%s\n' "$(quote "$oha_worker_threads_override")"
@@ -1213,6 +1233,21 @@ if [ -n "\$CACHE_TAG_BENCH_LEGACY_SET_INTERNING" ]; then
 fi
 if [ -n "\$CACHE_TAG_BENCH_WARM_PASSES" ]; then
 	envs="\$envs BENCH_WARM_PASSES=\$CACHE_TAG_BENCH_WARM_PASSES"
+fi
+if [ -n "\$CACHE_TAG_BENCH_PURGE_REQUESTS" ]; then
+	envs="\$envs BENCH_PURGE_REQUESTS=\$CACHE_TAG_BENCH_PURGE_REQUESTS"
+fi
+if [ -n "\$CACHE_TAG_BENCH_PURGE_KEYS_PER_REQUEST" ]; then
+	envs="\$envs BENCH_PURGE_KEYS_PER_REQUEST=\$CACHE_TAG_BENCH_PURGE_KEYS_PER_REQUEST"
+fi
+if [ -n "\$CACHE_TAG_BENCH_SWEEP_INTERVAL" ]; then
+	envs="\$envs BENCH_CACHE_TAG_SWEEP_INTERVAL=\$CACHE_TAG_BENCH_SWEEP_INTERVAL"
+fi
+if [ -n "\$CACHE_TAG_BENCH_BULK_PURGE_CONCURRENCY" ]; then
+	envs="\$envs BENCH_BULK_PURGE_CONCURRENCY=\$CACHE_TAG_BENCH_BULK_PURGE_CONCURRENCY"
+fi
+if [ -n "\$CACHE_TAG_BENCH_INTERN_LIFECYCLE_HEADER_BYTES" ]; then
+	envs="\$envs BENCH_INTERN_LIFECYCLE_HEADER_BYTES=\$CACHE_TAG_BENCH_INTERN_LIFECYCLE_HEADER_BYTES"
 fi
 if [ -n "\$CACHE_TAG_BENCH_WARM_CLIENT_SWEEP" ]; then
 	envs="\$envs BENCH_WARM_CLIENT_SWEEP=\$CACHE_TAG_BENCH_WARM_CLIENT_SWEEP"

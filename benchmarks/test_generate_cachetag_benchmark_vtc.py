@@ -17,6 +17,7 @@ from generate_cachetag_benchmark_vtc import (
     write_cachetag_vcl,
     write_driver,
     write_noindex_vcl,
+    write_stats_counter_unchanged,
     write_xkey_vcl,
 )
 
@@ -46,6 +47,42 @@ def generate_workloads(directory: Path, env: dict[str, str], profiles: str) -> N
         ],
         check=True,
         env=child_env,
+    )
+
+
+def generate_sparse_restart(directory: Path, runtime_interning: str = "1") -> subprocess.CompletedProcess[str]:
+    child_env = dict(os.environ)
+    child_env.update(
+        {
+            "BENCH_CODE_GENERATION": "runtime",
+            "BENCH_RUNTIME_SET_INTERNING": runtime_interning,
+            "BENCH_RESTART_TAG_PROFILE": "interning-unique-five",
+            "BENCH_RESTART_TOUCH_PERCENT": "1",
+        }
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            str(GENERATOR),
+            "--out-dir",
+            str(directory),
+            "--objects",
+            "100",
+            "--tags-per-object",
+            "5",
+            "--profile",
+            "fellow-restart-sparse-interning",
+            "--storage-kind",
+            "fellow",
+            "--cachetag-persist",
+            "--slash-vmod-path",
+            "/work/libvmod_slash.so",
+            "--skip-noindex",
+        ],
+        check=False,
+        env=child_env,
+        text=True,
+        capture_output=True,
     )
 
 
@@ -238,6 +275,68 @@ class StatsCaptureFlushTest(unittest.TestCase):
                     self.assertNotIn(
                         "/__bench_objects", path.read_text(encoding="ascii")
                     )
+
+
+class SparseFellowRestartTest(unittest.TestCase):
+    def test_counter_comparison_uses_a_vtc_shell_block(self) -> None:
+        out = StringIO()
+        write_stats_counter_unchanged(
+            out,
+            "/results/before.stats",
+            "/results/after.stats",
+            "c_dsk_obj_get",
+        )
+        block = out.getvalue()
+        self.assertTrue(block.startswith("shell {\n"))
+        self.assertTrue(block.endswith("}\n"))
+        self.assertNotIn('shell "', block)
+        self.assertNotIn(r"\.", block)
+        self.assertIn("$1 ~ /[.]c_dsk_obj_get$/", block)
+        self.assertIn("if (!found) exit 2", block)
+        self.assertIn(
+            "counter c_dsk_obj_get absent from /results/before.stats",
+            block,
+        )
+        self.assertIn('test "$before" = "$after" || {', block)
+
+    def test_sparse_restart_proves_hit_purge_and_miss_ranges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            result = generate_sparse_restart(directory)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            workload = (
+                directory / "cachetag_fellow_restart_sparse_interning.vtc"
+            ).read_text(encoding="ascii")
+
+        self.assertIn("interning = true", workload)
+        self.assertIn(" 1 cachetag-sparse-hit-probe interning-unique-five 5 ", workload)
+        self.assertIn(
+            "BENCH_OBJECT_START=1 "
+            "/work/cachetag-http-workload-driver ${v1_addr} ${v1_port} 1 "
+            "cachetag-sparse-purge interning-unique-five 5",
+            workload,
+        )
+        self.assertIn("cachetag-sparse-miss-probe interning-unique-five 5", workload)
+        self.assertIn("vinyl v1 -expect MAIN.backend_req == 0", workload)
+        self.assertIn("vinyl v1 -expect MAIN.backend_req == 1", workload)
+        self.assertIn("vinyl v1 -expect MAIN.n_vampireobject == 100", workload)
+        self.assertEqual(workload.count("vinyl v1 -expect MAIN.n_vampireobject"), 1)
+        self.assertIn("vinyl v1 -expect FELLOW.fellow.c_dsk_obj_get == 0", workload)
+        self.assertIn("vinyl v1 -expect FELLOW.fellow.c_dsk_obj_get == 1", workload)
+        self.assertIn("vinyl v1 -expect FELLOW.fellow.c_dsk_obj_get == 2", workload)
+        self.assertIn("purgemap_fellow_direct_probes == 2", workload)
+        self.assertIn("counter c_dsk_obj_get changed", workload)
+        self.assertGreaterEqual(
+            workload.count("volatile_interned_table_bytes == 0"), 4
+        )
+
+    def test_sparse_restart_refuses_disabled_interning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = generate_sparse_restart(Path(tmp), runtime_interning="0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "requires runtime interning enabled", result.stderr
+        )
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -338,5 +339,81 @@ func TestFixedWorkSchemaIncludesPendingDrain(t *testing.T) {
 		if field == "" {
 			t.Fatal("empty fixed-work schema field")
 		}
+	}
+}
+
+func TestPrepareBulkPurgeRequestsPreservesFixedKeyVolume(t *testing.T) {
+	cfg := config{objects: 8, buckets: 4, purgeRequests: 3, purgeKeysPerRequest: 2}
+	requests, uniqueKeys, totalExpected, totalKeys := prepareBulkPurgeRequests(cfg)
+	if got, want := len(requests), 3; got != want {
+		t.Fatalf("request count=%d, want %d", got, want)
+	}
+	if got, want := totalKeys, 6; got != want {
+		t.Fatalf("total keys=%d, want %d", got, want)
+	}
+	if got, want := strings.Join(uniqueKeys, " "), "bucket:0 bucket:1 bucket:2 bucket:3"; got != want {
+		t.Fatalf("unique keys=%q, want %q", got, want)
+	}
+	if got, want := totalExpected, 8; got != want {
+		t.Fatalf("total expected=%d, want %d", got, want)
+	}
+	if got, want := requests[0].key, "bucket:0 bucket:1"; got != want {
+		t.Fatalf("request 0 key=%q, want %q", got, want)
+	}
+	if got, want := requests[2].expected, 0; got != want {
+		t.Fatalf("duplicate request expected=%d, want %d", got, want)
+	}
+}
+
+func TestExecuteBulkPurgeRequestsCompletesFixedParallelVolumeOnError(t *testing.T) {
+	var calls, current, maxCurrent atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		now := current.Add(1)
+		for {
+			old := maxCurrent.Load()
+			if old >= now || maxCurrent.CompareAndSwap(old, now) {
+				break
+			}
+		}
+		defer current.Add(-1)
+		calls.Add(1)
+		time.Sleep(5 * time.Millisecond)
+		if r.Header.Get("Key") == "bad" {
+			w.Header().Set("Purged", "0")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Purged", "-1")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	cfg := config{mode: "cachetag-purge"}
+	requests := []bulkPurgeRequest{
+		{key: "one"}, {key: "bad"}, {key: "two"}, {key: "three"},
+	}
+	latencies := newLatencyRecorder(len(requests))
+	attempted, completed, published, actual, err := executeBulkPurgeRequests(
+		server.Client(), server.URL, cfg, requests, latencies, 2)
+	if err == nil {
+		t.Fatal("parallel purge unexpectedly succeeded")
+	}
+	if attempted != len(requests) || calls.Load() != int64(len(requests)) {
+		t.Fatalf("attempted=%d calls=%d, want %d each", attempted, calls.Load(), len(requests))
+	}
+	if completed != 3 || published != 3 || actual != 0 {
+		t.Fatalf("completed=%d published=%d actual=%d, want 3, 3, 0", completed, published, actual)
+	}
+	if maxCurrent.Load() < 2 {
+		t.Fatalf("max concurrent requests=%d, want at least 2", maxCurrent.Load())
+	}
+}
+
+func TestTransportConnectionLimitCoversBulkPurgeWorkers(t *testing.T) {
+	cfg := config{
+		clients:              1,
+		bulkPurgeConcurrency: 8,
+	}
+	if got, want := transportConnectionLimit(cfg), 8; got != want {
+		t.Fatalf("connection limit=%d, want %d", got, want)
 	}
 }

@@ -68,6 +68,7 @@ RESTART_PROFILES = (
     "fellow-restart-first-touch",
     "fellow-restart-cold-purge",
     "fellow-restart-hot-purge",
+    "fellow-restart-sparse-interning",
 )
 ALL_PROFILES = (*PHASED_PURGE_PROFILES, *SPECIAL_PROFILES)
 DRIVER_PROFILE_ALIASES = {
@@ -597,6 +598,44 @@ def storage_stats_filter(base_filter: str, storage_kind: str) -> str:
     if storage_kind == "fellow":
         return f"{base_filter} -f FELLOW.*"
     return base_filter
+
+
+def write_stats_counter_unchanged(
+    f, before: str, after: str, counter_suffix: str
+) -> None:
+    pattern = counter_suffix.replace(".", "[.]")
+    awk = f"$1 ~ /[.]{pattern}$/ {{found = 1; sum += $2}} END {{if (!found) exit 2; print sum + 0}}"
+    f.write("shell {\n")
+    f.write(f"\tbefore=$(awk '{awk}' {before}) || {{\n")
+    f.write(f'\t\techo "counter {counter_suffix} absent from {before}"\n')
+    f.write("\t\texit 1\n")
+    f.write("\t}\n")
+    f.write(f"\tafter=$(awk '{awk}' {after}) || {{\n")
+    f.write(f'\t\techo "counter {counter_suffix} absent from {after}"\n')
+    f.write("\t\texit 1\n")
+    f.write("\t}\n")
+    f.write('\ttest "$before" = "$after" || {\n')
+    f.write(f'\t\techo "counter {counter_suffix} changed: before=$before after=$after"\n')
+    f.write("\t\texit 1\n")
+    f.write("\t}\n")
+    f.write("}\n")
+
+
+def write_persistent_registry_zero(f) -> None:
+    segment = "CACHETAG.vcl1_tags_bench"
+    for counter in (
+        "volatile_objects",
+        "volatile_edges",
+        "volatile_attached",
+        "volatile_interned_sets",
+        "volatile_interned_set_refs",
+        "volatile_interned_set_hits",
+        "volatile_interned_set_misses",
+        "volatile_interned_set_bytes",
+        "volatile_interned_table_bytes",
+        "volatile_interned_acquire_calls",
+    ):
+        f.write(f"vinyl v1 -expect {segment}.{counter} == 0\n")
 
 
 def is_phase5_profile(profile: str) -> bool:
@@ -1747,7 +1786,11 @@ def write_fellow_restart_workload(
     touch_objects = max(1, (objects * touch_percent) // 100)
     if touch_objects > objects:
         touch_objects = objects
-    stats_filter = storage_stats_filter("CACHETAG.*", "fellow")
+    stale_objects = min(touch_objects, objects - touch_objects)
+    stats_base = "CACHETAG.*"
+    if restart_profile == "fellow-restart-sparse-interning":
+        stats_base += " -f MAIN.*"
+    stats_filter = storage_stats_filter(stats_base, "fellow")
     sweep_interval = None
     if restart_profile == "fellow-restart-hot-purge":
         sweep_interval = "0s"
@@ -1800,6 +1843,93 @@ def write_fellow_restart_workload(
         f.write('shell "vinyladm -n ${v1_name} panic.clear || true"\n')
         f.write("vinyl v1 -start\n")
         write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post_restart.stats", flush=True)
+        if restart_profile == "fellow-restart-sparse-interning":
+            post_hit = f"/results/{prefix}_post_sparse_hit.stats"
+            post_purge = f"/results/{prefix}_post_sparse_purge.stats"
+            write_persistent_registry_zero(f)
+            f.write("vinyl v1 -expect MAIN.backend_req == 0\n")
+            f.write(f"vinyl v1 -expect MAIN.n_vampireobject == {objects}\n")
+            f.write("vinyl v1 -expect FELLOW.fellow.c_dsk_obj_get == 0\n")
+            f.write(
+                "vinyl v1 -expect CACHETAG.vcl1_tags_bench."
+                "purgemap_fellow_direct_probes == 0\n"
+            )
+            write_driver(
+                f,
+                touch_objects,
+                "cachetag-sparse-hit-probe",
+                tag_profile,
+                effective_tags,
+                f"{prefix}_sparse_hit",
+                driver_command,
+            )
+            write_stats_capture(f, "v1", stats_filter, post_hit, flush=True)
+            write_persistent_registry_zero(f)
+            f.write("vinyl v1 -expect MAIN.backend_req == 0\n")
+            # Fellow can evict touched objects back to vampires when its memory
+            # cache fills. Cumulative gets, unlike the live vampire gauge, still
+            # prove that only the requested disjoint ranges were materialized.
+            f.write(
+                f"vinyl v1 -expect FELLOW.fellow.c_dsk_obj_get == {touch_objects}\n"
+            )
+            f.write(
+                "vinyl v1 -expect CACHETAG.vcl1_tags_bench."
+                f"purgemap_fellow_direct_probes == {touch_objects}\n"
+            )
+            write_driver(
+                f,
+                stale_objects,
+                "cachetag-sparse-purge",
+                tag_profile,
+                effective_tags,
+                f"{prefix}_sparse_purge",
+                driver_command,
+                env=f"BENCH_OBJECT_START={touch_objects}",
+            )
+            write_stats_capture(f, "v1", stats_filter, post_purge, flush=True)
+            for counter in (
+                "c_dsk_obj_get",
+                "c_dsk_obj_get_present",
+                "c_dsk_obj_get_coalesce",
+                "c_dsk_obj_get_fail",
+            ):
+                write_stats_counter_unchanged(f, post_hit, post_purge, counter)
+            write_persistent_registry_zero(f)
+            f.write("vinyl v1 -expect MAIN.backend_req == 0\n")
+            f.write(
+                "vinyl v1 -expect CACHETAG.vcl1_tags_bench."
+                f"purgemap_fellow_direct_probes == {touch_objects}\n"
+            )
+            write_driver(
+                f,
+                stale_objects,
+                "cachetag-sparse-miss-probe",
+                tag_profile,
+                effective_tags,
+                f"{prefix}_sparse_miss",
+                driver_command,
+                env=f"BENCH_OBJECT_START={touch_objects}",
+            )
+            write_stats_capture(
+                f,
+                "v1",
+                stats_filter,
+                f"/results/{prefix}_post_sparse_miss.stats",
+                flush=True,
+            )
+            write_persistent_registry_zero(f)
+            f.write(f"vinyl v1 -expect MAIN.backend_req == {stale_objects}\n")
+            f.write(
+                "vinyl v1 -expect FELLOW.fellow.c_dsk_obj_get == "
+                f"{touch_objects + stale_objects}\n"
+            )
+            f.write(
+                "vinyl v1 -expect CACHETAG.vcl1_tags_bench."
+                f"purgemap_fellow_direct_probes == {touch_objects + stale_objects}\n"
+            )
+            write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post.stats", flush=True)
+            write_benchmark_teardown(f, shutdown_drain_seconds)
+            return
         if restart_profile == "fellow-restart-idle-memory":
             write_stats_capture(f, "v1", stats_filter, f"/results/{prefix}_post.stats", flush=True)
             write_benchmark_teardown(f, shutdown_drain_seconds)
@@ -2069,6 +2199,32 @@ def main() -> None:
         restart_touch_percent = int(restart_touch_percent_raw)
         if restart_touch_percent <= 0 or restart_touch_percent > 100:
             raise SystemExit("BENCH_RESTART_TOUCH_PERCENT must be in 1..100")
+        if "fellow-restart-sparse-interning" in restart_profiles:
+            if restart_tag_profile != "interning-unique-five":
+                raise SystemExit(
+                    "fellow-restart-sparse-interning requires "
+                    "BENCH_RESTART_TAG_PROFILE=interning-unique-five"
+                )
+            if generation != "runtime" or runtime_mode != 1:
+                raise SystemExit(
+                    "fellow-restart-sparse-interning requires runtime interning enabled"
+                )
+            if stale_deliver_enabled():
+                raise SystemExit(
+                    "fellow-restart-sparse-interning requires BENCH_STALE_DELIVER=0"
+                )
+            if restart_touch_percent > 50:
+                raise SystemExit(
+                    "fellow-restart-sparse-interning requires "
+                    "BENCH_RESTART_TOUCH_PERCENT in 1..50"
+                )
+            sparse_objects = max(
+                1, (args.objects * restart_touch_percent) // 100
+            )
+            if sparse_objects >= args.objects:
+                raise SystemExit(
+                    "fellow-restart-sparse-interning requires an untouched object range"
+                )
         for restart_profile in restart_profiles:
             write_fellow_restart_workload(
                 args.out_dir

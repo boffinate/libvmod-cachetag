@@ -73,6 +73,9 @@ PURGEMAP_RESTART_PHASES = (
     "post_first_touch",
     "post_cold_purge",
     "post_hot_purge",
+    "post_sparse_hit",
+    "post_sparse_purge",
+    "post_sparse_miss",
 )
 PURGEMAP_FELLOW_DIRECT_PHASE_FIELDS = tuple(
     f"{phase}_{counter}"
@@ -1097,6 +1100,9 @@ def phase_stats_files(result_dir: Path, workload: str, run: int) -> dict[str, Pa
         "post_first_touch": f"{workload}_post_first_touch.run-{run}.stats",
         "post_cold_purge": f"{workload}_post_cold_purge.run-{run}.stats",
         "post_hot_purge": f"{workload}_post_hot_purge.run-{run}.stats",
+        "post_sparse_hit": f"{workload}_post_sparse_hit.run-{run}.stats",
+        "post_sparse_purge": f"{workload}_post_sparse_purge.run-{run}.stats",
+        "post_sparse_miss": f"{workload}_post_sparse_miss.run-{run}.stats",
         "phase4_start": f"{workload}_phase4_start.run-{run}.stats",
         "phase4_pre": f"{workload}_phase4_pre.run-{run}.stats",
         "phase4_compact": f"{workload}_phase4_compact.run-{run}.stats",
@@ -2699,6 +2705,8 @@ def workload_rows(result_dir: Path) -> list[dict[str, Any]]:
             phase_tracked = tracked_memory_bytes(values, implementation)
             row[f"{phase}_tracked_memory_bytes"] = phase_tracked
             row[f"{phase}_live_objects"] = stat_suffix(values, "n_object")
+            row[f"{phase}_vampire_objects"] = stat_suffix(values, "n_vampireobject")
+            row[f"{phase}_backend_requests"] = stat_suffix(values, "backend_req")
             row[f"{phase}_cachetag_mem_objects"] = cachetag_counter(values, "volatile_objects")
             row[f"{phase}_live_edges"] = cachetag_counter(values, "volatile_edges")
             row[f"{phase}_cachetag_volatile_side_table_bytes"] = cachetag_counter(
@@ -2799,6 +2807,9 @@ def aggregate_workload_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "post_first_touch_tracked_memory_bytes",
             "post_cold_purge_tracked_memory_bytes",
             "post_hot_purge_tracked_memory_bytes",
+            "post_sparse_hit_tracked_memory_bytes",
+            "post_sparse_purge_tracked_memory_bytes",
+            "post_sparse_miss_tracked_memory_bytes",
             *PURGEMAP_FELLOW_DIRECT_PHASE_FIELDS,
             *(
                 f"{phase}_{field}"
@@ -2806,6 +2817,8 @@ def aggregate_workload_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 for field in (
                     "cachetag_mem_objects",
                     "live_edges",
+                    "vampire_objects",
+                    "backend_requests",
                     "cachetag_volatile_side_table_bytes",
                     "fellow_disk_obj_get",
                     "fellow_disk_obj_get_present",
