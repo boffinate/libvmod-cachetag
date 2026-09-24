@@ -1,0 +1,39 @@
+vtest "Fellow shuts down cleanly with 256 live objects"
+
+server s1 -repeat 256 {
+	rxreq
+	txresp -body "persistent object"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/live.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+	}
+
+	sub vcl_recv {
+		set req.hash_always_miss = true;
+	}
+
+	sub vcl_hash {
+		hash_data(req.xid);
+	}
+
+	sub vcl_backend_response {
+		set beresp.ttl = 1h;
+	}
+} -start
+
+client c1 -repeat 256 {
+	txreq -url "/object"
+	rxresp
+	expect resp.status == 200
+} -run
+
+vinyl v1 -stop
+server s1 -wait

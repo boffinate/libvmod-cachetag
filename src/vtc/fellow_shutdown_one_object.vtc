@@ -1,0 +1,32 @@
+vtest "Fellow shuts down cleanly after storing one object"
+
+server s1 {
+	rxreq
+	txresp -body "persistent object"
+} -start
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-p debug=none" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/idle.stv,100MB,1MB,64KB" \
+	-vcl+backend {
+	import slash from "${libvmod_slash}";
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+	}
+
+	sub vcl_backend_response {
+		set beresp.ttl = 1h;
+	}
+} -start
+
+client c1 {
+	txreq -url "/object"
+	rxresp
+	expect resp.status == 200
+} -run
+
+server s1 -wait
+vinyl v1 -stop

@@ -26,6 +26,12 @@ Environment:
   CACHE_TAG_FELLOW_SLASH_TESTS optional space-separated Slash test list.
                         Defaults to both cache tests, the non-witness log test,
                         and bitf_segmentation_test.
+  CACHE_TAG_FELLOW_VTC_LOG_BYTES vinyltest log buffer size (default: 20M)
+  CACHE_TAG_FELLOW_VTC_TIMEOUT vinyltest timeout in seconds (default: 300)
+  CACHE_TAG_FELLOW_VTC_QUIET set to 1 to suppress passing VTC logs
+  CACHE_TAG_FELLOW_CONTINUE_ON_FAILURE set to 1 to run every selected VTC
+  CACHE_TAG_FELLOW_BUILD_CACHE_TAG set to 0 for standalone Fellow VTCs
+  CACHE_TAG_FELLOW_APPLY_PATCHES set to 0 to test unmodified Slash source
 EOF
 }
 
@@ -59,6 +65,12 @@ docker run --rm \
 	-e "CACHE_TAG_FELLOW_COMMON_TESTS=$fellow_common_tests" \
 	-e "CACHE_TAG_FELLOW_SLASH_CHECK=$fellow_slash_check" \
 	-e "CACHE_TAG_FELLOW_SLASH_TESTS=$fellow_slash_tests" \
+	-e "CACHE_TAG_FELLOW_VTC_LOG_BYTES=${CACHE_TAG_FELLOW_VTC_LOG_BYTES:-20M}" \
+	-e "CACHE_TAG_FELLOW_VTC_TIMEOUT=${CACHE_TAG_FELLOW_VTC_TIMEOUT:-300}" \
+	-e "CACHE_TAG_FELLOW_VTC_QUIET=${CACHE_TAG_FELLOW_VTC_QUIET:-0}" \
+	-e "CACHE_TAG_FELLOW_CONTINUE_ON_FAILURE=${CACHE_TAG_FELLOW_CONTINUE_ON_FAILURE:-0}" \
+	-e "CACHE_TAG_FELLOW_BUILD_CACHE_TAG=${CACHE_TAG_FELLOW_BUILD_CACHE_TAG:-1}" \
+	-e "CACHE_TAG_FELLOW_APPLY_PATCHES=${CACHE_TAG_FELLOW_APPLY_PATCHES:-1}" \
 	"$image" \
 	bash -lc '
 set -euo pipefail
@@ -141,7 +153,9 @@ apply_fellow_patch_stack() {
 		fi
 	done
 }
-apply_fellow_patch_stack /cachetag-host/patches/fellow
+if [ "$CACHE_TAG_FELLOW_APPLY_PATCHES" = 1 ]; then
+	apply_fellow_patch_stack /cachetag-host/patches/fellow
+fi
 mkdir -p m4
 cp "$vinyl_src_copy"/m4/ax_*.m4 m4/
 cat > m4/ax_execinfo.m4 <<'"'"'M4EOF'"'"'
@@ -205,10 +219,12 @@ tar -C /cachetag-host \
 	-cf - . | tar -C "$cachetag_src" -xf -
 
 cd "$cachetag_src"
-# The Fellow VTC matrix uses test-hook and diagnostic VCL methods, so build
-# the full diagnostic surface.
-./bootstrap --prefix="$prefix" --enable-demo-diagnostics --enable-test-hooks
-make -j"$(nproc)"
+if [ "$CACHE_TAG_FELLOW_BUILD_CACHE_TAG" = 1 ]; then
+	# The Fellow VTC matrix uses test-hook and diagnostic VCL methods, so build
+	# the full diagnostic surface.
+	./bootstrap --prefix="$prefix" --enable-demo-diagnostics --enable-test-hooks
+	make -j"$(nproc)"
+fi
 
 slash_vmod="$slash_src/src/.libs/libvmod_slash.so"
 vmod_path="$cachetag_src/src/.libs:$slash_src/src/.libs:$prefix/lib/vinyl-cache/vmods:$prefix/lib/vmods"
@@ -318,18 +334,31 @@ if [ -z "$tests" ]; then
 fi
 
 cd "$vinyl_build"
+vtc_verbosity=-v
+vtc_status=0
+if [ "$CACHE_TAG_FELLOW_VTC_QUIET" = 1 ]; then
+	vtc_verbosity=-q
+fi
 for t in $tests; do
 	case "$t" in
 		/*) ;;
 		*) t="$cachetag_src/$t" ;;
 	esac
 	printf "cachetag fellow harness: %s\n" "$t"
-	"$vinyl_build/bin/vinyltest/vinyltest" -v \
+	if ! "$vinyl_build/bin/vinyltest/vinyltest" "$vtc_verbosity" \
+		-b "$CACHE_TAG_FELLOW_VTC_LOG_BYTES" \
+		-t "$CACHE_TAG_FELLOW_VTC_TIMEOUT" \
 		-D "topbuild=$vinyl_build" \
 		-D "topsrc=/vinyl-src" \
 		-D "libvmod_slash=$slash_vmod" \
 		-p "vmod_path=$vmod_path" \
 		-p "vcl_path=$vcl_path" \
-		"$t"
+		"$t"; then
+		vtc_status=1
+		if [ "$CACHE_TAG_FELLOW_CONTINUE_ON_FAILURE" != 1 ]; then
+			exit "$vtc_status"
+		fi
+	fi
 done
+exit "$vtc_status"
 '

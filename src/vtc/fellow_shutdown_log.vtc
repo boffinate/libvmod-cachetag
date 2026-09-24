@@ -1,0 +1,56 @@
+vtest "Fellow shuts down cleanly after storing 5,000 objects"
+
+vinyl v1 \
+	-arg "-jnone" \
+	-arg "-E${libvmod_slash}" \
+	-arg "-sfellow=fellow,${tmpdir}/log.stv,512MB,1MB,64KB" \
+	-vcl {
+	import slash from "${libvmod_slash}";
+	backend none none;
+
+	sub vcl_init {
+		slash.tune_fellow(storage.fellow);
+	}
+
+	sub vcl_recv {
+		set req.hash_always_miss = true;
+	}
+
+	sub vcl_hash {
+		hash_data(req.xid);
+	}
+
+	sub vcl_backend_fetch {
+		set bereq.backend = none;
+	}
+
+	sub vcl_backend_error {
+		set beresp.status = 200;
+		set beresp.ttl = 1h;
+		set beresp.storage = storage.fellow;
+		set beresp.body = "persistent object";
+		return (deliver);
+	}
+} -start
+
+vinyl v1 -cliok "param.set vsl_mask all"
+
+shell {
+	python3 - <<'PY'
+import http.client
+
+host = "${v1_addr}"
+port = int("${v1_port}")
+conn = http.client.HTTPConnection(host, port, timeout=30)
+for i in range(5000):
+    conn.request("GET", "/object")
+    response = conn.getresponse()
+    if response.status != 200 or response.read() != b"persistent object":
+        raise SystemExit("request %d failed" % (i + 1))
+conn.close()
+print("5000 responses returned 200")
+PY
+}
+
+vinyl v1 -expect MAIN.cache_miss == 5000
+vinyl v1 -stop
