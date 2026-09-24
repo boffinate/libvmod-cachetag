@@ -1,30 +1,39 @@
 diff --git a/src/fellow_object_attr.h b/src/fellow_object_attr.h
-index c7c6d2d..ab2e5f1 100644
+index 9c43f25..456d44d 100644
 --- a/src/fellow_object_attr.h
 +++ b/src/fellow_object_attr.h
-@@ -39,4 +39,6 @@ void fellow_object_attr_unregister(uintptr_t *handle);
+@@ -74,4 +74,9 @@ void fellow_object_attr_unregister(uintptr_t *handle);
  int fellow_object_attr_visit(struct worker *wrk, struct objcore *oc,
      fellow_object_attr_visit_f *visit, void *priv);
  
++#ifdef DEBUG
++/* for tests: make the next fellow_object_attr_visit() call fail */
 +void fellow_object_attr_test_fail_next_visit(void);
++#endif
 +
  #endif
 diff --git a/src/fellow_storage.c b/src/fellow_storage.c
-index 9cf7d9a..3c6f5df 100644
+index b10f3ad..8c0d52d 100644
 --- a/src/fellow_storage.c
 +++ b/src/fellow_storage.c
-@@ -312,6 +312,7 @@ static pthread_mutex_t fellow_object_attr_mtx = PTHREAD_MUTEX_INITIALIZER;
+@@ -3070,6 +3070,9 @@ static pthread_mutex_t fellow_object_attr_mtx = PTHREAD_MUTEX_INITIALIZER;
  static pthread_cond_t fellow_object_attr_cond = PTHREAD_COND_INITIALIZER;
  static struct fellow_object_attr_provider *fellow_object_attr_provider;
- static unsigned fellow_object_attr_active;
+ static unsigned fellow_object_attr_refcnt;
++#ifdef DEBUG
 +static unsigned fellow_object_attr_fail_next_visit;
++#endif
  
  static struct fellow_object_attr_provider *
  fellow_object_attr_acquire(const struct stevedore *stv)
-@@ -3944,6 +3945,15 @@ fellow_object_attr_unregister(uintptr_t *handle)
+@@ -3953,6 +3956,20 @@ fellow_object_attr_unregister(uintptr_t *handle)
  	FREE_OBJ(provider);
  }
  
++#ifdef DEBUG
++/*
++ * Let a VMOD test what happens when it can't read an attribute back.
++ */
 +void
 +fellow_object_attr_test_fail_next_visit(void)
 +{
@@ -33,14 +42,16 @@ index 9cf7d9a..3c6f5df 100644
 +	fellow_object_attr_fail_next_visit = 1;
 +	AZ(pthread_mutex_unlock(&fellow_object_attr_mtx));
 +}
++#endif
 +
  int
  fellow_object_attr_visit(struct worker *wrk, struct objcore *oc,
      fellow_object_attr_visit_f *visit, void *priv)
-@@ -3965,6 +3976,13 @@ fellow_object_attr_visit(struct worker *wrk, struct objcore *oc,
+@@ -3973,6 +3990,15 @@ fellow_object_attr_visit(struct worker *wrk, struct objcore *oc,
  	stvfe = stv_stvfe(stv);
  	if (stv != stvfe->memstv && stv != stvfe->dskstv)
  		return (FELLOW_OBJECT_ATTR_VISIT_NOT_FELLOW);
++#ifdef DEBUG
 +	AZ(pthread_mutex_lock(&fellow_object_attr_mtx));
 +	if (fellow_object_attr_fail_next_visit) {
 +		fellow_object_attr_fail_next_visit = 0;
@@ -48,6 +59,7 @@ index 9cf7d9a..3c6f5df 100644
 +		return (FELLOW_OBJECT_ATTR_VISIT_ERROR);
 +	}
 +	AZ(pthread_mutex_unlock(&fellow_object_attr_mtx));
- 	fcoc = stvfe_dskoc_fco(wrk, stv, stvfe, oc, FEP_GET);
- 	if (fcoc.fco == NULL)
- 		return (FELLOW_OBJECT_ATTR_VISIT_ERROR);
++#endif
+ 	if (stv == stvfe->memstv)
+ 		fcoc.fco = stvfe_memoc_fco(stv, stvfe, oc);
+ 	else

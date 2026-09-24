@@ -108,3 +108,5 @@ Make the next Fellow FDO attribute encode the selected test-only corruption.
 $Method BOOL .test_next_fellow_attr_read_failure()
 
 Make the next Fellow object-attribute visit report a test-only read failure.
+Returns false if the loaded Slash was built without DEBUG, because the
+hook only exists in DEBUG builds such as ``libvmod_slashwitness.so``.

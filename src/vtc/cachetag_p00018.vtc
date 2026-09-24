@@ -1,5 +1,8 @@
 vtest "cachetag purgemap Fellow fails closed on object-attribute read failure"
 
+# The read failure hook is only compiled into Slash builds with DEBUG, so
+# this test loads the witness build of the slash VMOD.
+
 server s1 {
 	rxreq
 	expect req.url == "/read-failure"
@@ -15,10 +18,10 @@ server s1 {
 
 vinyl v1 \
 	-arg "-jnone" \
-	-arg "-E${libvmod_slash}" \
+	-arg "-E${libvmod_slashwitness}" \
 	-arg "-sfellow=fellow,${tmpdir}/purgemap-read-failure.stv,100MB,1MB,64KB" \
 	-vcl+backend {
-	import slash from "${libvmod_slash}";
+	import slash from "${libvmod_slashwitness}";
 	import cachetag;
 
 		sub vcl_init {

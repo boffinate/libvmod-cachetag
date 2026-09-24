@@ -227,6 +227,8 @@ if [ "$CACHE_TAG_FELLOW_BUILD_CACHE_TAG" = 1 ]; then
 fi
 
 slash_vmod="$slash_src/src/.libs/libvmod_slash.so"
+# Built with -DDEBUG, which enables the Fellow test hooks some VTCs need.
+slash_witness_vmod="$slash_src/src/.libs/libvmod_slashwitness.so"
 vmod_path="$cachetag_src/src/.libs:$slash_src/src/.libs:$prefix/lib/vinyl-cache/vmods:$prefix/lib/vmods"
 vcl_path="$cachetag_src/vcl:$vinyl_src_copy/etc:$prefix/share/vinyl-cache/vcl"
 fellow_common_dir="$cachetag_src/src/vtc/fellow-common"
@@ -351,6 +353,7 @@ for t in $tests; do
 		-D "topbuild=$vinyl_build" \
 		-D "topsrc=/vinyl-src" \
 		-D "libvmod_slash=$slash_vmod" \
+		-D "libvmod_slashwitness=$slash_witness_vmod" \
 		-p "vmod_path=$vmod_path" \
 		-p "vcl_path=$vcl_path" \
 		"$t"; then
