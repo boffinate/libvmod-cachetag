@@ -55,7 +55,7 @@ class PurgeLatencyContractTest(unittest.TestCase):
             "build_commands_sha256", "dockerfile_sha256",
         ):
             provenance[key] = self.digest
-        provenance["slash_patch_set"] = "reference-fellow-14"
+        provenance["slash_patch_set"] = "reference-fellow-13"
         (root / "build-provenance.env").write_text(
             "\n".join(f"{key}={value}" for key, value in provenance.items()) + "\n",
             encoding="utf-8",
@@ -116,6 +116,15 @@ class PurgeLatencyContractTest(unittest.TestCase):
             )
         self.assertEqual((valid, reason), (1, "ok"))
 
+    def test_historic_fellow_patch_set_is_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            time_values, driver, stats = self.valid_fixture(root)
+            path = root / "build-provenance.env"
+            path.write_text(path.read_text(encoding="utf-8").replace("slash_patch_set=reference-fellow-13", "slash_patch_set=reference-fellow-14"), encoding="utf-8")
+            valid, reason = purge_latency_contract_validity(root, "cachetag_bulk_purge_bursts", 1, driver, stats, time_values)
+        self.assertEqual((valid, reason), (1, "ok"))
+
     def test_missing_raw_sample_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -145,6 +154,7 @@ class PurgeLatencyContractTest(unittest.TestCase):
             ("identities", lambda root, time, driver, stats: driver.__setitem__("driver_bulk_purge_unique_keys", "63"), "purge_latency_identity_set_invalid"),
             ("swap", lambda root, time, driver, stats: time.__setitem__("swap_activity", "1"), "purge_latency_swap_activity"),
             ("provenance", lambda root, time, driver, stats: (root / "build-provenance.env").write_text((root / "build-provenance.env").read_text(encoding="utf-8").replace("build_provenance_mode=strict", "build_provenance_mode=development"), encoding="utf-8"), "purge_latency_provenance_not_strict"),
+            ("patch-set", lambda root, time, driver, stats: (root / "build-provenance.env").write_text((root / "build-provenance.env").read_text(encoding="utf-8").replace("slash_patch_set=reference-fellow-13", "slash_patch_set=buddy-unpatched"), encoding="utf-8"), "purge_latency_provenance_slash_patch_set_invalid"),
         )
         for name, tamper, expected_reason in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:

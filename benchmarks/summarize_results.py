@@ -32,6 +32,13 @@ COMPARISON_COHORT_FIELDS = (
     "cpu_model", "cpu_topology", "cpu_smt_siblings", "cpu_scaling_governors",
     "cpu_frequency_state", "cpu_boost_state", "kernel", "nproc", "mem_total_kb",
 )
+# The older labels were only used on Slash 7be4126. slash_build_input_sha256 is
+# part of the cohort fingerprint, so still accepting them keeps older result
+# sets summarizable without letting one comparison mix Slash bases.
+SLASH_PATCH_SETS = {
+    "buddy": frozenset({"buddy-unpatched", "buddy-current-vinyl-compat-0001"}),
+    "fellow": frozenset({"reference-fellow-13", "reference-fellow-14"}),
+}
 PERF_STAT_ROW_METRICS = (
     "vinyld_load_instructions",
     "vinyld_load_cycles",
@@ -1306,7 +1313,7 @@ def purge_latency_contract_validity(
     provenance_version = provenance.get("build_provenance_version")
     if provenance_version not in {"5", "6"}:
         reasons.append("purge_latency_provenance_version_invalid")
-    elif provenance_version == "6" and provenance.get("slash_patch_set") != "reference-fellow-14":
+    elif provenance_version == "6" and provenance.get("slash_patch_set") not in SLASH_PATCH_SETS["fellow"]:
         reasons.append("purge_latency_provenance_slash_patch_set_invalid")
     if provenance.get("build_provenance_mode") != "strict" or provenance.get("build_provenance_eligible") != "1":
         reasons.append("purge_latency_provenance_not_strict")
@@ -1713,12 +1720,7 @@ def comparison_contract_validity(
             _required_hash(reasons, provenance, key)
     storage_kind = metadata.get("bench_storage_kind") or remote.get("bench_storage_kind")
     if provenance_version == "6" and storage_kind in {"buddy", "fellow"}:
-        patch_set = provenance.get("slash_patch_set")
-        expected_patch_set = {
-            "buddy": "buddy-current-vinyl-compat-0001",
-            "fellow": "reference-fellow-14",
-        }[storage_kind]
-        if patch_set != expected_patch_set:
+        if provenance.get("slash_patch_set") not in SLASH_PATCH_SETS[storage_kind]:
             reasons.append("provenance_slash_patch_set_mismatch")
     if provenance.get("build_provenance_mode") != "strict" or provenance.get("build_provenance_eligible") != "1":
         reasons.append("provenance_not_comparison_eligible")

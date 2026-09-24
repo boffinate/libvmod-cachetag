@@ -1623,9 +1623,9 @@ provenance_slash_patch_set=none
 if [ "${BENCH_STORAGE_KIND}" = fellow ] || [ "${BENCH_STORAGE_KIND}" = buddy ]; then
 	provenance_slash=/slash-host
 	if [ "${BENCH_STORAGE_KIND}" = fellow ]; then
-		provenance_slash_patch_set=reference-fellow-14
+		provenance_slash_patch_set=reference-fellow-13
 	else
-		provenance_slash_patch_set=buddy-current-vinyl-compat-0001
+		provenance_slash_patch_set=buddy-unpatched
 	fi
 fi
 if [ "${RUN_XKEY}" = 1 ]; then
