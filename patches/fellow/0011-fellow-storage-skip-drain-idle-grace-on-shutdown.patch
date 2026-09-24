@@ -1,0 +1,42 @@
+diff --git a/src/fellow_storage.c b/src/fellow_storage.c
+index 0bcce2c..82a5c01 100644
+--- a/src/fellow_storage.c
++++ b/src/fellow_storage.c
+@@ -2182,10 +2182,11 @@ sfedsk_lru_thread(struct worker *wrk, void *arg)
+  */
+ 
+ static void
+-sfedsk_drain(struct worker *wrk, const struct stevedore *stv)
++sfedsk_drain(struct worker *wrk, const struct stevedore *stv,
++    unsigned idle_polls)
+ {
+ 	uintmax_t n;
+-	int r = 0;
++	unsigned r = 0;
+ 
+ 	do {
+ 		n = 0;
+@@ -2194,10 +2195,10 @@ sfedsk_drain(struct worker *wrk, const struct stevedore *stv)
+ 			n++;
+ 			wrk->strangelove = (int)STVELOVE_SIGNAL_DRAIN;
+ 		}
+-		VSLb(wrk->vsl, SLT_Debug, "check %d drain %lu", r, n);
++		VSLb(wrk->vsl, SLT_Debug, "check %u drain %lu", r, n);
+ 		if (n == 0)
+ 			(void) usleep(100 * 1000);
+-	} while (r++ < SFEDSK_DRAIN_IDLE_POLLS);
++	} while (r++ < idle_polls);
+ 	VSLb(wrk->vsl, SLT_Debug, "drain done");
+ }
+ 
+@@ -2912,7 +2913,9 @@ sfe_drain_thread(struct worker *wrk, void *arg)
+ 	wrk->vsl = &vsl;
+ 	VSL_Init(wrk->vsl, vsl_buf, sizeof vsl_buf);
+ 
+-	sfedsk_drain(wrk, stvfe->dskstv);
++	/* Shutdown already rejects new allocations, so do not add idle grace. */
++	sfedsk_drain(wrk, stvfe->dskstv,
++	    stvfe->shutdown ? 0 : SFEDSK_DRAIN_IDLE_POLLS);
+ 
+ 	VSL_Flush(wrk->vsl, 0);
+ 	return (NULL);

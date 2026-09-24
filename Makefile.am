@@ -12,19 +12,19 @@ EXTRA_DIST = \
 	docs/testing.md \
 	docs/vmod_cachetag.md \
 	patches/fellow/README.md \
-	patches/fellow/0002-add-fellow-object-attr-provider.patch \
-	patches/fellow/0003-fix-fellow-shutdown-drain-races.patch \
-	patches/fellow/0004-fellow_logcache-bound-entries-by-scratch-capacity.patch \
-	patches/fellow/0005-fellow_log-drain-close-time-free-regions-incremental.patch \
-	patches/fellow/0006-fellow_logwatcher-stop-without-pre-close-rewrite.patch \
-	patches/fellow/0007-fellow_log-avoid-close-time-rewrite-work.patch \
-	patches/fellow/0008-fellow_log-write-close-active-block-synchronously.patch \
-	patches/fellow/0009-fix-fellow-high-fanout-shutdown-reset.patch \
-	patches/fellow/0010-suppress-fellow-logwatcher-rewrites-during-shutdown.patch \
-	patches/fellow/0011-skip-fellow-logwatcher-close-flush-on-shutdown.patch \
-	patches/fellow/0012-fellow-storage-skip-drain-idle-grace-on-shutdown.patch \
-	patches/fellow/0013-fellow-storage-skip-global-shutdown-drain.patch \
-	patches/fellow/0014-fellow-object-attr-add-read-failure-test-hook.patch
+	patches/fellow/0001-add-fellow-object-attr-provider.patch \
+	patches/fellow/0002-fix-fellow-shutdown-drain-races.patch \
+	patches/fellow/0003-fellow_logcache-bound-entries-by-scratch-capacity.patch \
+	patches/fellow/0004-fellow_log-drain-close-time-free-regions-incremental.patch \
+	patches/fellow/0005-fellow_logwatcher-stop-without-pre-close-rewrite.patch \
+	patches/fellow/0006-fellow_log-avoid-close-time-rewrite-work.patch \
+	patches/fellow/0007-fellow_log-write-close-active-block-synchronously.patch \
+	patches/fellow/0008-fix-fellow-high-fanout-shutdown-reset.patch \
+	patches/fellow/0009-suppress-fellow-logwatcher-rewrites-during-shutdown.patch \
+	patches/fellow/0010-skip-fellow-logwatcher-close-flush-on-shutdown.patch \
+	patches/fellow/0011-fellow-storage-skip-drain-idle-grace-on-shutdown.patch \
+	patches/fellow/0012-fellow-storage-skip-global-shutdown-drain.patch \
+	patches/fellow/0013-fellow-object-attr-add-read-failure-test-hook.patch
 
 .PHONY: check-with-vinyl-cache check-fellow-with-vinyl-cache
 

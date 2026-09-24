@@ -1,0 +1,16 @@
+diff --git a/src/fellow_log.c b/src/fellow_log.c
+index 540afc3..4647500 100644
+--- a/src/fellow_log.c
++++ b/src/fellow_log.c
+@@ -2773,8 +2773,10 @@ flush_active(const struct fellow_fd *ffd, struct fellow_logbuffer *lbuf,
+ 			type = FAIOT_DLB_FINISH;
+ 		}
+ 	}
+-	else if (opts & FAIO_CLOSE)
++	else if (opts & FAIO_CLOSE) {
++		opts |= FAIO_SYNC;
+ 		type = FAIOT_DLB_FINISH;
++	}
+ 	else if (opts & FAIO_SYNC)
+ 		type = FAIOT_NONE;
+ 	else

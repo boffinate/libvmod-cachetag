@@ -1,0 +1,29 @@
+diff --git a/src/fellow_log.c b/src/fellow_log.c
+index 75730c0..7fe09af 100644
+--- a/src/fellow_log.c
++++ b/src/fellow_log.c
+@@ -6623,7 +6623,11 @@ fellow_logwatcher_thread(void *priv)
+ 	 */
+ 	assert(ffd->logbuf->state == LBUF_OPEN ||
+ 	    ffd->logbuf->state == LBUF_PEND);
+-	logbuffer_flush(ffd, ffd->logbuf, LBUF_FLUSH_CLOSE, LBUF_ALL);
++	if (ffd->watcher_shutdown)
++		logbuffer_abandon(ffd->logbuf);
++	else
++		logbuffer_flush(ffd, ffd->logbuf, LBUF_FLUSH_CLOSE,
++		    LBUF_ALL);
+ 	ffd->logbuf->state = LBUF_FINI;
+ 	logbuffer_fini(ffd->logbuf);
+ 
+@@ -7368,7 +7372,10 @@ fellow_log_flush(struct fellow_fd *ffd)
+ 
+ 	// racy
+ 	lbuf = ffd->logbuf;
+-	if (lbuf->n == 0 && lbuf->regions_to_free == NULL)
++	if (lbuf->n == 0 &&
++	    (lbuf->active.block == NULL ||
++	    lbuf->active.block->nentries == 0) &&
++	    lbuf->regions_to_free == NULL)
+ 		return;
+ 
+ 	lbuf = NULL;

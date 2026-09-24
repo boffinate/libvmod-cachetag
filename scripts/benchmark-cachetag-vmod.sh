@@ -1372,13 +1372,9 @@ if [ "${SKIP_BUILD}" != 1 ]; then
 				fi
 			done
 		}
+		# Buddy is the allocator control and builds from unpatched Slash.
 		if [ "${BENCH_STORAGE_KIND}" = fellow ]; then
 			apply_slash_patch_stack /cachetag-build-host/patches/fellow
-		else
-			# Buddy is the allocator control; only the header-rename compatibility
-			# patch is needed to build it against the pinned Vinyl revision.
-			apply_slash_patch_stack /cachetag-build-host/patches/fellow \
-				/cachetag-build-host/patches/fellow/0001-slash-accept-renamed-vinyl-internal-header.patch
 		fi
 		mkdir -p m4
 		cp "$vinyl_src_copy"/m4/ax_*.m4 m4/

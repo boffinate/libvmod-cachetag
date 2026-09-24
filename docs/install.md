@@ -171,13 +171,13 @@ Keep the `vcl_hit` and `vcl_deliver` `tags.stale()` checks from the Default exam
 
 ## Fellow storage
 
-Fellow is Slash's persistent storage engine. It currently requires the cachetag Fellow patch stack. The patches are based on Slash commit `7be4126892dbc58a03f701632e076f312e0332ed`; use that revision, or confirm that every patch applies cleanly to the Slash revision you use.
+Fellow is Slash's persistent storage engine. It currently requires the cachetag Fellow patch stack. The patches are based on Slash commit `5c934c90d670f6cc98089ed6bcd2a2a2c26d1421`, which needs Vinyl 9.1 or trunk. Use that revision, or confirm that every patch applies cleanly to the Slash revision you use.
 
 Start with a clean Slash checkout, apply the patches, then repeat the Slash build and install commands from the Buddy section:
 
 ```sh
 cd "$SLASH_SRC"
-git checkout 7be4126892dbc58a03f701632e076f312e0332ed
+git checkout 5c934c90d670f6cc98089ed6bcd2a2a2c26d1421
 git apply "$CACHETAG_SRC"/patches/fellow/*.patch
 ```
 

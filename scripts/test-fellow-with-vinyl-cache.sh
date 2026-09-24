@@ -109,7 +109,7 @@ cd "$slash_src"
 
 if [ -f src/fellow_cachetag.c ] ||
     grep -q "DLE_META_ADD" src/tbl/dle.h 2>/dev/null; then
-	echo "obsolete cachetag DLE patch detected in Slash checkout; use a clean 7be4126 base or the replacement object-attr patch stack" >&2
+	echo "obsolete cachetag DLE patch detected in Slash checkout; use a clean 5c934c9 base or the replacement object-attr patch stack" >&2
 	exit 1
 fi
 
