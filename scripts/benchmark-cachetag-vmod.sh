@@ -1288,6 +1288,13 @@ if [ "${SKIP_BUILD}" != 1 ]; then
 	: > "$cachetag_build_commands"
 
 	tar -C /vinyl-src -cf - . | tar -C "$vinyl_src_copy" -xf -
+	# Vinyl trunk makes the bundled vtest2 version.h with "cd vtest2 && make
+	# version.h", which only works when building in the source tree. We build
+	# out of tree, so make it in the source copy, where VPATH and
+	# -I$(srcdir)/vtest2 find it.
+	if [ -f "$vinyl_src_copy/bin/vinyltest/vtest2/Makefile" ]; then
+		make -C "$vinyl_src_copy/bin/vinyltest/vtest2" version.h
+	fi
 
 	cd "$vinyl_build"
 	(
