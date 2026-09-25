@@ -1,0 +1,80 @@
+vtest "retirement rejects a direct-mode fetch that publishes after an incompatible reload"
+
+barrier b_tagged sock 2
+barrier b_release sock 2
+
+server s1 {
+	rxreq
+	expect req.url == "/race"
+	txresp -hdr "X-Source: backend-old" -body "old-body"
+
+	rxreq
+	expect req.url == "/race"
+	txresp -hdr "X-Source: backend-new" -body "new-body"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("attach-race", sweep_interval = 0s,
+		    interning = false);
+	}
+
+	sub vcl_recv {
+		if (req.restarts > 0) {
+			return (synth(503));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("race-tag");
+		set beresp.ttl = 1h;
+		vtc.barrier_sync("${b_tagged_sock}");
+		vtc.barrier_sync("${b_release_sock}");
+	}
+
+	sub vcl_deliver {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+} -start
+
+client c_old {
+	txreq -url "/race"
+	rxresp
+	expect resp.status == 503
+} -start
+
+barrier b_tagged sync
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("attach-race", sweep_interval = 0s,
+		    interning = true);
+	}
+
+	sub vcl_backend_response {
+		tags.add("race-tag");
+		set beresp.ttl = 1h;
+	}
+}
+
+vinyl v1 -cliok "vcl.use vcl2"
+
+barrier b_release sync
+client c_old -wait
+
+client c_new {
+	txreq -url "/race"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -run
+
+server s1 -wait

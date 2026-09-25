@@ -1,0 +1,93 @@
+vtest "volatile membership survives a VCL reload for tag purge"
+
+server s1 {
+	rxreq
+	expect req.url == "/reload"
+	txresp -hdr "X-Source: backend-old" -body "old-body"
+
+	rxreq
+	expect req.url == "/reload"
+	txresp -hdr "X-Source: backend-new" -body "new-body"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("reload", sweep_interval = 0s);
+	}
+
+	sub vcl_backend_response {
+		tags.add("reload-tag");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+} -start
+
+client c_seed {
+	txreq -url "/reload"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+} -run
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("reload", sweep_interval = 0s);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge("reload-tag");
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("reload-tag");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+}
+
+vinyl v1 -cliok "vcl.use vcl2"
+vinyl v1 -cliok "vcl.discard vcl1"
+
+client c_reload {
+	txreq -url "/reload"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+
+	txreq -url "/reload"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -run
+
+server s1 -wait

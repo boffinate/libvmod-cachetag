@@ -38,6 +38,8 @@ vinyl v1 -vcl+backend {
 	}
 } -start
 
+# Keep the namespace compatible so this case isolates callback draining;
+# an incompatible replacement would retire the object before expiry.
 vinyl v1 -cliok {vcl.inline vcl2 << EOF
 	vcl 4.1;
 
@@ -50,9 +52,9 @@ vinyl v1 -cliok {vcl.inline vcl2 << EOF
 	import vtc;
 
 	sub vcl_init {
-		new replacement = cachetag.namespace("callback_new",
+		new replacement = cachetag.namespace("callback_old",
 		    sweep_interval = 0s, vsc_publish_interval = 0s,
-		    interning = true);
+		    interning = false);
 	}
 
 	sub vcl_recv {

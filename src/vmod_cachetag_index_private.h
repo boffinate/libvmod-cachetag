@@ -96,6 +96,8 @@ struct cachetag_index {
 	size_t namespace_len;
 	/* Stored memberships have no discriminator, so this must never change. */
 	enum cachetag_membership_mode membership_mode;
+	/* Old VCL fetches can publish after a replacement VCL invalidates them. */
+	unsigned retired;
 	struct cachetag_limits limits;
 	struct cachetag_wal *wal;
 	struct cachetag_purgemap *purgemap_data;

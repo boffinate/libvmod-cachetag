@@ -140,6 +140,7 @@ VTC_TESTS_CORE = \
 	vtc/cachetag_c00027.vtc \
 	vtc/cachetag_c00028.vtc \
 	vtc/cachetag_c00029.vtc \
+	vtc/cachetag_c00030.vtc \
 	vtc/cachetag_r00001.vtc \
 	vtc/cachetag_r00002.vtc \
 	vtc/cachetag_r00003.vtc \
@@ -206,7 +207,12 @@ $(VTC_TESTS_GENERATED_INTERNED): vtc/.interned-generated
 
 VTC_TESTS_RUNTIME_MODES = \
 	vtc/cachetag_pm00039.vtc \
-	vtc/cachetag_pm00041.vtc
+	vtc/cachetag_pm00041.vtc \
+	vtc/cachetag_pm00043.vtc \
+	vtc/cachetag_pm00044.vtc \
+	vtc/cachetag_pm00045.vtc \
+	vtc/cachetag_pm00046.vtc \
+	vtc/cachetag_pm00047.vtc
 
 VTC_TESTS_DEMO_DIAGNOSTICS = \
 	vtc/cachetag_c00025.vtc \

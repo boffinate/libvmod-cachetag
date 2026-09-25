@@ -1,4 +1,4 @@
-vtest "opposite membership modes survive reload while old VCL requests drain"
+vtest "opposite membership modes retire old indexes while parked VCL deliveries drain"
 
 barrier b_direct_enter sock 2
 barrier b_direct_release sock 2
@@ -111,9 +111,8 @@ vinyl v1 -vcl+backend {
 }
 
 vinyl v1 -cliok "vcl.use vcl2"
-# Let the short-lived vcl1 object expire while the parked vcl1 delivery keeps
-# that VCL live. This exercises the old namespace's normal lifetime without
-# claiming that a request-side barrier can hold an expiry callback itself.
+# VCL2 retires VCL1's incompatible direct index while c_direct_park keeps
+# VCL1 live. The delayed fetch creates VCL2's own membership.
 delay 2.1
 
 client c_intern_flip {
@@ -122,9 +121,11 @@ client c_intern_flip {
 	expect resp.body == "interned-new"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_reload.volatile_objects == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_reload.volatile_edges == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_reload.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl1_tags_reload.volatile_edges == 0
 vinyl v1 -expect CACHETAG.vcl1_tags_reload.volatile_interned_sets == 0
+vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_objects == 1
+vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_edges == 2
 vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_sets == 1
 vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_set_refs == 1
 
@@ -161,6 +162,8 @@ vinyl v1 -vcl+backend {
 }
 
 vinyl v1 -cliok "vcl.use vcl3"
+# VCL3 retires VCL2's incompatible interned index while c_intern_park keeps
+# VCL2 live.
 delay 2.1
 
 client c_direct_again {
@@ -169,10 +172,10 @@ client c_direct_again {
 	expect resp.body == "direct-new"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_objects == 1
-vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_edges == 2
-vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_sets == 1
-vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_set_refs == 1
+vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_objects == 0
+vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_edges == 0
+vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_sets == 0
+vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_set_refs == 0
 vinyl v1 -expect CACHETAG.vcl3_tags_reload.volatile_objects == 1
 vinyl v1 -expect CACHETAG.vcl3_tags_reload.volatile_edges == 2
 vinyl v1 -expect CACHETAG.vcl3_tags_reload.volatile_interned_sets == 0

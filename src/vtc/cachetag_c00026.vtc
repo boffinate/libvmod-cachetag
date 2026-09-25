@@ -1,10 +1,8 @@
-vtest "stale() memo is per namespace and survives a VCL discard with a live memo"
+vtest "stale() memo is per namespace and detects retirement during VCL discard"
 
 # Two checks in one shape: (1) two namespaces used by the same request keep
-# independent memos, and (2) a request parked with memos already filled can
-# still call stale() after its VCL lost the race with a reload and discard.
-# A memo that outlived its namespace's index, or that leaked across
-# namespaces, would fail the body or counter assertions below.
+# independent memos, and (2) a request parked with memos already filled must
+# detect that a replacement VCL retired its index before delivery.
 
 barrier b_hit sock 2
 barrier b_deliver sock 2
@@ -65,8 +63,8 @@ vinyl v1 -vcl+backend {
 			set resp.http.Stale-B = "0";
 		}
 		if (req.url == "/slow" && req.http.X-Park == "1") {
-			# Hold the discarded VCL request after both memo hits so its
-			# still-live VSC segment can prove those calls used the memos.
+			# Hold the discarded VCL request after both stale checks so its
+			# still-live VSC segment can report their counters.
 			vtc.barrier_sync("${b_deliver_sock}");
 			vtc.barrier_sync("${b_release_sock}");
 		}
@@ -109,8 +107,8 @@ client c_slow {
 	rxresp
 	expect resp.status == 200
 	expect resp.body == "body-slow"
-	expect resp.http.Stale-A == 0
-	expect resp.http.Stale-B == 0
+	expect resp.http.Stale-A == 1
+	expect resp.http.Stale-B == 1
 } -start
 
 vinyl v1 -vcl+backend {
@@ -145,9 +143,9 @@ barrier b_hit sync
 barrier b_deliver sync
 
 vinyl v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_calls == 6
-vinyl v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_memo_hits == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_memo_hits == 1
 vinyl v1 -expect CACHETAG.vcl1_tags_b_beta.stale_calls == 6
-vinyl v1 -expect CACHETAG.vcl1_tags_b_beta.stale_memo_hits == 2
+vinyl v1 -expect CACHETAG.vcl1_tags_b_beta.stale_memo_hits == 1
 
 barrier b_release sync
 client c_slow -wait

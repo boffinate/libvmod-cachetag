@@ -64,7 +64,9 @@ sub vcl_deliver {
 
 Calling `stale()` twice isn't a mistake: `vcl_hit` rejects cache hits that a purge has invalidated, and `vcl_deliver` catches a race condition where a purge happens during the fetch or delivery.
 
-By default, every cached object keeps its own copy of its tag list. If many of your objects have exactly the same tags, you can create the namespace with `cachetag.namespace("default", interning = true)`. Cachetag then stores each distinct tag set once and has objects share it. That saves memory when the same sets come up again and again. When most sets are unique it costs more memory and some CPU, so measure your own traffic before you turn it on (see the [usage guide](docs/usage.md)). It's a namespace-creation level setting, and changing it later needs a cache flush and VCL reload. It only applies to objects held in memory. Objects stored on disk by Fellow keep their tags in their own on-disk attributes.
+By default, every cached object keeps its own copy of its tag list. If many of your objects have exactly the same tags, you can create the namespace with `cachetag.namespace("default", interning = true)`. Cachetag then stores each distinct tag set once and has objects share it. That saves memory when the same sets come up again and again. When most sets are unique it costs more memory and some CPU, so measure your own traffic before you turn it on (see the [usage guide](docs/usage.md)). Changing `interning` needs a VCL reload and will invalidate the tagged in-memory objects. Objects stored on disk by Fellow keep their tags in their own on-disk attributes.
+
+For in-memory objects, a VCL reload preserves tags when the new namespace has the same name and settings. If the new VCL imports cachetag, a renamed, removed, or changed namespace invalidates its old tagged objects when that VCL warms. See [VCL reloads](docs/usage.md#vcl-reloads) for the transition rules.
 
 [The usage guide](docs/usage.md) also covers tag separators, registration limits, soft purges, return codes, and Fellow persistence.
 

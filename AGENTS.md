@@ -98,16 +98,16 @@ SIGKILL VTC lists:
 scripts/test-fellow-with-vinyl-cache.sh ../vinyl-cache
 ```
 
-For `CACHE_TAG_CHECK_TARGET=check` with the default diagnostic-surface build, expect the standalone WAL test, the counter-surface parity check, and the 118 storage-agnostic VTCs in `VTC_TESTS` (37 `c`, 16 `r`, 65 `pm`) to pass. The checked-in core cases use the default direct representation, 40 generated core copies explicitly select interning, and seven generated test-hook copies exercise shared allocation and structural failures in interning mode:
+For `CACHE_TAG_CHECK_TARGET=check` with the default diagnostic-surface build, expect the standalone WAL test, the counter-surface parity check, and every VTC in `VTC_TESTS` to pass. The checked-in core cases use the default direct representation, generated core copies explicitly select interning, and generated test-hook copies exercise shared allocation and structural failures in interning mode:
 
 ```text
-# TOTAL: 120
-# PASS:  120
+# TOTAL: 129
+# PASS:  129
 # FAIL:  0
 # ERROR: 0
 ```
 
-With `CACHE_TAG_CONFIGURE_ARGS=""` (production surface: no demo diagnostics, no test hooks) only the production-surface VTCs run, and the expected total is 86 (the WAL test, the counter-surface parity check, and 84 VTCs: 36 `c`, 16 `r`, 32 `pm`).
+With `CACHE_TAG_CONFIGURE_ARGS=""` (production surface: no demo diagnostics, no test hooks) only the production-surface VTCs run alongside the WAL test and counter-surface parity check.
 
 The Fellow matrix contains 49 Cachetag VTCs after adding the four second-call memo lifecycle and race cases, the mixed runtime-membership-mode smoke case, and the persistent opposite-mode reload case. The 2026-08-23 run stopped at the existing `cachetag_c00026.vtc`: its delivery-side release barrier refused the parked request in two attempts, without a Vinyl panic. The new mixed-mode case, persistent opposite-mode reload case, and persistent/SIGKILL tail pass when run separately. Fix the deterministic barrier failure and confirm all 49 before release acceptance.
 

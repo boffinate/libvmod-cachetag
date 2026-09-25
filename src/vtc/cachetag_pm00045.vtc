@@ -1,0 +1,105 @@
+vtest "a same-mode reload purges a fetch that publishes after the reload"
+
+barrier b_tagged sock 2
+barrier b_release sock 2
+
+server s1 {
+	rxreq
+	expect req.url == "/race"
+	txresp -hdr "X-Source: backend-old" -body "old-body"
+
+	rxreq
+	expect req.url == "/race"
+	txresp -hdr "X-Source: backend-new" -body "new-body"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("attach-race", sweep_interval = 0s,
+		    interning = false);
+	}
+
+	sub vcl_recv {
+		if (req.restarts > 0) {
+			return (synth(503));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("race-tag");
+		set beresp.ttl = 1h;
+		vtc.barrier_sync("${b_tagged_sock}");
+		vtc.barrier_sync("${b_release_sock}");
+	}
+
+	sub vcl_deliver {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+} -start
+
+client c_old {
+	txreq -url "/race"
+	rxresp
+	expect resp.status == 503
+} -start
+
+barrier b_tagged sync
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("attach-race", sweep_interval = 0s,
+		    interning = false);
+	}
+
+	sub vcl_recv {
+		if (req.method == "PURGE") {
+			set req.http.purged = tags.purge("race-tag");
+			return (synth(200));
+		}
+	}
+
+	sub vcl_backend_response {
+		tags.add("race-tag");
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_synth {
+		set resp.http.purged = req.http.purged;
+		return (deliver);
+	}
+}
+
+vinyl v1 -cliok "vcl.use vcl2"
+
+client c_purge {
+	txreq -req PURGE
+	rxresp
+	expect resp.status == 200
+	expect resp.http.purged == -1
+} -run
+
+barrier b_release sync
+client c_old -wait
+
+client c_new {
+	txreq -url "/race"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -run
+
+server s1 -wait

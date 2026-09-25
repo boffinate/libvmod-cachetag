@@ -278,6 +278,7 @@ struct vmod_cachetag_namespace {
 
 static int cachetag_namespace_warm(struct vmod_cachetag_namespace *ns);
 static void cachetag_namespace_cold(struct vmod_cachetag_namespace *ns);
+static void cachetag_vsc_note_change(struct vmod_cachetag_namespace *ns);
 
 struct cachetag_pending {
 	unsigned		magic;
@@ -320,15 +321,109 @@ static int cachetag_fellow_attr_size_cb(void *, const struct objcore *,
 static void cachetag_fellow_attr_fill_cb(void *, const struct objcore *, void *,
     size_t);
 
-static void
+static int
+cachetag_limits_equal(const struct cachetag_limits *a,
+    const struct cachetag_limits *b)
+{
+
+	return (a->max_keys_per_object == b->max_keys_per_object &&
+	    a->max_key_length == b->max_key_length &&
+	    a->max_header_bytes == b->max_header_bytes &&
+	    a->purgemap_sweep_interval == b->purgemap_sweep_interval &&
+	    a->purgemap_history_max_entries == b->purgemap_history_max_entries &&
+	    a->purgemap_sweep_batch_objects == b->purgemap_sweep_batch_objects &&
+	    a->purgemap_sweep_batch_usec == b->purgemap_sweep_batch_usec &&
+	    a->purgemap_sweep_batch_yield_usec ==
+	    b->purgemap_sweep_batch_yield_usec);
+}
+
+static int
+cachetag_index_used_by_vcl(const struct cachetag_index *idx,
+    const struct vcl *vcl)
+{
+	const struct vmod_cachetag_namespace *ns;
+
+	for (ns = cachetag_namespaces; ns != NULL; ns = ns->global_next) {
+		if (ns->vcl == vcl && ns->index == idx)
+			return (1);
+	}
+	return (0);
+}
+
+static struct cachetag_index *
 cachetag_namespace_global_add(struct vmod_cachetag_namespace *ns)
 {
+	struct vmod_cachetag_namespace *other;
+	struct cachetag_index *unused = NULL;
 
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	PTOK(pthread_mutex_lock(&cachetag_global_mtx));
+	/* A volatile index belongs to the cached objects, not to the VCL that
+	 * registered them. Namespaces within one VCL remain independent. */
+	if (!cachetag_persist_enabled(ns->index)) {
+		for (other = cachetag_namespaces; other != NULL;
+		    other = other->global_next) {
+			if (other->vcl == ns->vcl ||
+			    other->index == ns->index ||
+			    cachetag_index_used_by_vcl(other->index, ns->vcl) ||
+			    cachetag_persist_enabled(other->index) ||
+			    cachetag_index_retired(other->index) ||
+			    cachetag_index_interning(other->index) !=
+			    cachetag_index_interning(ns->index) ||
+			    strcmp(cachetag_namespace_name(other->index),
+			    cachetag_namespace_name(ns->index)) != 0 ||
+			    !cachetag_limits_equal(cachetag_get_limits(other->index),
+			    cachetag_get_limits(ns->index)))
+				continue;
+			unused = ns->index;
+			ns->index = other->index;
+			break;
+		}
+	}
 	ns->global_next = cachetag_namespaces;
 	cachetag_namespaces = ns;
 	PTOK(pthread_mutex_unlock(&cachetag_global_mtx));
+	return (unused);
+}
+
+static void
+cachetag_namespace_retire_unshared(const struct vcl *vcl)
+{
+	struct vmod_cachetag_namespace *other;
+
+	/* VCL lifecycle events run on Vinyl's CLI thread. At WARM, every
+	 * namespace constructor has run, so indexes without a new VCL owner can
+	 * be killed before that VCL serves an untracked old object. */
+	for (other = cachetag_namespaces; other != NULL;
+	    other = other->global_next) {
+		if (other->vcl == vcl ||
+		    cachetag_index_retired(other->index) ||
+		    cachetag_index_used_by_vcl(other->index, vcl))
+			continue;
+		cachetag_index_retire(other->index);
+		cachetag_vsc_note_change(other);
+	}
+}
+
+static int
+cachetag_namespace_index_has_warm_peer(struct vmod_cachetag_namespace *ns)
+{
+	struct vmod_cachetag_namespace *other;
+	unsigned warm = 0;
+
+	PTOK(pthread_mutex_lock(&cachetag_global_mtx));
+	for (other = cachetag_namespaces; other != NULL;
+	    other = other->global_next) {
+		if (other == ns || other->index != ns->index)
+			continue;
+		PTOK(pthread_mutex_lock(&other->mtx));
+		warm = other->warm_pid == getpid();
+		PTOK(pthread_mutex_unlock(&other->mtx));
+		if (warm)
+			break;
+	}
+	PTOK(pthread_mutex_unlock(&cachetag_global_mtx));
+	return (warm);
 }
 
 static void
@@ -361,10 +456,12 @@ cachetag_fellow_provider_release_if_idle(void)
 	PTOK(pthread_mutex_unlock(&cachetag_fellow_provider_mtx));
 }
 
-static void
+static int
 cachetag_namespace_global_remove(struct vmod_cachetag_namespace *ns)
 {
 	struct vmod_cachetag_namespace **nsp;
+	struct vmod_cachetag_namespace *other;
+	int last = 1;
 
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
 	PTOK(pthread_mutex_lock(&cachetag_global_mtx));
@@ -375,8 +472,16 @@ cachetag_namespace_global_remove(struct vmod_cachetag_namespace *ns)
 			break;
 		}
 	}
+	for (other = cachetag_namespaces; other != NULL;
+	    other = other->global_next) {
+		if (other->index == ns->index) {
+			last = 0;
+			break;
+		}
+	}
 	PTOK(pthread_mutex_unlock(&cachetag_global_mtx));
 	cachetag_fellow_provider_release_if_idle();
+	return (last);
 }
 
 /*
@@ -2570,10 +2675,9 @@ cachetag_namespace_cold(struct vmod_cachetag_namespace *ns)
 	uintptr_t h;
 
 	CHECK_OBJ_NOTNULL(ns, TAG_NAMESPACE_MAGIC);
-	/* Join the publisher before anything it reads is torn down.  __fini
+	/* Join the publisher before anything it reads is torn down. __fini
 	 * reaches VSC_cachetag_Destroy() only through here, so the segment
-	 * outlives the thread.  A second cold, or a cold on the warm failure
-	 * path before the thread ever started, is a no-op. */
+	 * outlives the thread. */
 	cachetag_vsc_publisher_stop(ns);
 	PTOK(pthread_mutex_lock(&ns->mtx));
 	ns->warm_pid = 0;
@@ -2586,14 +2690,17 @@ cachetag_namespace_cold(struct vmod_cachetag_namespace *ns)
 		h = 0;
 	}
 	PTOK(pthread_mutex_unlock(&ns->mtx));
-	cachetag_index_stop(ns->index);
 	if (h != 0)
 		ObjUnsubscribeEvents(&h);
 #if CACHE_TAG_TEST_HOOKS
 	/* A namespace can be destroyed with an armed event that never fired. */
 	cachetag_test_cancel_object_event(ns);
 #endif
-	cachetag_index_detach_all(ns->index);
+	if (!cachetag_namespace_index_has_warm_peer(ns)) {
+		cachetag_index_stop(ns->index);
+		cachetag_index_kill_all(ns->index);
+		cachetag_index_detach_all(ns->index);
+	}
 	cachetag_fellow_provider_release_if_idle();
 	cachetag_vsc_publish(ns);
 }
@@ -2612,8 +2719,9 @@ vmod_namespace__init(VRT_CTX, struct vmod_cachetag_namespace **nsp,
 	char *vsc_name;
 	struct cachetag_limits limits;
 	struct cachetag_persist_config persist;
+	struct cachetag_index *unused;
 	enum cachetag_membership_mode membership_mode;
-	int r;
+	int last, r;
 
 	CHECK_OBJ_NOTNULL(ctx, VRT_CTX_MAGIC);
 	AN(nsp);
@@ -2684,15 +2792,18 @@ vmod_namespace__init(VRT_CTX, struct vmod_cachetag_namespace **nsp,
 	AN(vsc_name);
 	ns->vsc = VSC_cachetag_New(NULL, &ns->vsc_seg, vsc_name);
 	free(vsc_name);
-	cachetag_namespace_global_add(ns);
+	unused = cachetag_namespace_global_add(ns);
+	if (unused != NULL)
+		cachetag_index_delete(&unused);
 	r = cachetag_namespace_warm(ns);
 	if (r != 0) {
 		VRT_fail(ctx, "cachetag.namespace(): warmup failed: %s",
 		    strerror(r));
-		cachetag_namespace_global_remove(ns);
+		last = cachetag_namespace_global_remove(ns);
 		if (ns->vsc != NULL)
 			VSC_cachetag_Destroy(&ns->vsc_seg);
-		cachetag_index_delete(&ns->index);
+		if (last)
+			cachetag_index_delete(&ns->index);
 		PTOK(pthread_cond_destroy(&ns->vsc_cond));
 		PTOK(pthread_mutex_destroy(&ns->vsc_publish_mtx));
 		PTOK(pthread_mutex_destroy(&ns->vsc_mtx));
@@ -2709,9 +2820,10 @@ vmod_namespace__fini(struct vmod_cachetag_namespace **nsp)
 {
 	struct vmod_cachetag_namespace *ns;
 	struct cachetag_pending *tp, *tp2;
+	int last;
 
 	TAKE_OBJ_NOTNULL(ns, nsp, TAG_NAMESPACE_MAGIC);
-	cachetag_namespace_global_remove(ns);
+	last = cachetag_namespace_global_remove(ns);
 	cachetag_namespace_cold(ns);
 	for (tp = ns->pending; tp != NULL; tp = tp2) {
 		tp2 = tp->next;
@@ -2719,7 +2831,8 @@ vmod_namespace__fini(struct vmod_cachetag_namespace **nsp)
 	}
 	if (ns->vsc != NULL)
 		VSC_cachetag_Destroy(&ns->vsc_seg);
-	cachetag_index_delete(&ns->index);
+	if (last)
+		cachetag_index_delete(&ns->index);
 	PTOK(pthread_cond_destroy(&ns->vsc_cond));
 	PTOK(pthread_mutex_destroy(&ns->vsc_publish_mtx));
 	PTOK(pthread_mutex_destroy(&ns->vsc_mtx));
@@ -2773,6 +2886,8 @@ vmod_event_function(VRT_CTX, struct vmod_priv *priv, enum vcl_event_e e)
 			break;
 		}
 	}
+	if (e == VCL_EVENT_WARM)
+		cachetag_namespace_retire_unshared(ctx->vcl);
 	free(list);
 	return (0);
 }

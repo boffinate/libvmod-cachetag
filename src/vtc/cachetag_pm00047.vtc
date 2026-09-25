@@ -1,0 +1,84 @@
+vtest "removing a namespace invalidates volatile objects while the old VCL stays warm"
+
+barrier b_parked sock 2
+barrier b_release sock 2
+
+server s1 {
+	rxreq
+	expect req.url == "/removed"
+	txresp -hdr "X-Source: backend-old" -body "old-body"
+
+	rxreq
+	expect req.url == "/park"
+	txresp -body "park-body"
+
+	rxreq
+	expect req.url == "/removed"
+	txresp -hdr "X-Source: backend-new" -body "new-body"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+	import vtc;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("removed-name", sweep_interval = 0s);
+	}
+
+	sub vcl_backend_response {
+		if (bereq.url == "/removed") {
+			tags.add("removed-tag");
+		}
+		set beresp.ttl = 1h;
+	}
+
+	sub vcl_hit {
+		if (tags.stale()) {
+			return (restart);
+		}
+	}
+
+	sub vcl_deliver {
+		if (req.url == "/park") {
+			vtc.barrier_sync("${b_parked_sock}");
+			vtc.barrier_sync("${b_release_sock}");
+		}
+	}
+} -start
+
+client c_seed {
+	txreq -url "/removed"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+} -run
+
+client c_park {
+	txreq -url "/park"
+	rxresp
+	expect resp.status == 200
+	expect resp.body == "park-body"
+} -start
+
+barrier b_parked sync
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+}
+
+vinyl v1 -cliok "vcl.use vcl2"
+
+client c_removed {
+	txreq -url "/removed"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -run
+
+barrier b_release sync
+client c_park -wait
+vinyl v1 -cliok "vcl.discard vcl1"
+
+server s1 -wait

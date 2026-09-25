@@ -80,6 +80,9 @@ struct cachetag_index *cachetag_index_new(const char *, const struct cachetag_li
 void cachetag_index_delete(struct cachetag_index **);
 int cachetag_index_start(struct cachetag_index *);
 void cachetag_index_stop(struct cachetag_index *);
+void cachetag_index_kill_all(struct cachetag_index *);
+void cachetag_index_retire(struct cachetag_index *);
+int cachetag_index_retired(const struct cachetag_index *);
 void cachetag_index_detach_all(struct cachetag_index *);
 
 int cachetag_registration_snapshot(struct cachetag_index *, const char *,

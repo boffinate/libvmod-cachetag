@@ -1,0 +1,60 @@
+vtest "an incompatible membership-mode reload invalidates volatile objects"
+
+server s1 {
+	rxreq
+	expect req.url == "/mode-change"
+	txresp -hdr "X-Source: backend-old" -body "old-body"
+
+	rxreq
+	expect req.url == "/mode-change"
+	txresp -hdr "X-Source: backend-new" -body "new-body"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("mode-change", sweep_interval = 0s,
+		    interning = false);
+	}
+
+	sub vcl_backend_response {
+		tags.add("reload-tag");
+		set beresp.ttl = 1h;
+	}
+} -start
+
+client c_seed {
+	txreq -url "/mode-change"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-old"
+	expect resp.body == "old-body"
+} -run
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("mode-change", sweep_interval = 0s,
+		    interning = true);
+	}
+
+	sub vcl_backend_response {
+		tags.add("reload-tag");
+		set beresp.ttl = 1h;
+	}
+}
+
+vinyl v1 -cliok "vcl.use vcl2"
+vinyl v1 -cliok "vcl.discard vcl1"
+
+client c_reload {
+	txreq -url "/mode-change"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Source == "backend-new"
+	expect resp.body == "new-body"
+} -run
+
+server s1 -wait

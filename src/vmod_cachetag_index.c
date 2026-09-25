@@ -3064,6 +3064,13 @@ cachetag_record_attach_purgemap_take(struct cachetag_index *idx,
 	low_water_wake_at = 0;
 	cachetag_request_obj_lock(idx, TAG_REQUEST_LOCK_ATTACH);
 again:
+	if (__atomic_load_n(&idx->retired, __ATOMIC_ACQUIRE)) {
+		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+		if (interning)
+			cachetag_intern_attach_cleanup(idx, &cleanup, prepared,
+			    candidate, 1);
+		return (ESHUTDOWN);
+	}
 	if (__atomic_exchange_n(&idx->test_force_next_attach_slot_overflow,
 	    0, __ATOMIC_ACQ_REL) || idx->nobjects >= TAG_SIDE_MAX_OBJECTS) {
 		PTOK(pthread_mutex_unlock(&idx->obj_mtx));
@@ -3898,10 +3905,6 @@ cachetag_index_detach_all(struct cachetag_index *idx)
 	else
 		for (u = 0; u < idx->nobjects; u++)
 			cachetag_objent_dispose_direct(idx, u);
-	/* The index is empty from here on: detaching the segments asserts that
-	 * nothing is still indexed, so the count has to be cleared before the
-	 * call, not after it.  Taking a populated namespace cold (a VCL discard
-	 * with live volatile membership) panicked on that assert. */
 	idx->nobjects = 0;
 	ndetached_segments = cachetag_object_detach_segments_locked(idx, 0,
 	    detached_segments);
@@ -3919,6 +3922,101 @@ cachetag_index_detach_all(struct cachetag_index *idx)
 	free(detached_primary);
 	free(detached_retiring);
 	cachetag_object_free_segments(detached_segments, ndetached_segments);
+}
+
+static void
+cachetag_index_kill_all_locked(struct cachetag_index *idx,
+    struct cachetag_intern_cleanup *cleanup)
+{
+	struct cachetag_gauge_inputs gauge_in;
+	struct cachetag_gauges gauges;
+	int interning;
+
+	interning = idx->membership_mode == TAG_MEMBERSHIP_INTERNED;
+	while (idx->nobjects > 0) {
+		struct cachetag_direct_vector *direct_vector;
+		struct cachetag_membership_view view;
+		struct cachetag_interned_set *set;
+		struct cachetag_objent *ent;
+		struct objcore *oc;
+		unsigned nfolds;
+		size_t slot;
+
+		slot = idx->nobjects - 1;
+		ent = cachetag_object_at(idx, slot);
+		view = cachetag_objent_membership_view(idx, slot);
+		nfolds = view.nfolds;
+		oc = ent->oc;
+		set = interning && nfolds > 1 ? ent->membership.set : NULL;
+		direct_vector = !interning && nfolds > 1 ?
+		    ent->membership.vector : NULL;
+		if (cachetag_side_remove_locked(idx, slot) != 0) {
+			/* Detach owns the memberships when the side map is corrupt, but
+			 * every dense entry must still become uncacheable. */
+			for (slot = 0; slot < idx->nobjects; slot++)
+				HSH_Kill(cachetag_object_at(idx, slot)->oc);
+			break;
+		}
+		HSH_Kill(oc);
+		if (set != NULL)
+			cachetag_intern_release_locked(idx, set, cleanup);
+		else
+			cachetag_direct_vector_free(direct_vector, nfolds);
+		PTOK(pthread_mutex_lock(&idx->counter_mtx));
+		assert(idx->counters.volatile_edges >= nfolds);
+		idx->counters.volatile_edges -= nfolds;
+		idx->counters.volatile_inline_folds -= nfolds == 1;
+		if (!interning)
+			idx->counters.volatile_object_count_overflow_bytes -=
+			    nfolds >= TAG_OBJCOUNT_OVERFLOW ?
+			    sizeof(struct cachetag_fold_storage_header) : 0;
+		PTOK(pthread_mutex_unlock(&idx->counter_mtx));
+	}
+	PTOK(pthread_mutex_lock(&idx->counter_mtx));
+	cachetag_gauge_inputs_locked(idx, &gauge_in);
+	cachetag_gauges_compute(&gauge_in, &gauges);
+	cachetag_gauges_store_locked(idx, &gauges);
+	PTOK(pthread_mutex_unlock(&idx->counter_mtx));
+}
+
+void
+cachetag_index_kill_all(struct cachetag_index *idx)
+{
+	struct cachetag_intern_cleanup cleanup;
+	int interning;
+
+	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
+	memset(&cleanup, 0, sizeof cleanup);
+	interning = idx->membership_mode == TAG_MEMBERSHIP_INTERNED;
+	PTOK(pthread_mutex_lock(&idx->obj_mtx));
+	cachetag_index_kill_all_locked(idx, &cleanup);
+	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	if (interning)
+		cachetag_intern_cleanup_free(idx, &cleanup);
+}
+
+void
+cachetag_index_retire(struct cachetag_index *idx)
+{
+	struct cachetag_intern_cleanup cleanup;
+	int interning;
+
+	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
+	memset(&cleanup, 0, sizeof cleanup);
+	interning = idx->membership_mode == TAG_MEMBERSHIP_INTERNED;
+	PTOK(pthread_mutex_lock(&idx->obj_mtx));
+	__atomic_store_n(&idx->retired, 1, __ATOMIC_RELEASE);
+	cachetag_index_kill_all_locked(idx, &cleanup);
+	PTOK(pthread_mutex_unlock(&idx->obj_mtx));
+	if (interning)
+		cachetag_intern_cleanup_free(idx, &cleanup);
+}
+
+int
+cachetag_index_retired(const struct cachetag_index *idx)
+{
+	CHECK_OBJ_NOTNULL(idx, TAG_INDEX_MAGIC);
+	return (__atomic_load_n(&idx->retired, __ATOMIC_ACQUIRE) != 0);
 }
 
 static uint64_t
