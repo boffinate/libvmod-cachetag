@@ -1,6 +1,6 @@
 # Cachetag: tag-based invalidation VMOD for Vinyl Cache
 
-Cachetag is a new approach to tag-based cache invalidation, which is more memory efficient and gives [stricter freshness guarantees](docs/strictness.md) than `xkey`. It requires [Vinyl Cache](https://vinyl-cache.org/) 9.x (Varnish Cache support is planned) and supports multiple storage engines.
+Cachetag is a new approach to tag-based cache invalidation, which is memory efficient and gives [stricter freshness guarantees](docs/strictness.md) than `xkey`. It requires [Vinyl Cache](https://vinyl-cache.org/) 9.x (Varnish Cache support is planned) and supports multiple storage engines.
 
 > [!TIP]
 > Help me make Cachetag faster for your workloads! [Read more](#optimize-cachetag)
@@ -9,7 +9,7 @@ Cachetag is a new approach to tag-based cache invalidation, which is more memory
 
 ![cachetag-vs-xkey-approach](./docs/_images/cachetag-vs-xkey-approach.svg)
 
-This generational approach saves memory, particularly for large caches. It also allows us to work efficiently with Fellow on-disk storage.
+This generational approach saves memory (workload dependent, 20-80%), the saving increasing with cache size. It also allows us to work efficiently with Fellow on-disk storage.
 
 ## Requirements
 
@@ -62,11 +62,11 @@ sub vcl_deliver {
 }
 ```
 
-The `stale()` check runs twice on purpose: `vcl_hit` rejects cache hits that a purge has invalidated, and `vcl_deliver` closes the race where a purge happens while the fetch or delivery is in progress.
+Calling `stale()` twice isn't a mistake: `vcl_hit` rejects cache hits that a purge has invalidated, and `vcl_deliver` catches a race condition where a purge happens during the fetch or delivery.
 
-Namespaces store direct per-object membership vectors by default. Set `interning = true` on `cachetag.namespace()` when your workload has enough identical complete tag sets to justify canonicalising them; see the usage guide for the memory and CPU trade-off. This choice affects volatile memberships only and is fixed for the namespace's lifetime.
+By default, every cached object keeps its own copy of its tag list. If many of your objects have exactly the same tags, you can create the namespace with `cachetag.namespace("default", interning = true)`. Cachetag then stores each distinct tag set once and has objects share it. That saves memory when the same sets come up again and again. When most sets are unique it costs more memory and some CPU, so measure your own traffic before you turn it on (see the [usage guide](docs/usage.md)). It's a namespace-creation level setting, and changing it later needs a cache flush and VCL reload. It only applies to objects held in memory. Objects stored on disk by Fellow keep their tags in their own on-disk attributes.
 
-[The usage guide](docs/usage.md) covers separators, registration limits, soft purges, return codes, and Fellow persistence.
+[The usage guide](docs/usage.md) also covers tag separators, registration limits, soft purges, return codes, and Fellow persistence.
 
 ## Why did I build this?
 
@@ -86,9 +86,9 @@ I also needed a persistent on-disk cache for a project, which meant cache taggin
 <a name="optimize-cachetag"></a>
 ## Help me optimize cachetag for your workloads
 
-There are design decisions I can't settle without data from more real-world deployments, because the site I use cachetag for *may be very different from most*.
+There are design decisions I can't settle without data from more real-world deployments, because the sites I use cachetag for *may be very different from most*.
 
-For example: string interning. If many objects share the same tag set (as my site does), interning those sets cuts memory usage. If most workloads carry unique tag sets, interning *raise*s memory. Is it a good change to Cachetag? Benchmarks can't answer this, only real traffic data can.
+For example: should string interning be enabled by default. If many objects share the same tag set (as my site does), interning those sets cuts memory usage. If most workloads carry unique tag sets, interning *raise*s memory. Is it a good change to Cachetag? Benchmarks can't answer this, only real traffic data can.
 
 There are two ways you can help me optimize Cachetag for your use-cases:
 
