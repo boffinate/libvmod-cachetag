@@ -33,6 +33,8 @@ sequenceDiagram
 
 Underneath, a single purge map holds namespace-qualified digests of purged tags, and registration snapshots the current purge sequence. A purge that landed before registration leaves the object alone. A purge that lands after it gets caught twice: first by the insert probe, then by the `stale()` checks in `vcl_hit` and `vcl_deliver` that restart the request onto a fresh fetch.
 
+Fellow objects work differently. An object's full tag list is stored only in a checksummed attribute on the object itself. After a restart, cachetag replays the purge history, but it doesn't scan the stored objects or build an index of them. On a hit, Fellow loads the object's metadata as usual, and cachetag validates the tag attribute and checks the hashed tags in it directly against the purge map in memory. Fellow objects never take up space in cachetag's in-memory index, however many of them are read.
+
 ## Where this matters
 
 During a flash sale, one price can appear on product pages, listings, search results, recommendations, and API responses at once. Under `xkey`, whichever copies happen to be busy or mid-fetch when the purge lands will outlive it. Cachetag rejects every copy the purge invalidated, whatever state it was caught in.
