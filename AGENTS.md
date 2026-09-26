@@ -114,8 +114,8 @@ The Fellow matrix contains 49 Cachetag VTCs after adding the four second-call me
 For the default `distcheck`, expect:
 
 ```text
-libvmod-cachetag-1.0.2 archives ready for distribution:
-libvmod-cachetag-1.0.2.tar.gz
+libvmod-cachetag-1.0.3 archives ready for distribution:
+libvmod-cachetag-1.0.3.tar.gz
 ```
 
 ## When Debugging Failures
