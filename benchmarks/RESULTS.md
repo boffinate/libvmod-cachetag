@@ -1,14 +1,22 @@
 # Cachetag benchmark results
 
-Last updated: 2026-08-20
+Last updated: 2026-10-13
 
-Rules reviewed: BR-001..BR-026; applicable: BR-001, BR-002, BR-004, BR-007, BR-008, BR-011, BR-013, BR-014, BR-016, BR-017, BR-018, BR-019, BR-020, BR-021, BR-023, BR-024, BR-025 and BR-026. The wall-CPU claims comply; the optional `perf stat` evidence is retrospectively partial and report-only under the strengthened BR-024 coverage rule.
+Rules reviewed: BR-001..BR-027; applicable: BR-001, BR-002, BR-004, BR-007, BR-008, BR-011, BR-013, BR-014, BR-016, BR-017, BR-018, BR-019, BR-020, BR-021, BR-023, BR-024, BR-025, BR-026 and BR-027. The wall-CPU claims comply; the optional `perf stat` evidence is retrospectively partial and report-only under the strengthened BR-024 coverage rule.
 
 Cachetag used less process memory than xkey in all three static in-memory workloads tested. The difference was largest when tags were mostly unique and smallest when 4 KiB object bodies dominated the cache footprint. Cachetag also used slightly less `cache-main` CPU to load and index the fixed population. On warm hits the two are now indistinguishable at the resolution of this measurement: cachetag's remaining median gap to xkey is 0.45–1.09%, below the run-to-run noise floor on every workload.
 
-These results describe synthetic workloads on one server cohort. They do not show maximum throughput, production traffic, invalidation cost, long-running lifecycle behaviour, or performance with Fellow or Buddy storage.
+The in-memory comparisons below describe synthetic workloads on one server cohort. They do not show maximum throughput, production traffic, invalidation cost, long-running lifecycle behaviour, or performance with Fellow or Buddy storage. Fellow storage results use a separate server cohort.
 
-## Results
+## Fellow persistent storage
+
+With Fellow io_uring storage and strict WAL, median tag-purge latency was **4.3–4.5 ms per request containing ten tag keys**. Each request persisted those keys in one WAL record. The test used 10,000 cached objects and 100 serial purge requests per repetition. All six batching repetitions passed their persistence and freshness checks, with zero driver errors and no swap.
+
+The **100,000-object restart test passed** for both tested builds. After restart, 1,000 sparse reads hit the cache without backend requests; purging untouched IDs left the read counters unchanged, and fetching stale objects correctly reached the backend. Both runs reported zero driver errors and no swap.
+
+The latency figures describe this serial strict-WAL workload, not throughput capacity or a production traffic mix. See [Fellow results](FELLOW_RESULTS.md) for the measured builds, workload details and validity checks, and the [latency observations](fellow-optimized-io-uring-latency.json) for all repetition percentiles.
+
+## In-memory results
 
 ### Process memory after load
 
