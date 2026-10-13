@@ -28,6 +28,7 @@ RUN apt-get update \
 	libncurses-dev \
 	libpcre2-dev \
 	libtool \
+	liburing-dev \
 	pkg-config \
 	python3-docutils \
 	python3-sphinx \

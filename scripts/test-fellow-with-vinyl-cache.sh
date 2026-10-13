@@ -57,7 +57,7 @@ fellow_common_tests=${CACHE_TAG_FELLOW_COMMON_TESTS:-}
 fellow_slash_check=${CACHE_TAG_FELLOW_SLASH_CHECK:-1}
 fellow_slash_tests=${CACHE_TAG_FELLOW_SLASH_TESTS:-fellow_cache_test_ndebug fellow_cache_test fellow_log_test_ndebug bitf_segmentation_test}
 
-docker run --rm \
+docker run --rm --security-opt seccomp=unconfined \
 	-v "$vinyl_src:/vinyl-src:ro" \
 	-v "$slash_src:/slash-host:ro" \
 	-v "$repo_dir:/cachetag-host:ro" \
@@ -179,6 +179,24 @@ CPPFLAGS="${CPPFLAGS:-} $slash_build_cflags" \
 CFLAGS="${CFLAGS:-} $slash_build_cflags" \
 VINYLSRC="$vinyl_src_copy" ./bootstrap --prefix="$prefix"
 make -j"$(nproc)"
+test -f /usr/include/liburing.h
+if ! grep -Fx "#define HAVE_LIBURING_H 1" config.h >/dev/null; then
+	echo "Fellow was built without io_uring support" >&2
+	exit 1
+fi
+ldd src/.libs/libvmod_slash.so | grep -F "liburing.so" >/dev/null
+cat > /tmp/cachetag-fellow-io-uring-probe.c <<EOF
+#include <liburing.h>
+int main(void) {
+	struct io_uring ring;
+	int result = io_uring_queue_init(2, &ring, 0);
+	if (result == 0)
+		io_uring_queue_exit(&ring);
+	return result != 0;
+}
+EOF
+gcc -o /tmp/cachetag-fellow-io-uring-probe /tmp/cachetag-fellow-io-uring-probe.c -luring
+/tmp/cachetag-fellow-io-uring-probe
 if [ "$CACHE_TAG_FELLOW_SLASH_CHECK" != 0 ]; then
 	if ! make check TESTS="$CACHE_TAG_FELLOW_SLASH_TESTS"; then
 		if [ -f src/test-suite.log ]; then

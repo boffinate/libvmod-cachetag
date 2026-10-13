@@ -21,7 +21,9 @@ Environment:
                         (default: docker)
   DOCKER_RUN_ARGS       Extra arguments for docker run, for example
                         '--cap-add PERFMON' for hardware perf counters
-                        (default: empty)
+                        (default: empty). Fellow rows also add
+                        seccomp=unconfined so the Docker profile cannot block
+                        io_uring syscalls.
   BENCH_MATRIX          Logical matrix name for labels/metadata
                         (default: ad-hoc)
   BENCH_RESULT_ID       Unique result id for labels/metadata
@@ -952,6 +954,7 @@ if [ "$bench_intern_lifecycle_header_bytes" != 0 ]; then
 	}
 fi
 slash_mount_args=
+fellow_io_uring_security_opt=none
 if [ "$bench_storage_kind" = fellow ] || [ "$bench_storage_kind" = buddy ]; then
 	default_slash_src="$repo_dir/../slash"
 	slash_src=${SLASH_SRC:-$default_slash_src}
@@ -965,6 +968,14 @@ if [ "$bench_storage_kind" = fellow ] || [ "$bench_storage_kind" = buddy ]; then
 	slash_mount_args="-v $slash_src:/slash-host:ro"
 else
 	slash_src=
+fi
+docker_security_args=
+if [ "$bench_storage_kind" = fellow ]; then
+	docker_security_args="--security-opt seccomp=unconfined"
+	fellow_io_uring_security_opt=seccomp=unconfined
+	# The workload evidence is emitted by the Fellow child process. vinyltest -q
+	# hides that output, so it cannot prove which backend served the row.
+	vtc_quiet=0
 fi
 
 case "$bench_code_generation:$bench_legacy_set_interning" in
@@ -1018,7 +1029,7 @@ if [ -n "$bench_cpuset_cpus" ]; then
 	docker_cpuset_args="--cpuset-cpus $bench_cpuset_cpus"
 fi
 
-$docker_cmd run $docker_run_args $docker_cpuset_args --rm \
+$docker_cmd run $docker_run_args $docker_security_args $docker_cpuset_args --rm \
 	--cidfile "$docker_cidfile" \
 	--label org.cachetag.benchmark=1 \
 	--label "org.cachetag.benchmark.matrix=$bench_matrix" \
@@ -1201,16 +1212,18 @@ cachetag_src=/work/cachetag-src
 cachetag_build_commands=/work/cachetag-build-commands.log
 xkey_build_commands=/work/xkey-build-commands.log
 build_commands=$cachetag_build_commands
+fellow_io_uring_compiled=not-applicable
+fellow_io_uring_runtime_probe=not-applicable
+slash_build_cflags=not-applicable
+slash_build_cppflags=not-applicable
+slash_build_ldflags=not-applicable
 build_cflags=${BENCH_BUILD_CFLAGS:?BENCH_BUILD_CFLAGS is required}
 build_cppflags=${BENCH_BUILD_CPPFLAGS-}
 build_ldflags=${BENCH_BUILD_LDFLAGS-}
 vinyl_build_profile=${BENCH_VINYL_BUILD_PROFILE:?BENCH_VINYL_BUILD_PROFILE is required}
-# Vinyl configure.ac turns --enable-debugging-symbols into -O0 -g -fno-inline
-# appended after the autoconf default -g -O2, and gcc honours the last -O.
-# Every cohort before 2026-08-26 measured that unoptimised vinyld, so the
-# optimized profile sets CFLAGS explicitly instead of trusting configure
-# defaults. Frame pointers stay on so the default fp call-graph unwinder keeps
-# working for perf record.
+# Vinyl appends -O0 -g -fno-inline when debugging symbols are enabled, and
+# gcc honours the last -O. Explicit flags keep the measured binary optimized;
+# frame pointers support the default perf call-graph unwinder.
 case "$vinyl_build_profile" in
 optimized)
 	vinyl_build_cflags="-O2 -g -fno-omit-frame-pointer"
@@ -1283,6 +1296,12 @@ BUILD_PROVENANCE_HARNESS_SRC=/cachetag-host \
 	"$BENCH_STORAGE_KIND" ignored
 
 if [ "${SKIP_BUILD}" != 1 ]; then
+	if [ "${BENCH_STORAGE_KIND}" = fellow ] || [ "${BENCH_STORAGE_KIND}" = buddy ]; then
+		rm -f /work/slash-build-flags.env
+	fi
+	if [ "${BENCH_STORAGE_KIND}" = fellow ]; then
+		rm -f /work/fellow-io-uring-build.env
+	fi
 	rm -rf "$prefix" "$vinyl_build" "$vinyl_src_copy" "$slash_src" "$cachetag_src"
 	mkdir -p "$prefix" "$vinyl_build" "$vinyl_src_copy" "$slash_src" "$cachetag_src"
 	: > "$cachetag_build_commands"
@@ -1384,9 +1403,45 @@ AC_DEFUN([AX_EXECINFO], [
 	AC_SEARCH_LIBS([backtrace], [execinfo], [$1], [$2])
 ])
 M4EOF
-		slash_build_cflags="-I$vinyl_build/include -I$vinyl_build/lib/libvsc"
-		run_logged env CPPFLAGS="${CPPFLAGS:-} $slash_build_cflags" CFLAGS="${CFLAGS:-} $slash_build_cflags" VINYLSRC="$vinyl_src_copy" ./bootstrap --prefix="$prefix"
+		slash_include_flags="-I$vinyl_build/include -I$vinyl_build/lib/libvsc"
+		# An include-only CFLAGS override suppresses the default optimization flags.
+		slash_build_cflags="$build_cflags $slash_include_flags"
+		slash_build_cppflags="$build_cppflags $slash_include_flags"
+		slash_build_ldflags="$build_ldflags"
+		run_logged env CPPFLAGS="$slash_build_cppflags" CFLAGS="$slash_build_cflags" LDFLAGS="$slash_build_ldflags" VINYLSRC="$vinyl_src_copy" ./bootstrap --prefix="$prefix"
 		run_logged make -j"$(nproc)" V=1
+		case "${BENCH_STORAGE_KIND}" in
+			fellow) slash_compile_objects="libvmod_slash_la-fellow_storage:fellow_storage libfellow_la-fellow_io_uring:fellow_io_uring" ;;
+			buddy) slash_compile_objects="libvmod_slash_la-fellow_storage:fellow_storage libbuddy_la-buddy:buddy" ;;
+		esac
+		for slash_compile_object in $slash_compile_objects; do
+			slash_object=${slash_compile_object%%:*}
+			slash_source=${slash_compile_object#*:}
+			slash_compile_line=$(grep -F -- "-MT ${slash_object}.lo" "$build_commands" | grep -F -- "${slash_source}.c" | tail -n 1 || true)
+			test -n "$slash_compile_line" || { echo "Slash build did not compile production object ${slash_object}.lo" >&2; exit 1; }
+			slash_optimization=$(printf "%s\n" "$slash_compile_line" | awk "{ for (i = 1; i <= NF; i++) if (\$i ~ /^-O/) value = \$i } END { print value }")
+			case "$slash_optimization" in
+				-O1|-O2|-O3|-Ofast|-Og|-Os) ;;
+				*) echo "Slash compile is not optimized for ${slash_source}.c: ${slash_compile_line}" >&2; exit 1 ;;
+			esac
+			case " $slash_compile_line " in
+				*" -fno-inline "*) echo "Slash compile disables inlining for ${slash_source}.c: ${slash_compile_line}" >&2; exit 1 ;;
+			esac
+		done
+		printf "cflags=%s\ncppflags=%s\nldflags=%s\n" \
+			"$slash_build_cflags" "$slash_build_cppflags" "$slash_build_ldflags" \
+			> /work/slash-build-flags.env
+		if [ "${BENCH_STORAGE_KIND}" = fellow ]; then
+			test -f /usr/include/liburing.h
+			grep -F "checking for liburing.h... yes" "$build_commands" >/dev/null
+			grep -F "uring:        yes" "$build_commands" >/dev/null
+			grep -Fx "#define HAVE_LIBURING_H 1" config.h >/dev/null
+			grep -F "fellow_io_uring.c" "$build_commands" >/dev/null
+			ldd src/.libs/libvmod_slash.so | grep -F "liburing.so" >/dev/null
+			fellow_io_uring_compiled=1
+			printf "compiled=%s\n" "$fellow_io_uring_compiled" \
+				> /work/fellow-io-uring-build.env
+		fi
 	fi
 
 	tar -C /cachetag-build-host \
@@ -1430,8 +1485,33 @@ else
 	test -f "$cachetag_src/src/.libs/libvmod_cachetag.so"
 	if [ "${BENCH_STORAGE_KIND}" = fellow ] || [ "${BENCH_STORAGE_KIND}" = buddy ]; then
 		test -f "$slash_src/src/.libs/libvmod_slash.so"
+		test -r /work/slash-build-flags.env
+		slash_build_cflags=$(sed -n "s/^cflags=//p" /work/slash-build-flags.env)
+		slash_build_cppflags=$(sed -n "s/^cppflags=//p" /work/slash-build-flags.env)
+		slash_build_ldflags=$(sed -n "s/^ldflags=//p" /work/slash-build-flags.env)
+		if [ "${BENCH_STORAGE_KIND}" = fellow ]; then
+			test -r /work/fellow-io-uring-build.env
+			fellow_io_uring_compiled=$(sed -n "s/^compiled=//p" /work/fellow-io-uring-build.env)
+		fi
 	fi
 	test -f "$cachetag_build_commands"
+fi
+if [ "${BENCH_STORAGE_KIND}" = fellow ]; then
+	test "$fellow_io_uring_compiled" = 1
+	cat > /tmp/cachetag-fellow-io-uring-probe.c <<EOF
+#include <liburing.h>
+int main(void) {
+	struct io_uring ring;
+	int result = io_uring_queue_init(2, &ring, 0);
+	if (result == 0)
+		io_uring_queue_exit(&ring);
+	return result != 0;
+}
+EOF
+	gcc -o /tmp/cachetag-fellow-io-uring-probe /tmp/cachetag-fellow-io-uring-probe.c -luring
+	/tmp/cachetag-fellow-io-uring-probe
+	fellow_io_uring_runtime_probe=passed
+	test "$fellow_io_uring_runtime_probe" = passed
 fi
 
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig:$prefix/lib/aarch64-linux-gnu/pkgconfig:$prefix/lib/x86_64-linux-gnu/pkgconfig"
@@ -1970,6 +2050,12 @@ fi
 	printf "bench_fellow_size=%s\n" "$BENCH_FELLOW_SIZE"
 	printf "bench_fellow_segment_size=%s\n" "$BENCH_FELLOW_SEGMENT_SIZE"
 	printf "bench_fellow_block_size=%s\n" "$BENCH_FELLOW_BLOCK_SIZE"
+	printf "slash_build_cflags=%s\n" "$slash_build_cflags"
+	printf "slash_build_cppflags=%s\n" "$slash_build_cppflags"
+	printf "slash_build_ldflags=%s\n" "$slash_build_ldflags"
+	printf "fellow_io_uring_compiled=%s\n" "$fellow_io_uring_compiled"
+	printf "fellow_io_uring_runtime_probe=%s\n" "$fellow_io_uring_runtime_probe"
+	printf "fellow_io_uring_security_opt=%s\n" "'"$fellow_io_uring_security_opt"'"
 	printf "bench_buddy_size=%s\n" "$BENCH_BUDDY_SIZE"
 	printf "bench_buddy_reserve_chunks=%s\n" "$BENCH_BUDDY_RESERVE_CHUNKS"
 	printf "bench_cache_tag_persist=%s\n" "$BENCH_CACHE_TAG_PERSIST"
@@ -2406,6 +2492,14 @@ for workload in /results/workloads/*.vtc; do
 				printf "run=%s\n" "$run"
 				grep -E "^(vmstat_pswpin_delta|vmstat_pswpout_delta|vmstat_pgmajfault_delta|meminfo_swapfree_kb_delta)=" "$timing" || true
 			} >> /results/SWAP_DETECTED
+		fi
+		if [ "$BENCH_STORAGE_KIND" = fellow ]; then
+			grep -F "io_uring register_buffers_choice" "$out" >/dev/null || {
+				echo "Fellow workload did not report io_uring initialization: $name run $run" >&2
+				exit 1
+			}
+			printf "workload=%s\nrun=%s\nio_uring_initialization=observed\n" "$name" "$run" \
+				>> /results/fellow-io-uring.env
 		fi
 		for artifact in /results/${artifact_prefix}*.driver \
 		    /results/${artifact_prefix}*.latency_samples.tsv \

@@ -47,6 +47,8 @@ BENCH_STORAGE_KIND=fellow SLASH_SRC=../slash \
 
 The benchmark harness builds Slash for Buddy without patches. Fellow builds receive the full Fellow patch stack, including cachetag integration. The selected patch set is recorded in build provenance. Fellow lanes enable persistent cachetag metadata by default; Buddy lanes do not.
 
+Fellow requires io_uring. Rebuild the image after updating the harness so it includes `liburing-dev`. Fellow test and benchmark containers use `--security-opt seccomp=unconfined` to allow the io_uring syscalls. The harness checks that Slash builds and links the io_uring backend and probes queue creation inside each container. Benchmark workloads also retain Fellow's initialization log in `fellow-io-uring.env`; missing evidence stops the run. Fellow benchmarks retain verbose VTC logs for this check.
+
 Use a native Linux host for measurements you intend to compare or publish. A development machine is useful for smoke runs, but virtualized environments often cannot provide hardware counters and may distort filesystem, memory, and timing results.
 
 ## Remote benchmark host
