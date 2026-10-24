@@ -47,7 +47,7 @@ Volatile objects use VMOD membership tables. Persistent Fellow objects keep thei
 
 `pending()` reports unconsumed registrations. `objects()` and `edges()` describe volatile membership only, so Fellow-direct persistent objects do not appear in those gauges. `compact()` prunes over-cap purge history, rebuilds tombstone-heavy purge maps, runs one volatile-membership sweep, and requests deferred low-water container resize maintenance. The return value reports logical sweep work; object and side-table containers converge asynchronously after a short observation window so immediate refills can cancel or roll back a shrink.
 
-Counters report volatile membership, purge-map size/floors/sequence/probes, sweeps, parse and limit failures, stale detections, WAL health, and Fellow direct-probe activity. Removed epoch/posting counters are not compatibility aliases. The `info` counter `transient_discards` counts inserted hit-for-miss or hit-for-pass objects whose pending tag registration was discarded.
+Counters report volatile membership, purge-map size/floors/sequence/probes, sweeps, parse and limit failures, stale detections, WAL health, and Fellow direct-probe activity. Removed epoch/posting counters are not compatibility aliases. The `info` counter `transient_discards` counts inserted hit-for-miss or hit-for-pass objects whose pending tag registration was discarded, and a backend-transaction `vmod_cachetag:` Notice reports the discarded key count and object kind.
 
 ## Diagnostic Build Flags
 

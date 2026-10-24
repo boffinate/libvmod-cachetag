@@ -111,7 +111,13 @@ Redirects often expose this. Vinyl assigns TTLs by status before your backend-re
 | 302, 307 | Explicit Cache-Control freshness or `Expires`; otherwise negative |
 | Other statuses, including 303 and 308 | Negative, even with explicit Cache-Control freshness |
 
-A 302 without freshness, or a 308 even with `max-age`, therefore reaches the backend on every request under the builtin policy. `add_header()` succeeds and `pending()` returns to zero, but membership stays empty and `MAIN.cache_hitmiss` rises on repeats. The namespace's `transient_discards` counter counts each inserted object whose registration was discarded, rather than the number of tag keys. It excludes pass fetches and fetches abandoned before insertion.
+A 302 without freshness, or a 308 even with `max-age`, therefore reaches the backend on every request under the builtin policy. `add_header()` succeeds and `pending()` returns to zero, but membership stays empty and `MAIN.cache_hitmiss` rises on repeats. The namespace's `transient_discards` counter counts each inserted object whose registration was discarded, rather than the number of tag keys. It excludes pass fetches and fetches abandoned before insertion. A backend-transaction `Notice` also reports the number of discarded keys and the object kind:
+
+```text
+vmod_cachetag: Discarded 1 tag registration(s), object is hit-for-miss
+```
+
+Hit-for-pass takes precedence when both flags are set. Cachetag writes transaction-log records for problems an operator needs to fix, never for per-request accounting. This Notice is emitted once per affected insert and namespace when a transaction log is available, without rate limiting or an opt-out. Its volume follows the backend fetch rate for tagged uncacheable responses.
 
 `purge()` still returns `-1` for accepted publication whether or not any object carries the tag. It publishes purge history rather than finding or counting matching objects. The strict freshness guarantee holds: hit-for-miss and hit-for-pass objects never serve cached content.
 
@@ -252,7 +258,7 @@ Cachetag publishes VSC counters at three levels:
 - `diag`: what you'll want during an incident. The memory breakdown, resize and publication state, and the denominators behind the `info` counters.
 - `debug`: implementation internals and opt-in instrumentation, for working on cachetag itself.
 
-Watch `CACHETAG.*.transient_discards` in production: it counts objects whose pending tags were discarded at a hit-for-miss or hit-for-pass insert. It counts objects, not keys, and excludes pass fetches and fetches abandoned before insertion. A rising value points to backend freshness or VCL settings that prevent tagged responses from being cached.
+Watch `CACHETAG.*.transient_discards` in production: it counts objects whose pending tags were discarded at a hit-for-miss or hit-for-pass insert. It counts objects, not keys, and excludes pass fetches and fetches abandoned before insertion. A rising value points to backend freshness or VCL settings that prevent tagged responses from being cached; the backend-transaction `vmod_cachetag:` Notice identifies the discarded key count and object kind.
 
 The interactive (curses) view of `varnishstat` or `vinylstat` filters by level and starts at `info`. One-shot (`-1`) and JSON (`-j`) output include every counter, whatever its level.
 

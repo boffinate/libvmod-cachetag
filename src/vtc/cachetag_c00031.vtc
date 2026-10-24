@@ -1,4 +1,4 @@
-vtest "cachetag VMOD counts tag discards on transient inserts"
+vtest "cachetag VMOD counts and logs tag discards on transient inserts"
 
 server s1 {
 	rxreq
@@ -33,6 +33,12 @@ vinyl v1 -vcl+backend {
 	}
 } -start
 
+logexpect l1 -v v1 -g raw {
+	expect * * Notice {^vmod_cachetag: Discarded 1 tag registration\(s\), object is hit-for-miss$}
+	expect * * Notice {^vmod_cachetag: Discarded 1 tag registration\(s\), object is hit-for-miss$}
+	expect * * Notice {^vmod_cachetag: Discarded 1 tag registration\(s\), object is hit-for-pass$}
+} -start
+
 client c1 {
 	txreq -url "/redirect"
 	rxresp
@@ -47,6 +53,8 @@ client c1 {
 	rxresp
 	expect resp.status == 301
 } -run
+
+logexpect l1 -wait
 
 vinyl v1 -expect MAIN.cache_hitmiss == 1
 vinyl v1 -expect CACHETAG.vcl1_tags_default.transient_discards == 3
