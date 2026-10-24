@@ -30,9 +30,7 @@ $Object namespace(STRING name = "default",
 Create a cache-tag namespace.
 
 ``max_keys_per_object`` bounds the unique tags registered on one object.
-Exceeding it during a fetch fails that fetch: tags are never silently
-dropped, because delivering an object with a truncated tag set would let a
-later purge miss it. Production traces have shown real 333-tag objects, so
+Exceeding this limit during a fetch fails that fetch: tags are never silently dropped to satisfy limits, because delivering an object with a truncated tag set would let a later purge miss it. Registrations on hit-for-miss or hit-for-pass objects are discarded at insertion and counted by ``transient_discards``. Production traces have shown real 333-tag objects, so
 the 512 default is sized to pass them; raise it explicitly for workloads
 with larger tag sets. ``max_tag_header_bytes`` bounds a single header value:
 an oversized ``add_header()`` value fails the fetch the same way, while an
@@ -96,7 +94,7 @@ Parse and register tag keys from ``header``. Tokens are trimmed around
 per-header token ceiling: the header value is bounded by
 ``max_tag_header_bytes`` and the unique keys it registers by
 ``max_keys_per_object``. Exceeding either limit fails the fetch
-(fail closed); tags are never silently dropped.
+(fail closed); tags are never silently dropped to satisfy limits. Registrations on hit-for-miss or hit-for-pass objects are discarded at insertion and counted by ``transient_discards``.
 
 $Restrict vcl_backend_response vcl_backend_error
 

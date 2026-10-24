@@ -100,8 +100,8 @@ scripts/test-fellow-with-vinyl-cache.sh ../vinyl-cache
 For `CACHE_TAG_CHECK_TARGET=check` with the default diagnostic-surface build, expect the standalone WAL test, the counter-surface parity check, and every VTC in `VTC_TESTS` to pass. The checked-in core cases use the default direct representation, generated core copies explicitly select interning, and generated test-hook copies exercise shared allocation and structural failures in interning mode:
 
 ```text
-# TOTAL: 129
-# PASS:  129
+# TOTAL: 131
+# PASS:  131
 # FAIL:  0
 # ERROR: 0
 ```

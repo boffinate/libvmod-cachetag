@@ -1149,6 +1149,12 @@ cachetag_note_stale_memo_hit(struct cachetag_index *idx)
 	cachetag_counter_add(idx, &idx->counters.stale_memo_hits, 1);
 }
 
+void
+cachetag_note_transient_discard(struct cachetag_index *idx)
+{
+	cachetag_counter_add(idx, &idx->counters.transient_discards, 1);
+}
+
 static size_t cachetag_object_low_water_target_locked(
     const struct cachetag_index *);
 static size_t cachetag_side_low_water_target_locked(

@@ -141,6 +141,7 @@ VTC_TESTS_CORE = \
 	vtc/cachetag_c00028.vtc \
 	vtc/cachetag_c00029.vtc \
 	vtc/cachetag_c00030.vtc \
+	vtc/cachetag_c00031.vtc \
 	vtc/cachetag_r00001.vtc \
 	vtc/cachetag_r00002.vtc \
 	vtc/cachetag_r00003.vtc \

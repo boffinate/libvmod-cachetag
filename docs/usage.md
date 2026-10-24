@@ -99,6 +99,87 @@ If an object has too many tags (see below), cachetag rejects the fetch. It won't
 
 There's no separate cap on the number of tags in one header. If your objects carry more than 512 tags, raise `max_keys_per_object`.
 
+## Tags on uncacheable responses
+
+Tag registration happens before the final cacheability decision. If the builtin backend-response VCL sees a non-positive TTL, `Set-Cookie`, `Cache-Control: no-cache`, `no-store` or `private`, or `Vary: *`, it normally makes the object hit-for-miss. `return (pass(duration))` makes it hit-for-pass. Cachetag discards pending registrations when these objects are inserted because they cannot serve cached content. Ordinary pass fetches do not create pending registrations or insert reusable objects.
+
+Redirects often expose this. Vinyl assigns TTLs by status before your backend-response VCL runs:
+
+| Status | TTL source |
+| --- | --- |
+| 200, 203, 204, 300, 301, 304, 404, 410, 414 | Cache-Control `s-maxage` or `max-age`, then `Expires`, then `default_ttl` |
+| 302, 307 | Explicit Cache-Control freshness or `Expires`; otherwise negative |
+| Other statuses, including 303 and 308 | Negative, even with explicit Cache-Control freshness |
+
+A 302 without freshness, or a 308 even with `max-age`, therefore reaches the backend on every request under the builtin policy. `add_header()` succeeds and `pending()` returns to zero, but membership stays empty and `MAIN.cache_hitmiss` rises on repeats. The namespace's `transient_discards` counter counts each inserted object whose registration was discarded, rather than the number of tag keys. It excludes pass fetches and fetches abandoned before insertion.
+
+`purge()` still returns `-1` for accepted publication whether or not any object carries the tag. It publishes purge history rather than finding or counting matching objects. The strict freshness guarantee holds: hit-for-miss and hit-for-pass objects never serve cached content.
+
+If your policy permits caching redirects, this backend-response example restores explicit freshness when the TTL is non-positive. The VCL TTL getter can expose a negative core TTL as zero, so the guard uses `<= 0s`. Add `import std;` alongside `import cachetag;` and your namespace constructor. It prefers `s-maxage` over `max-age`, subtracts Age, and clamps exhausted freshness to zero. `max-age=60` with `Age: 50` gets about ten seconds, not another minute. There is no `beresp.age` variable; assigning the full lifetime would extend freshness because the TTL setter expects remaining time.
+
+The parser deliberately accepts only unquoted token-valued Cache-Control directives. Quoted arguments, escapes, empty list members and malformed directives leave the response uncacheable. Duplicate selected freshness directives, invalid or overflowing selected freshness values, and invalid, duplicate or overflowing Age values also leave it uncacheable. A missing Age means zero; a missing freshness directive means no caching. An invalid `s-maxage` never falls back to `max-age`. Numeric conversion rejects values longer than 15 digits, including excessively padded numbers. The two scratch headers are cleared before use so backend values cannot supply freshness.
+
+```vcl
+sub vcl_backend_response {
+    unset beresp.http.X-Cachetag-Freshness;
+    unset beresp.http.X-Cachetag-Age;
+
+    if (beresp.status >= 300 && beresp.status < 400) {
+        set beresp.grace = 0s;
+
+        if (beresp.ttl <= 0s) {
+            std.collect(beresp.http.Cache-Control);
+            std.collect(beresp.http.Age);
+
+            # Quoted arguments can hide commas and directive names, so reject them.
+            if (beresp.http.Cache-Control ~ "^[ \t]*[-!#$%&'*+.^_`|~0-9A-Za-z]+(?:[ \t]*=[ \t]*[-!#$%&'*+.^_`|~0-9A-Za-z]+)?(?:[ \t]*,[ \t]*[-!#$%&'*+.^_`|~0-9A-Za-z]+(?:[ \t]*=[ \t]*[-!#$%&'*+.^_`|~0-9A-Za-z]+)?)*[ \t]*$") {
+                if (beresp.http.Cache-Control ~ "(?i)(^|,)[ \t]*s-maxage[ \t]*(=|,|$)") {
+                    if (beresp.http.Cache-Control !~ "(?i)(^|,)[ \t]*s-maxage(?=[ \t=,]|$).*?,[ \t]*s-maxage(?=[ \t=,]|$)") {
+                        set beresp.http.X-Cachetag-Freshness = regsub(
+                            beresp.http.Cache-Control,
+                            "(?i)^(?:[^,]*,)*?[ \t]*s-maxage[ \t]*=[ \t]*([0-9]+)[ \t]*(?:,.*)?$",
+                            "\1");
+                    }
+                } else if (beresp.http.Cache-Control ~ "(?i)(^|,)[ \t]*max-age[ \t]*(=|,|$)") {
+                    if (beresp.http.Cache-Control !~ "(?i)(^|,)[ \t]*max-age(?=[ \t=,]|$).*?,[ \t]*max-age(?=[ \t=,]|$)") {
+                        set beresp.http.X-Cachetag-Freshness = regsub(
+                            beresp.http.Cache-Control,
+                            "(?i)^(?:[^,]*,)*?[ \t]*max-age[ \t]*=[ \t]*([0-9]+)[ \t]*(?:,.*)?$",
+                            "\1");
+                    }
+                }
+            }
+
+            set beresp.http.X-Cachetag-Age = "0";
+            if (beresp.http.Age) {
+                set beresp.http.X-Cachetag-Age = "-1";
+                if (beresp.http.Age ~ "^[ \t]*[0-9]+[ \t]*$") {
+                    set beresp.http.X-Cachetag-Age = regsub(
+                        beresp.http.Age, "^[ \t]*([0-9]+)[ \t]*$", "\1");
+                }
+            }
+
+            if (std.integer(beresp.http.X-Cachetag-Freshness, -1) >= 0 &&
+                std.integer(beresp.http.X-Cachetag-Age, -1) >= 0) {
+                set beresp.ttl = std.duration(integer =
+                    std.integer(beresp.http.X-Cachetag-Freshness, -1)) -
+                    std.duration(integer =
+                    std.integer(beresp.http.X-Cachetag-Age, -1));
+                if (beresp.ttl < 0s) {
+                    set beresp.ttl = 0s;
+                }
+            }
+        }
+    }
+
+    unset beresp.http.X-Cachetag-Freshness;
+    unset beresp.http.X-Cachetag-Age;
+    tags.add_header(beresp.http.Cache-Tag);
+}
+```
+
+The example sets redirect grace to zero and falls through to the builtin VCL. Its cookie, cache-control, Vary and non-positive TTL checks still apply; an existing `beresp.uncacheable` flag stays set. Keep that fall-through when adapting the example.
+
 ## Tag interning
 
 By default, each in-memory object with more than one tag keeps its own tag list attached to the object. If you enable tag interning, the namespace stores each distinct tag set once and shares it between all objects that carry exactly that set:
@@ -170,6 +251,8 @@ Cachetag publishes VSC counters at three levels:
 - `info`: the counters to watch in production. Call volumes, rejections, persistence health and purge-map state.
 - `diag`: what you'll want during an incident. The memory breakdown, resize and publication state, and the denominators behind the `info` counters.
 - `debug`: implementation internals and opt-in instrumentation, for working on cachetag itself.
+
+Watch `CACHETAG.*.transient_discards` in production: it counts objects whose pending tags were discarded at a hit-for-miss or hit-for-pass insert. It counts objects, not keys, and excludes pass fetches and fetches abandoned before insertion. A rising value points to backend freshness or VCL settings that prevent tagged responses from being cached.
 
 The interactive (curses) view of `varnishstat` or `vinylstat` filters by level and starts at `info`. One-shot (`-1`) and JSON (`-j`) output include every counter, whatever its level.
 

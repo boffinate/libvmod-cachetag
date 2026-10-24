@@ -105,6 +105,8 @@
 	    "Volatile membership attach records accepted")                    \
 	CT(volatile_attach_failures, counter, info,                           \
 	    "Volatile membership attach failures")                            \
+	CT(transient_discards, counter, info,                                 \
+	    "Tag registrations discarded at insert of a hit-for-miss or hit-for-pass object") \
 	CT(request_probe_obj_mtx_calls, counter, debug,                       \
 	    "Instrumented request probe obj_mtx acquisitions")                \
 	CT(request_probe_obj_mtx_wait_usec, counter, debug,                   \

@@ -2502,6 +2502,7 @@ cachetag_obj_cb(struct worker *wrk, void *priv, struct objcore *oc, unsigned eve
 		 * reusable cache membership.  A cacheable Fellow allocation that
 		 * falls back to Transient has none of these flags and is handled by
 		 * the not-Fellow volatile-provider branch below. */
+		cachetag_note_transient_discard(ns->index);
 	} else if (cachetag_persist_enabled(ns->index)) {
 		if (!tp->fellow_attr_included) {
 			if (cachetag_fellow_object_kind(wrk, oc) == -2) {

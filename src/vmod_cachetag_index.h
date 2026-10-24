@@ -97,6 +97,7 @@ int cachetag_attach(struct cachetag_index *, struct objcore *,
 void cachetag_death(struct cachetag_index *, struct objcore *);
 void cachetag_note_stale_call(struct cachetag_index *);
 void cachetag_note_stale_memo_hit(struct cachetag_index *);
+void cachetag_note_transient_discard(struct cachetag_index *);
 
 int cachetag_purge(struct cachetag_index *, const char *,
     enum cachetag_purge_mode);

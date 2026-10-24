@@ -1,0 +1,557 @@
+vtest "cachetag VMOD counts tag discards on transient inserts"
+
+server s1 {
+	rxreq
+	expect req.url == "/redirect"
+	txresp -status 302 -hdr "Location: /target" -hdr "Cache-Tag: thread:45"
+
+	rxreq
+	expect req.url == "/redirect"
+	txresp -status 302 -hdr "Location: /target" -hdr "Cache-Tag: thread:45"
+
+	rxreq
+	expect req.url == "/hfp"
+	txresp -hdr "Cache-Tag: thread:45" -body "hfp"
+
+	rxreq
+	expect req.url == "/permanent"
+	txresp -status 301 -hdr "Location: /target" -hdr "Cache-Tag: thread:45"
+} -start
+
+vinyl v1 -vcl+backend {
+	import cachetag;
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default", vsc_publish_interval = 0s);
+	}
+
+	sub vcl_backend_response {
+		tags.add_header(beresp.http.Cache-Tag);
+		if (bereq.url == "/hfp") {
+			return (pass(10s));
+		}
+	}
+} -start
+
+client c1 {
+	txreq -url "/redirect"
+	rxresp
+	expect resp.status == 302
+	txreq -url "/redirect"
+	rxresp
+	expect resp.status == 302
+	txreq -url "/hfp"
+	rxresp
+	expect resp.status == 200
+	txreq -url "/permanent"
+	rxresp
+	expect resp.status == 301
+} -run
+
+vinyl v1 -expect MAIN.cache_hitmiss == 1
+vinyl v1 -expect CACHETAG.vcl1_tags_default.transient_discards == 3
+vinyl v1 -expect CACHETAG.vcl1_tags_default.volatile_objects == 1
+
+server s1 -wait
+
+# Exercise the usage guide verbatim; instrumentation stays in separate hooks.
+server s2 {
+	rxreq
+	expect req.url == "/aged"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {Age: 50} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/shared"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=600, s-maxage=30} -hdr {Age: 20} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/no-age"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/case-space"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: public, S-MAXAGE = 30, max-age=600} -hdr {Age: 20} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/exhausted"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {Age: 70} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/zero"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=0} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/missing-freshness"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: public} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/missing-control"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/invalid-max"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=oops} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/overflow-max"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=999999999999999999999999} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/invalid-shared"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: s-maxage=oops, max-age=60} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/overflow-shared"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60, s-maxage=999999999999999999999999} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/duplicate-max"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60, max-age=120} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/duplicate-shared"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: s-maxage=60, s-maxage=120, max-age=60} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/bare-shared"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: s-maxage, s-maxage=60, max-age=60} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/split-control"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: s-maxage=60} -hdr {Cache-Control: s-maxage=120} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/invalid-age"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {Age: oops} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/negative-age"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {Age: -1} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/decimal-age"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {Age: 1.5} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/empty-age"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {Age:} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/overflow-age"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {Age: 999999999999999999999999} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/duplicate-age"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {Age: 1} -hdr {Age: 2} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/list-age"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {Age: 1, 2} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/quoted-directive"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: extension="x, s-maxage=60", max-age=120} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/no-store"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60, no-store} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/no-cache"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60, no-cache} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/private"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60, private} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/cookie"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {Set-Cookie: session=1} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/vary"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {Vary: *} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/already-uncacheable"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=60} -hdr {X-Test-Uncacheable: true} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+	rxreq
+	expect req.url == "/shared-over-invalid-max"
+	txresp -status 308 -hdr "Location: /target" -hdr {Cache-Control: max-age=oops, s-maxage=30} -hdr {Age: 20} -hdr {Cache-Tag: redirect} -hdr {X-Cachetag-Freshness: 999} -hdr {X-Cachetag-Age: 0}
+
+} -start
+
+vinyl v2 -vcl+backend {
+    import cachetag;
+    import std;
+
+    sub vcl_init {
+        new tags = cachetag.namespace("freshness", vsc_publish_interval = 0s);
+    }
+
+    sub vcl_recv {
+        set req.backend_hint = s2;
+    }
+
+    sub vcl_backend_response {
+        if (beresp.http.X-Test-Uncacheable) {
+            set beresp.uncacheable = true;
+        }
+    }
+
+    sub vcl_backend_response {
+        unset beresp.http.X-Cachetag-Freshness;
+        unset beresp.http.X-Cachetag-Age;
+
+        if (beresp.status >= 300 && beresp.status < 400) {
+            set beresp.grace = 0s;
+
+            if (beresp.ttl <= 0s) {
+                std.collect(beresp.http.Cache-Control);
+                std.collect(beresp.http.Age);
+
+                # Quoted arguments can hide commas and directive names, so reject them.
+                if (beresp.http.Cache-Control ~ "^[ \t]*[-!#$%&'*+.^_`|~0-9A-Za-z]+(?:[ \t]*=[ \t]*[-!#$%&'*+.^_`|~0-9A-Za-z]+)?(?:[ \t]*,[ \t]*[-!#$%&'*+.^_`|~0-9A-Za-z]+(?:[ \t]*=[ \t]*[-!#$%&'*+.^_`|~0-9A-Za-z]+)?)*[ \t]*$") {
+                    if (beresp.http.Cache-Control ~ "(?i)(^|,)[ \t]*s-maxage[ \t]*(=|,|$)") {
+                        if (beresp.http.Cache-Control !~ "(?i)(^|,)[ \t]*s-maxage(?=[ \t=,]|$).*?,[ \t]*s-maxage(?=[ \t=,]|$)") {
+                            set beresp.http.X-Cachetag-Freshness = regsub(
+                                beresp.http.Cache-Control,
+                                "(?i)^(?:[^,]*,)*?[ \t]*s-maxage[ \t]*=[ \t]*([0-9]+)[ \t]*(?:,.*)?$",
+                                "\1");
+                        }
+                    } else if (beresp.http.Cache-Control ~ "(?i)(^|,)[ \t]*max-age[ \t]*(=|,|$)") {
+                        if (beresp.http.Cache-Control !~ "(?i)(^|,)[ \t]*max-age(?=[ \t=,]|$).*?,[ \t]*max-age(?=[ \t=,]|$)") {
+                            set beresp.http.X-Cachetag-Freshness = regsub(
+                                beresp.http.Cache-Control,
+                                "(?i)^(?:[^,]*,)*?[ \t]*max-age[ \t]*=[ \t]*([0-9]+)[ \t]*(?:,.*)?$",
+                                "\1");
+                        }
+                    }
+                }
+
+                set beresp.http.X-Cachetag-Age = "0";
+                if (beresp.http.Age) {
+                    set beresp.http.X-Cachetag-Age = "-1";
+                    if (beresp.http.Age ~ "^[ \t]*[0-9]+[ \t]*$") {
+                        set beresp.http.X-Cachetag-Age = regsub(
+                            beresp.http.Age, "^[ \t]*([0-9]+)[ \t]*$", "\1");
+                    }
+                }
+
+                if (std.integer(beresp.http.X-Cachetag-Freshness, -1) >= 0 &&
+                    std.integer(beresp.http.X-Cachetag-Age, -1) >= 0) {
+                    set beresp.ttl = std.duration(integer =
+                        std.integer(beresp.http.X-Cachetag-Freshness, -1)) -
+                        std.duration(integer =
+                        std.integer(beresp.http.X-Cachetag-Age, -1));
+                    if (beresp.ttl < 0s) {
+                        set beresp.ttl = 0s;
+                    }
+                }
+            }
+        }
+
+        unset beresp.http.X-Cachetag-Freshness;
+        unset beresp.http.X-Cachetag-Age;
+        tags.add_header(beresp.http.Cache-Tag);
+    }
+
+    sub vcl_backend_response {
+        set beresp.http.Test-TTL = beresp.ttl;
+        set beresp.http.Test-Grace = beresp.grace;
+    }
+
+    sub vcl_deliver {
+        set resp.http.Test-Uncacheable = obj.uncacheable;
+        set resp.http.Test-Hits = obj.hits;
+        set resp.http.Test-Remaining = obj.ttl;
+    }
+} -start
+
+client c2 -connect ${v2_sock} {
+	txreq -url "/aged"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == false
+	expect resp.http.Test-Remaining >= 8
+	expect resp.http.Test-Remaining <= 10
+	txreq -url "/aged"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.Test-Hits == 1
+
+	txreq -url "/shared"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == false
+	expect resp.http.Test-Remaining >= 8
+	expect resp.http.Test-Remaining <= 10
+	txreq -url "/shared"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.Test-Hits == 1
+
+	txreq -url "/no-age"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == false
+	expect resp.http.Test-Remaining >= 58
+	expect resp.http.Test-Remaining <= 60
+	txreq -url "/no-age"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.Test-Hits == 1
+
+	txreq -url "/case-space"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == false
+	expect resp.http.Test-Remaining >= 8
+	expect resp.http.Test-Remaining <= 10
+	txreq -url "/case-space"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.Test-Hits == 1
+
+	txreq -url "/exhausted"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+	expect resp.http.Test-TTL <= 0.001
+	expect resp.http.Test-TTL >= -0.1
+
+	txreq -url "/zero"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+	expect resp.http.Test-TTL <= 0.001
+	expect resp.http.Test-TTL >= -0.1
+
+	txreq -url "/missing-freshness"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/missing-control"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/invalid-max"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/overflow-max"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/invalid-shared"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/overflow-shared"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/duplicate-max"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/duplicate-shared"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/bare-shared"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/split-control"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/invalid-age"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/negative-age"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/decimal-age"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/empty-age"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/overflow-age"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/duplicate-age"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/list-age"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/quoted-directive"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/no-store"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/no-cache"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/private"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/cookie"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/vary"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/already-uncacheable"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == true
+
+	txreq -url "/shared-over-invalid-max"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.X-Cachetag-Freshness == <undef>
+	expect resp.http.X-Cachetag-Age == <undef>
+	expect resp.http.Test-Grace == 0.000
+	expect resp.http.Test-Uncacheable == false
+	expect resp.http.Test-Remaining >= 8
+	expect resp.http.Test-Remaining <= 10
+	txreq -url "/shared-over-invalid-max"
+	rxresp
+	expect resp.status == 308
+	expect resp.http.Test-Hits == 1
+
+} -run
+
+server s2 -wait

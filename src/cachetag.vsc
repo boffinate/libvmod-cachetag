@@ -221,6 +221,14 @@
 	:level:	info
 	:oneliner:	Volatile membership attach failures
 
+.. vinyl_vsc:: transient_discards
+	:type:	counter
+	:level:	info
+	:oneliner:	Tag registrations discarded at insert of a hit-for-miss or hit-for-pass object
+
+	Counts inserted objects with a pending tag registration, not tag keys.
+	Pass fetches and fetches abandoned before insertion are not counted.
+
 .. vinyl_vsc:: request_probe_obj_mtx_calls
 	:type:	counter
 	:level:	debug
