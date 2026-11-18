@@ -1,6 +1,6 @@
 # Cachetag: tag-based invalidation VMOD for Varnish Cache and Vinyl Cache
 
-Cachetag is a new approach to tag-based cache invalidation, which is memory efficient and gives [stricter freshness guarantees](docs/strictness.md) than `xkey`. It supports [Varnish Cache](https://varnish.org/) and [Vinyl Cache](https://vinyl-cache.org/) from version 9.1, with native builds for either engine and support for multiple storage engines.
+Cachetag is a memory-efficient tag-based cache invalidation VMOD that provides [stricter freshness guarantees](docs/strictness.md) than `xkey`. It supports [Varnish Cache](https://varnish.org/) and [Vinyl Cache](https://vinyl-cache.org/) (9.1+), builds natively against either, and works with multiple storage engines.
 
 > [!TIP]
 > Help me make Cachetag faster for your workloads! [Read more](#optimize-cachetag)
@@ -9,7 +9,7 @@ Cachetag is a new approach to tag-based cache invalidation, which is memory effi
 
 ![cachetag-vs-xkey-approach](./docs/_images/cachetag-vs-xkey-approach.svg)
 
-This generational approach saves memory (workload dependent, 20-80%), the saving increasing with cache size. [Set interning](#help-me-optimize-cachetag-for-your-workloads) saves even more.
+This generational approach saves memory (20–80%, depending on workload), with savings growing as cache size increases. [Set interning](#help-me-optimize-cachetag-for-your-workloads) saves even more.
 
 ## Requirements
 
@@ -17,15 +17,15 @@ This generational approach saves memory (workload dependent, 20-80%), the saving
 - A supported storage engine:
   - The engine's bundled in-memory storage
   - Buddy on Vinyl Cache
-  - Fellow on Vinyl Cache (patches required)
+  - Fellow on Vinyl Cache (experimental, patches required)
 
 ## Installation
 
-See [our installation guide](docs/install.md). Select the engine with `./bootstrap --with-vcache=varnish` or `./bootstrap --with-vcache=vinyl`. Cachetag uses a strict ABI, so build a separate VMOD binary against the exact engine you run.
+Installation is covered in the separate [installation guide](docs/install.md). Select the engine with `./bootstrap --with-vcache=varnish` or `./bootstrap --with-vcache=vinyl`. Cachetag uses a strict ABI, so build a separate VMOD binary against the exact engine you run.
 
 ## Quickstart VCL
 
-Check out our [usage guide](docs/usage.md) for more details, but this gives you an idea of what's involved:
+See the [usage guide](docs/usage.md) for full details. Here is a basic setup:
 
 ```vcl
 import cachetag;
@@ -62,19 +62,19 @@ sub vcl_deliver {
 }
 ```
 
-Calling `stale()` twice isn't a mistake: `vcl_hit` rejects cache hits that a purge has invalidated, and `vcl_deliver` catches a race condition where a purge happens during the fetch or delivery.
+Calling `stale()` twice isn't a mistake: `vcl_hit` rejects cached objects invalidated by a purge, while `vcl_deliver` catches a race condition where a purge arrives during fetch or delivery.
 
-By default, every cached object keeps its own copy of its tag list. If many of your objects have exactly the same tags, you can create the namespace with `cachetag.namespace("default", interning = true)`. Cachetag then stores each distinct tag set once and has objects share it. That saves memory when the same sets come up again and again. When most sets are unique it costs more memory and some CPU, so measure your own traffic before you turn it on (see the [usage guide](docs/usage.md)). Changing `interning` needs a VCL reload and will invalidate the tagged in-memory objects. Objects stored on disk by Fellow keep their tags in their own on-disk attributes.
+By default, every cached object stores its own copy of its tag list. If many objects share identical tags, create the namespace with `cachetag.namespace("default", interning = true)`. Cachetag then stores each distinct tag set once and shares it across objects. This saves substantial memory with repetitive tag sets. If most objects have unique tag sets, interning uses more memory and some CPU—measure your traffic before enabling it (see the [usage guide](docs/usage.md)). Toggling `interning` requires a VCL reload and invalidates existing in-memory tagged objects. Objects stored on disk by Fellow keep tags in their own on-disk attributes.
 
-For in-memory objects, a VCL reload preserves tags when the new namespace has the same name and settings. If the new VCL imports cachetag, a renamed, removed, or changed namespace invalidates its old tagged objects when that VCL warms. See [VCL reloads](docs/usage.md#vcl-reloads) for the transition rules.
+For in-memory objects, a VCL reload preserves tags as long as the new namespace keeps the same name and settings. If the new VCL renames, removes, or modifies the namespace, the old tagged objects are invalidated when the VCL warms. See [VCL reloads](docs/usage.md#vcl-reloads) for transition rules.
 
-[The usage guide](docs/usage.md) also covers tag separators, registration limits, soft purges, return codes, and Fellow persistence.
+The [usage guide](docs/usage.md) also covers tag separators, registration limits, soft purges, return codes, and Fellow persistence.
 
 ## Why did I build this?
 
-I've been wanting to try improving on `xkey` for 5+ years, and the rise of (mostly) competent LLMs has allowed me to find the time to try out some ideas (details in the [AI disclosure](#ai-disclosure)).
+I've been wanting to try improving on `xkey` for 5+ years, and the rise of (mostly) competent LLMs gave me the time to try out some ideas (details in the [AI disclosure](#ai-disclosure)).
 
-With the kind of applications I work on, clearing cache by URL never works, because pages have dependencies. Being able to label cached content with tags, and then clear all matching resources, has always seemed a powerful and sensible approach — yet is rarely found built into HTTP caching systems.
+With the kind of applications I work on, clearing cache by URL never works because pages have dependencies. Tagging cached content and clearing all matching resources has always seemed a sensible, powerful approach—yet it is rarely built into HTTP caching systems.
 
 Your choice is limited:
 
@@ -90,22 +90,22 @@ I also needed a persistent on-disk cache for a project, which meant cache taggin
 
 There are design decisions I can't settle without data from more real-world deployments, because the sites I use cachetag for *may be very different from most*.
 
-For example: should string interning be enabled by default. If many objects share the same tag set (as my site does), interning those sets cuts memory usage. If most workloads carry unique tag sets, interning *raise*s memory. Is it a good change to Cachetag? Benchmarks can't answer this, only real traffic data can.
+For example: should string interning be enabled by default? If many objects share the same tag set (as my sites do), interning cuts memory usage. If most workloads carry unique tag sets, interning increases memory use. Is it the right default? Benchmarks can't answer this—only real traffic data can.
 
-There are two ways you can help me optimize Cachetag for your use-cases:
+There are two ways you can help me optimize Cachetag for your workloads:
 
-- **Already running `xkey`?** Please share your request rate, tag distribution, repeated tag sets, purge patterns & more. I created [`xkey-workload-collector`](https://github.com/boffinate/xkey-workload-collector) to gather these numbers automatically for you.
-- **Running at scale?** Have high request rates, millions of cached objects, frequent or high-fanout purges? I'd love to help you deploy and tune cachetag, investigate anything you uncover, and learn from your workload. Your experience will shape where the project goes next. When [getting in touch](mailto:peter@boffinate.com), please share your peak request rate, cache size or object count, purge frequency, and storage backend.
+- **Already running `xkey`?** Please share your request rate, tag distribution, repeated tag sets, purge patterns, and more. I created [`xkey-workload-collector`](https://github.com/boffinate/xkey-workload-collector) to gather these numbers automatically.
+- **Running at scale?** Have high request rates, millions of cached objects, or frequent high-fanout purges? I'd love to help you deploy and tune cachetag, investigate anything you uncover, and learn from your workload. Your experience will shape where the project goes next. When [getting in touch](mailto:peter@boffinate.com), please share your peak request rate, cache size or object count, purge frequency, and storage backend.
 
 ## Testing
 
-Development of cachetag is backed by [tests](docs/testing.md), profiling and [benchmarks](benchmarks/README.md).
+Cachetag is backed by [tests](docs/testing.md), profiling, and [benchmarks](benchmarks/README.md).
 
 ## AI disclosure
 
-Most of this project's code is AI generated. I provided all the requirements and had a strong sense of what I wanted produced. About 75% of the initial planning was done with Anthropic Fable 5, which was good, and recent planning with GPT-5.5 (x)High and GPT-5.6 Sol xhigh. Coding was GPT-5.5 High, with code review by Codex and Claude. Testing is a mix of me and GPT.
+Most of this project's code is AI-generated. I provided all the requirements and had a strong sense of what I wanted produced. About 75% of the initial planning was done with Anthropic Fable 5, which was good, and recent planning with GPT-5.5 (x)High and GPT-5.6 Sol xhigh. Coding was GPT-5.5 High, with code review by Codex and Claude. Testing is a mix of me and GPT.
 
-I know some feel AI written software is substandard. All I can say is cachetag is well tested, it's benchmarked to death, and you're welcome to reproduce the results.
+I know some feel AI-written software is substandard. All I can say is cachetag is well tested, it's benchmarked to death, and you're welcome to reproduce the results.
 
 ## License
 
