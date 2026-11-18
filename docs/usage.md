@@ -82,26 +82,26 @@ A `PURGE` request without a `Cache-Tag-Purge` header falls through to the engine
 
 ## Checking for stale objects
 
-Cachetag doesn't keep a list of objects per tag, so a purge can't go straight to the objects it matches. Instead, each object is checked against the purge history when it's read. [How the strict invalidation guarantee works](strictness.md) explains the design.
+Cachetag doesn't track objects per tag, so a purge can't jump straight to matching objects. Instead, each object is checked against purge history when read. See [How the strict invalidation guarantee works](strictness.md) for the design details.
 
-Objects in memory are also checked by a background sweep every `sweep_interval` (default 60 s, `0s` turns it off). The sweep kills hard-purged objects and reduces soft-purged ones to their grace period. In a memory-only namespace it then drops the tag from the purge history, since there are no remaining objects. Currently Fellow objects aren't swept (pending a design decision), so they are only checked when read.
+Objects in memory are also checked by a background sweep every `sweep_interval` (default 60s; `0s` turns it off). The sweep kills hard-purged objects and curtails soft-purged ones to their grace period. In a memory-only namespace it then drops the tag from purge history once no matching objects remain. Fellow objects aren't swept yet, so they are only checked on read.
 
-It's important that you call `stale()` in both `vcl_hit` and `vcl_deliver` as the examples do, as correct hard purges rely on both checks being present. Combined, they catch objects purged after registration, including ones that raced an in-flight fetch and ones still sitting in memory. The request then restarts and fetches fresh content. The second call for the same object in one request reuses the first answer, unless a purge has been published in the namespace or the object has been killed since. The VSC counter `stale_calls` counts every call, and `stale_memo_hits` counts the calls answered this way.
+Call `stale()` in both `vcl_hit` and `vcl_deliver` as shown above: reliable hard purges depend on both checks. Combined, they catch objects purged after registration, including ones that raced an in-flight fetch and ones still sitting in memory. The request then restarts and fetches fresh content. The second call for the same object in one request reuses the first answer, unless a purge has been published in the namespace or the object has been killed since. The VSC counter `stale_calls` counts every call, and `stale_memo_hits` counts the calls answered this way.
 
 ## Registering tags
 
-`add_header()` is the right function to use. It splits the header on commas, trims whitespace around each tag, and rejects any tag that contains whitespace. If your application uses a different separator, pass it as `sep`, for example `tags.add_header(beresp.http.Cache-Tag, sep = " ")`. I recommend using commas if you can, as they avoid any ambiguity in tag names.
+Use `add_header()`. It splits on commas, trims whitespace around each tag, and rejects tags containing whitespace. If your application uses a different separator, pass it as `sep` (for example, `tags.add_header(beresp.http.Cache-Tag, sep = " ")`). I recommend using commas if you can, as they avoid any ambiguity in tag names.
 
-If an object has too many tags (see below), cachetag rejects the fetch. It won't cache an object with some of its tags missing, as a later purge could then miss it. The client gets a 503 and the namespace's `limit_rejections` counter goes up. Two limits apply:
+If an object exceeds either limit below, cachetag rejects the fetch with a 503 and increments `limit_rejections`. It won't cache an object with missing tags, which would risk missing later purges:
 
 - `max_keys_per_object`: unique tags per object. The default is 512, as the largest objects I've got in production have 333 tags.
-- `max_tag_header_bytes`: the size of one header value. The default is 16 KiB.
+- `max_tag_header_bytes`: maximum size of a single header value. Default is 16 KiB.
 
-There's no separate cap on the number of tags in one header. If your objects carry more than 512 tags, raise `max_keys_per_object`.
+There's no separate cap on tag count within a single header. If your objects carry more than 512 tags, bump `max_keys_per_object`.
 
 ## Tag interning
 
-By default, each in-memory object with more than one tag keeps its own tag list attached to the object. If you enable tag interning, the namespace stores each distinct tag set once and shares it between all objects that carry exactly that set:
+By default, every in-memory object with multiple tags keeps its own tag list. Tag interning makes the namespace store each distinct tag set once, sharing it across all objects that carry the exact same tags:
 
 ```vcl
 sub vcl_init {
@@ -109,28 +109,28 @@ sub vcl_init {
 }
 ```
 
-Interning saves memory when many objects carry exactly the same tags. Each unique set still adds an entry to the shared registry, though, and every registration has to look its set up. Measure it on your own traffic before assuming you'll save memory. Oh and two things are the same with interning on or off:
+Interning saves memory when many objects share identical tag sets. However, each unique set adds an entry to the shared registry, and every registration must look up its set. Measure it on your own traffic before assuming you'll save memory. Oh and two things are the same with interning on or off:
 
-- Objects with no tags have no overhead
+- Objects with no tags have zero overhead
 - Objects with a single tag store it inline
 
-The setting covers objects in either engine's bundled in-memory storage and in Buddy on Vinyl, plus the in-memory fallbacks a persistent namespace uses. If you're using on-disk storage, objects stored in Fellow store their tags in an attribute on the object, so interning has no effect.
+This applies to objects in bundled in-memory storage, Buddy on Vinyl, and in-memory fallbacks in persistent namespaces. Fellow stores tags directly in object attributes on disk, so interning has no effect there.
 
-`interning` is fixed when the namespace is created. Changing it means loading a new VCL, which purges every tagged in-memory object cached under the old setting (see [VCL reloads](#vcl-reloads)).
+The `interning` setting is fixed at namespace creation. Changing it requires loading a new VCL, which invalidates all tagged in-memory objects from the previous configuration (see [VCL reloads](#vcl-reloads)).
 
 ## VCL reloads
 
-Cached objects outlive the VCL that fetched them, so cachetag has to decide what effect a reload has on cache tagging. In this section "in-memory objects" means objects whose tags cachetag keeps in its own index: everything in a memory-only namespace, plus the in-memory fallbacks in a persistent namespace. Fellow objects are covered at the end.
+Cached objects survive the VCL that fetched them, so cachetag has to decide what effect a reload has on cache tagging. In this section, "in-memory objects" refers to objects whose tags live in cachetag's own index: everything in a memory-only namespace, plus in-memory fallbacks in a persistent namespace. Fellow objects are discussed below.
 
-A memory-only namespace in the new VCL shares the old VCL's index when it has the same name and the same values for `interning`, `max_keys_per_object`, `max_key_length`, `max_tag_header_bytes`, `sweep_interval`, `purge_history_max_entries`, `sweep_batch_objects`, `sweep_batch_hold` and `sweep_batch_yield`. The old VCL must still be loaded, and its index must not have been retired (see below). Objects cached before the reload keep their tags, and a purge sent through the new VCL reaches them. The index stays in service while either VCL is warm.
+A memory-only namespace in a new VCL reuses the existing index if it shares the same name and identical settings for `interning`, `max_keys_per_object`, `max_key_length`, `max_tag_header_bytes`, `sweep_interval`, `purge_history_max_entries`, `sweep_batch_objects`, `sweep_batch_hold`, and `sweep_batch_yield`. The old VCL must still be loaded, and its index must not have been retired. Objects cached before the reload keep their tags, and purges through the new VCL reach them as expected. The index remains active as long as either VCL is warm.
 
-When a VCL that imports cachetag becomes warm, cachetag retires every index belonging to another VCL that the new VCL doesn't share. That covers namespaces whose settings changed, namespaces that were renamed, and namespaces that were dropped. Retiring an index kills its tagged objects, as the new VCL has no tag record for them and a later tag purge would miss them. Both engines normally warm a VCL as part of `vcl.load`, so this happens before you switch to it with `vcl.use`. Expect a spike in backend traffic after a reload like this.
+When a VCL importing cachetag warms up, cachetag retires every index belonging to another VCL that the new VCL doesn't share. That includes renamed, deleted, or reconfigured namespaces. Retiring an index invalidates its tagged objects, since the new VCL lacks tag tracking for them and subsequent purges would miss them. Both engines normally warm a VCL as part of `vcl.load`, so this happens before you switch traffic with `vcl.use`. Expect a burst of backend traffic following this kind of reload.
 
-A retired index is sealed. A fetch still running under the old VCL can't register its object, so the object is killed and not cached. The request can still reach `vcl_deliver`; if that calls `stale()` as in the example above, it sees the object is dead and restarts instead of delivering the old response. The seal is permanent, so switching back to the old VCL with `vcl.use` doesn't bring back tagged caching.
+A retired index is sealed. In-flight fetches under the old VCL cannot register tags; their objects are discarded rather than cached. If the request reaches `vcl_deliver` and calls `stale()`, it detects the dead object and restarts to fetch fresh content. The seal is permanent, so switching back to the old VCL with `vcl.use` doesn't bring back tagged caching.
 
-Cachetag also kills an index's remaining tagged objects when its VCL goes cold and no warm VCL shares the index. Cachetag only hears about VCLs that import it, so if the new VCL doesn't import cachetag at all, nothing is retired when it warms. Flush or ban the old tagged objects before you activate a VCL like that. Objects cached without tags are never affected.
+Cachetag also invalidates an index's remaining tagged objects when its VCL cools down and no warm VCL shares the index. Cachetag only tracks VCLs that explicitly import it; if a new VCL omits `import cachetag;`, nothing is retired on warmup. Flush or ban the old tagged objects before you activate a VCL like that. Objects cached without tags are never touched.
 
-Fellow objects keep their tags on disk with the object, and cachetag checks them against the purge history in `persist_path`. The rules above don't apply to them, and retiring an index doesn't touch them. Keep each persistent namespace's name and `persist_path` the same across the reload, including when a VCL has several namespaces with the same name. If you rename or remove one, or change its `persist_path`, flush the affected Fellow objects before activating the new VCL.
+Fellow objects keep their tags on disk with the object, and cachetag checks them against the purge history in `persist_path`. The rules above don't apply to them, and retiring an index doesn't touch them. Keep each persistent namespace's name and `persist_path` consistent across reloads (including when multiple namespaces share a name). If you rename or remove one, or change its `persist_path`, flush the affected Fellow objects before activating the new VCL.
 
 ## Purging
 
@@ -144,18 +144,18 @@ Cache-Tag-Purge: article:123, section:news
 
 To purge a single tag from VCL, call `tags.purge("article:123")`.
 
-`purge_header()` checks every tag in the header and drops duplicates before it publishes anything, so a header with one bad tag purges nothing. Due to Cachetag's design we can't tell you how many objects were purged. The return values are:
+`purge_header()` validates every tag and removes duplicates before publishing, so a header with one bad tag purges nothing. Due to Cachetag's design we can't tell you how many objects were purged. Return codes:
 
-- `-1`: success. Every tag was accepted into the purge history.
-- `-2`: rejected because cachetag ran out of a resource or hit a configured limit.
-- `-3`: invalid input.
-- `-4`: persistence is configured but unavailable, or the write failed.
+- `-1`: Success. All tags accepted into purge history.
+- `-2`: Rejected (resource exhausted or configured limit reached).
+- `-3`: Invalid input.
+- `-4`: Persistence is configured but unavailable, or the write failed.
 
-To keep purge history across a restart with Fellow, create the namespace with `persist_path` as shown in [Fellow storage](install.md#fellow-storage). Without `persist_path`, the namespace is memory-only.
+To persist purge history across restarts with Fellow, set `persist_path` (see [Fellow storage](install.md#fellow-storage)). Without `persist_path`, namespaces are memory-only.
 
-When `persist_path` is set, cachetag writes purges to a write-ahead log (WAL). The call only returns success once they're on disk. All the tags in one `purge_header()` call go into a single WAL transaction with one sync, however many tags there are. After a restart, either every tag from that header is recovered or none is. `wal_fsync = grouped` is still accepted, but it behaves exactly like `strict` for now, as group commit across calls isn't implemented. Persistent namespaces write the purge history to checkpoint files and delete the WAL segments a checkpoint covers.
+With `persist_path`, purges are written to a write-ahead log (WAL) and only return success once flushed to disk. All tags in a single `purge_header()` call are written in a single transaction with one fsync, regardless of tag count. On recovery, headers replay atomically: either all tags recover or none do. `wal_fsync = grouped` is currently accepted as an alias for `strict` (group commit across calls is not yet implemented). Persistent namespaces write the purge history to checkpoint files and delete the WAL segments a checkpoint covers.
 
-`purge_history_max_entries` (default 1,000,000) caps how much purge history is kept in memory. Setting it to `0` removes the cap, which you should only do on purpose.
+`purge_history_max_entries` (default 1,000,000) limits in-memory purge history. Setting it to `0` removes the limit (use with caution).
 
 Soft purges are supported and don't remove matching objects. They are treated as expired but stay usable for their grace and keep periods while a fresh copy is fetched:
 
@@ -167,12 +167,12 @@ set req.http.purged = tags.purge_header(req.http.Cache-Tag-Purge, mode = soft);
 
 Cachetag publishes VSC counters at three levels:
 
-- `info`: the counters to watch in production. Call volumes, rejections, persistence health and purge-map state.
-- `diag`: what you'll want during an incident. The memory breakdown, resize and publication state, and the denominators behind the `info` counters.
-- `debug`: implementation internals and opt-in instrumentation, for working on cachetag itself.
+- `info`: Operational metrics for production. Call counts, rejections, persistence status, and purge-map state.
+- `diag`: Incident troubleshooting. Memory breakdowns, resize and publication state, and the denominators behind the `info` counters.
+- `debug`: Internal mechanics and opt-in instrumentation for cachetag development.
 
-The interactive (curses) view of `varnishstat` or `vinylstat` filters by level and starts at `info`. One-shot (`-1`) and JSON (`-j`) output include every counter, whatever its level.
+`varnishstat` and `vinylstat` curses interfaces default to `info` level. One-shot (`-1`) and JSON (`-j`) modes dump all counters regardless of level.
 
-Each namespace has a background thread that publishes its counters every 0.1 s by default, so a value you read is at most one interval old. `objects()`, `pending()`, `edges()` and `compact()` publish straight away, so after a request calls one of them the counters are exact. The `vsc_publish_interval` constructor parameter changes the interval, and `0s` makes every VMOD call publish synchronously.
+Each namespace runs a background thread publishing counters every 0.1s by default, so a value you read is at most one interval old. Calls to `objects()`, `pending()`, `edges()`, and `compact()` trigger an immediate synchronous update. Adjust this interval via `vsc_publish_interval`, or set `0s` to publish synchronously on every call.
 
-When two VCLs share an index after a reload, each warm VCL's namespace publishes gauges for that same index. `index_memory_bytes` and its component gauges then describe one allocation, so don't add them up across VCLs. A cold VCL can keep showing its last values until it is discarded.
+When two VCLs share an index across a reload, both warm namespaces report gauges against that same shared index. Memory gauges such as `index_memory_bytes` describe a single underlying allocation, so don't add them up across VCLs. A cold VCL may retain and display its last reported values until discarded.
