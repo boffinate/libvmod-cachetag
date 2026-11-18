@@ -16,7 +16,7 @@ NOTICE MESSAGES
 Cachetag writes transaction-log records for problems an operator needs to fix, never for per-request accounting. These records use the ``vmod_cachetag:`` prefix.
 
 ``Discarded N tag registration(s), object is KIND``
-    A pending registration was discarded at insertion because the object is hit-for-miss or hit-for-pass. N is the number of registered tag keys; KIND identifies the object type, with hit-for-pass taking precedence when both flags are set. The namespace's ``transient_discards`` counter increases by one per object. Check backend freshness and VCL cacheability settings. The Notice is written on the backend transaction when a transaction log is available, once per affected insert and namespace, with no rate limiting or opt-out. Pass fetches do not create pending registrations or trigger this insert path.
+    A pending registration was discarded at insertion because the object is hit-for-miss or hit-for-pass. N is the number of registered tag keys; KIND identifies the object type, with hit-for-pass taking precedence when both flags are set. The namespace's ``transient_discards`` counter increases by one per object. Check backend freshness and VCL cacheability settings. When ``log_transient_discards`` is enabled and a transaction log is available, the Notice is written on the backend transaction once per affected insert and namespace, without rate limiting. Set ``log_transient_discards = false`` to suppress these Notices without disabling the counter. Pass fetches do not create pending registrations or trigger this insert path.
 
 $Event event_function
 
@@ -33,12 +33,15 @@ $Object namespace(STRING name = "default",
 		  DURATION sweep_batch_hold = 0.00025,
 		  DURATION sweep_batch_yield = 0.0001,
 		  DURATION vsc_publish_interval = 0.1,
-		  BOOL interning = false)
+		  BOOL interning = false,
+		  BOOL log_transient_discards = true)
 
 Create a cache-tag namespace.
 
+``log_transient_discards`` enables backend-transaction Notices when pending tags are discarded on hit-for-miss or hit-for-pass inserts. It defaults to ``true``. Set it to ``false`` to suppress these Notices for this namespace; the ``transient_discards`` counter still counts every affected insert.
+
 ``max_keys_per_object`` bounds the unique tags registered on one object.
-Exceeding this limit during a fetch fails that fetch: tags are never silently dropped to satisfy limits, because delivering an object with a truncated tag set would let a later purge miss it. Registrations on hit-for-miss or hit-for-pass objects are discarded at insertion, counted by ``transient_discards`` and reported in a ``vmod_cachetag:`` Notice on the backend transaction. Production traces have shown real 333-tag objects, so
+Exceeding this limit during a fetch fails that fetch: tags are never silently dropped to satisfy limits, because delivering an object with a truncated tag set would let a later purge miss it. Registrations on hit-for-miss or hit-for-pass objects are discarded at insertion, counted by ``transient_discards`` and, by default, reported in a ``vmod_cachetag:`` Notice on the backend transaction. Production traces have shown real 333-tag objects, so
 the 512 default is sized to pass them; raise it explicitly for workloads
 with larger tag sets. ``max_tag_header_bytes`` bounds a single header value:
 an oversized ``add_header()`` value fails the fetch the same way, while an
@@ -102,7 +105,7 @@ Parse and register tag keys from ``header``. Tokens are trimmed around
 per-header token ceiling: the header value is bounded by
 ``max_tag_header_bytes`` and the unique keys it registers by
 ``max_keys_per_object``. Exceeding either limit fails the fetch
-(fail closed); tags are never silently dropped to satisfy limits. Registrations on hit-for-miss or hit-for-pass objects are discarded at insertion, counted by ``transient_discards`` and reported in a ``vmod_cachetag:`` Notice on the backend transaction.
+(fail closed); tags are never silently dropped to satisfy limits. Registrations on hit-for-miss or hit-for-pass objects are discarded at insertion, counted by ``transient_discards`` and, by default, reported in a ``vmod_cachetag:`` Notice on the backend transaction.
 
 $Restrict vcl_backend_response vcl_backend_error
 

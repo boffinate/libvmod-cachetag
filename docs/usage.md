@@ -117,7 +117,13 @@ A 302 without freshness, or a 308 even with `max-age`, therefore reaches the bac
 vmod_cachetag: Discarded 1 tag registration(s), object is hit-for-miss
 ```
 
-Hit-for-pass takes precedence when both flags are set. Cachetag writes transaction-log records for problems an operator needs to fix, never for per-request accounting. This Notice is emitted once per affected insert and namespace when a transaction log is available, without rate limiting or an opt-out. Its volume follows the backend fetch rate for tagged uncacheable responses.
+Hit-for-pass takes precedence when both flags are set. Cachetag writes transaction-log records for problems an operator needs to fix, never for per-request accounting. By default, this Notice is emitted once per affected insert and namespace when a transaction log is available, without rate limiting. Its volume follows the backend fetch rate for tagged uncacheable responses. Set `log_transient_discards = false` on the namespace to suppress these Notices; `transient_discards` still counts every affected insert:
+
+```vcl
+sub vcl_init {
+    new tags = cachetag.namespace("default", log_transient_discards = false);
+}
+```
 
 `purge()` still returns `-1` for accepted publication whether or not any object carries the tag. It publishes purge history rather than finding or counting matching objects. The strict freshness guarantee holds: hit-for-miss and hit-for-pass objects never serve cached content.
 
@@ -258,7 +264,7 @@ Cachetag publishes VSC counters at three levels:
 - `diag`: what you'll want during an incident. The memory breakdown, resize and publication state, and the denominators behind the `info` counters.
 - `debug`: implementation internals and opt-in instrumentation, for working on cachetag itself.
 
-Watch `CACHETAG.*.transient_discards` in production: it counts objects whose pending tags were discarded at a hit-for-miss or hit-for-pass insert. It counts objects, not keys, and excludes pass fetches and fetches abandoned before insertion. A rising value points to backend freshness or VCL settings that prevent tagged responses from being cached; the backend-transaction `vmod_cachetag:` Notice identifies the discarded key count and object kind.
+Watch `CACHETAG.*.transient_discards` in production: it counts objects whose pending tags were discarded at a hit-for-miss or hit-for-pass insert. It counts objects, not keys, and excludes pass fetches and fetches abandoned before insertion. A rising value points to backend freshness or VCL settings that prevent tagged responses from being cached; the backend-transaction `vmod_cachetag:` Notice identifies the discarded key count and object kind unless `log_transient_discards = false` suppresses it. The counter remains active either way.
 
 The interactive (curses) view of `varnishstat` or `vinylstat` filters by level and starts at `info`. One-shot (`-1`) and JSON (`-j`) output include every counter, whatever its level.
 

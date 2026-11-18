@@ -563,3 +563,69 @@ client c2 -connect ${v2_sock} {
 } -run
 
 server s2 -wait
+
+server s3 {
+	rxreq
+	expect req.url == "/redirect"
+	txresp -status 302 -hdr "Location: /target" -hdr "Cache-Tag: thread:45"
+
+	rxreq
+	expect req.url == "/redirect"
+	txresp -status 302 -hdr "Location: /target" -hdr "Cache-Tag: thread:45"
+
+	rxreq
+	expect req.url == "/hfp"
+	txresp -hdr "Cache-Tag: thread:45" -body "hfp"
+} -start
+
+vinyl v3 -vcl {
+	import cachetag;
+
+	backend default {
+		.host = "${s3_addr}";
+		.port = "${s3_port}";
+	}
+
+	sub vcl_init {
+		new tags = cachetag.namespace("default", vsc_publish_interval = 0s, log_transient_discards = false);
+	}
+
+	sub vcl_backend_response {
+		tags.add_header(beresp.http.Cache-Tag);
+		if (bereq.url == "/hfp") {
+			return (pass(10s));
+		}
+	}
+} -start
+
+# Check through backend End so a Notice after VCL return cannot escape.
+logexpect l3 -v v3 -g vxid -q {Begin ~ "^bereq "} {
+	fail add * Notice {^vmod_cachetag:}
+	expect * * Begin {^bereq }
+	expect * = End
+	expect * * Begin {^bereq }
+	expect * = End
+	expect * * Begin {^bereq }
+	expect * = End
+	fail clear
+} -start
+
+client c3 -connect ${v3_sock} {
+	txreq -url "/redirect"
+	rxresp
+	expect resp.status == 302
+	txreq -url "/redirect"
+	rxresp
+	expect resp.status == 302
+	txreq -url "/hfp"
+	rxresp
+	expect resp.status == 200
+} -run
+
+logexpect l3 -wait
+
+vinyl v3 -expect MAIN.cache_hitmiss == 1
+vinyl v3 -expect CACHETAG.vcl1_tags_default.transient_discards == 3
+vinyl v3 -expect CACHETAG.vcl1_tags_default.volatile_objects == 0
+
+server s3 -wait

@@ -243,6 +243,7 @@ struct vmod_cachetag_namespace {
 	struct cachetag_index	*index;
 	pthread_mutex_t		mtx;
 	struct cachetag_pending	*pending;
+	unsigned		log_transient_discards;
 	pid_t			warm_pid;
 	uintptr_t		obj_cb;
 	pid_t			obj_cb_pid;
@@ -2466,7 +2467,7 @@ cachetag_notice_transient_discard(struct worker *wrk, const struct objcore *oc,
 {
 	const char *kind;
 
-	if (wrk->vsl == NULL)
+	if (!tp->ns->log_transient_discards || wrk->vsl == NULL)
 		return;
 	if (oc->flags & OC_F_HFP)
 		kind = "hit-for-pass";
@@ -2725,7 +2726,7 @@ vmod_namespace__init(VRT_CTX, struct vmod_cachetag_namespace **nsp,
     VCL_DURATION sweep_interval, VCL_INT purge_history_max_entries,
     VCL_INT sweep_batch_objects, VCL_DURATION sweep_batch_hold,
     VCL_DURATION sweep_batch_yield, VCL_DURATION vsc_publish_interval,
-    VCL_BOOL interning)
+    VCL_BOOL interning, VCL_BOOL log_transient_discards)
 {
 	struct vmod_cachetag_namespace *ns;
 	char *vsc_name;
@@ -2775,6 +2776,7 @@ vmod_namespace__init(VRT_CTX, struct vmod_cachetag_namespace **nsp,
 	ALLOC_OBJ(ns, TAG_NAMESPACE_MAGIC);
 	AN(ns);
 	ns->vcl = ctx->vcl;
+	ns->log_transient_discards = log_transient_discards;
 	ns->vcl_name = strdup(vcl_name);
 	AN(ns->vcl_name);
 	PTOK(pthread_mutex_init(&ns->mtx, NULL));
