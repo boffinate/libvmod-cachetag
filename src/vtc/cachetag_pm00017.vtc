@@ -14,7 +14,7 @@ server s1 {
 	txresp -body "fresh"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -99,11 +99,11 @@ client c1 {
 	expect resp.http.result == -1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.reclaim_pending == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.purgemap_prunes >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.purgemap_pruned_entries >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.purgemap_hard_floor >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.purgemap_entries <= 4
+vcache v1 -expect CACHETAG.vcl1_tags_cap_hold.reclaim_pending == 1
+vcache v1 -expect CACHETAG.vcl1_tags_cap_hold.purgemap_prunes >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_cap_hold.purgemap_pruned_entries >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_cap_hold.purgemap_hard_floor >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_cap_hold.purgemap_entries <= 4
 
 barrier b_held_continue sync
 client c_held -wait
@@ -118,7 +118,7 @@ client c2 {
 	expect resp.body == "fresh"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.publication_readers_phase0 == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_cap_hold.publication_readers_phase1 == 0
+vcache v1 -expect CACHETAG.vcl1_tags_cap_hold.publication_readers_phase0 == 0
+vcache v1 -expect CACHETAG.vcl1_tags_cap_hold.publication_readers_phase1 == 0
 
 server s1 -wait

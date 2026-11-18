@@ -30,7 +30,7 @@ server s1 {
 	txresp -body "direct-new"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -129,10 +129,10 @@ client c_load {
 	expect resp.http.edges == 514
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_objects == 6
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_edges == 514
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_inline_folds == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_object_count_overflow_bytes == 8
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_objects == 6
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_edges == 514
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_inline_folds == 3
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_object_count_overflow_bytes == 8
 
 client c_fresh_and_soft {
 	txreq -url "/overflow"
@@ -162,9 +162,9 @@ client c_hard_direct {
 	expect resp.body == "overflow-old"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_objects == 6
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_edges == 514
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_object_count_overflow_bytes == 8
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_objects == 6
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_edges == 514
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_object_count_overflow_bytes == 8
 
 client c_compact_overflow {
 	txreq -req HARDPURGE -hdr "Tag: o254"
@@ -176,10 +176,10 @@ client c_compact_overflow {
 	expect resp.http.result == 2
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_objects == 5
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_edges == 259
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_inline_folds == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_object_count_overflow_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_objects == 5
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_edges == 259
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_inline_folds == 3
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_object_count_overflow_bytes == 0
 
 client c_remove {
 	txreq -req REMOVE -url "/remove"
@@ -192,10 +192,10 @@ client c_remove {
 	expect resp.http.edges == 258
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_inline_folds == 2
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_inline_folds == 2
 
 delay 2
-vinyl v1 -expect MAIN.n_expired >= 1
+vcache v1 -expect MAIN.n_expired >= 1
 
 client c_expired_stats {
 	txreq -req STATS
@@ -204,7 +204,7 @@ client c_expired_stats {
 	expect resp.http.edges == 257
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_inline_folds == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_object_count_overflow_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_inline_folds == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_counts.volatile_object_count_overflow_bytes == 0
 
 server s1 -wait

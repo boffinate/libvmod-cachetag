@@ -1,6 +1,6 @@
 vtest "Fellow shuts down cleanly after storing 5,000 objects"
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/log.stv,512MB,1MB,64KB" \
@@ -33,7 +33,7 @@ vinyl v1 \
 	}
 } -start
 
-vinyl v1 -cliok "param.set vsl_mask all"
+vcache v1 -cliok "param.set vsl_mask all"
 
 shell {
 	python3 - <<'PY'
@@ -52,5 +52,5 @@ print("5000 responses returned 200")
 PY
 }
 
-vinyl v1 -expect MAIN.cache_miss == 5000
-vinyl v1 -stop
+vcache v1 -expect MAIN.cache_miss == 5000
+vcache v1 -stop

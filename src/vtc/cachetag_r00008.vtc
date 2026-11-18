@@ -16,7 +16,7 @@ server s1 {
 	txresp -body "new"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -72,4 +72,4 @@ client c3 {
 	expect resp.body == "new"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_insert_probe_hits >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_default.purgemap_insert_probe_hits >= 1

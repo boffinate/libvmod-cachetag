@@ -6,7 +6,7 @@ server s1 {
 	txresp -body "recovered"
 } -start
 
-vinyl v1 -arg "-jnone" -vcl+backend {
+vcache v1 -arg "-jnone" -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -14,7 +14,7 @@ vinyl v1 -arg "-jnone" -vcl+backend {
 	}
 } -start
 
-vinyl v1 -errvcl {VCL "vcl2" Failed initialization} {
+vcache v1 -errvcl {VCL "vcl2" Failed initialization} {
 	import cachetag;
 
 	backend default {
@@ -29,7 +29,7 @@ vinyl v1 -errvcl {VCL "vcl2" Failed initialization} {
 	}
 }
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import slash from "${libvmod_slash}";
 	import cachetag;
 
@@ -58,9 +58,9 @@ client c1 {
 	expect resp.body == "recovered"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl3_tags_recovered_pm.purgemap_fellow_attr_objects_written == 1
-vinyl v1 -expect CACHETAG.vcl3_tags_recovered_pm.purgemap_fellow_store_invariant_failures == 0
-vinyl v1 -expect CACHETAG.vcl3_tags_recovered_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl3_tags_recovered_pm.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl3_tags_recovered_pm.purgemap_fellow_attr_objects_written == 1
+vcache v1 -expect CACHETAG.vcl3_tags_recovered_pm.purgemap_fellow_store_invariant_failures == 0
+vcache v1 -expect CACHETAG.vcl3_tags_recovered_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl3_tags_recovered_pm.volatile_edges == 0
 
 server s1 -wait

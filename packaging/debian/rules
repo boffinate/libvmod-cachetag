@@ -43,8 +43,8 @@ DOCDIR := /usr/share/doc/$(PKG)
 # --without autoreconf is deliberate and load-bearing, not a convenience.
 #
 # Makefile.am declares
-#     ACLOCAL_AMFLAGS = -I m4 -I ${VINYLAPI_DATAROOTDIR}/aclocal
-# and VINYLAPI_DATAROOTDIR is a configure-time substitution read from the
+#     ACLOCAL_AMFLAGS = -I m4 -I ${VCACHEAPI_DATAROOTDIR}/aclocal
+# and VCACHEAPI_DATAROOTDIR is a configure-time substitution read from the
 # installed vinylapi.pc. dh_autoreconf runs aclocal *before* configure, where
 # that variable is empty, so autoreconf fails with
 #     aclocal: error: couldn't open directory '/aclocal'

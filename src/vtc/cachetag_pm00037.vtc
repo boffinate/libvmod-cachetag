@@ -21,7 +21,7 @@ server s1 {
 	txresp -body "second-1"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -67,7 +67,7 @@ client c_hot {
 } -run
 
 # Published by the thread alone: the insert did not publish and no probe ran.
-vinyl v1 -expect CACHETAG.vcl1_tags_first.volatile_objects == 1
+vcache v1 -expect CACHETAG.vcl1_tags_first.volatile_objects == 1
 
 # Park a fetch inside vcl1 so the reload and the discard both happen while that
 # VCL is genuinely busy.
@@ -86,7 +86,7 @@ client c_traffic -repeat 20 -keepalive {
 	expect resp.body == "hot-1"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -118,8 +118,8 @@ vinyl v1 -vcl+backend {
 	}
 }
 
-vinyl v1 -cliok "vcl.use vcl2"
-vinyl v1 -cliok "vcl.discard vcl1"
+vcache v1 -cliok "vcl.use vcl2"
+vcache v1 -cliok "vcl.discard vcl1"
 
 barrier b_slow_continue sync
 client c_slow -wait
@@ -128,7 +128,7 @@ client c_traffic -wait
 # vcl1 can only cool once its last request drains; cooling joins its publisher
 # thread before __fini destroys the VSC segment.  A hung join would stall the
 # CLI and everything below it.
-vinyl v1 -cliok "vcl.list"
+vcache v1 -cliok "vcl.list"
 
 client c_second {
 	txreq -url "/second"
@@ -137,7 +137,7 @@ client c_second {
 } -run
 
 # The reloaded VCL's namespace has a publisher of its own.
-vinyl v1 -expect CACHETAG.vcl2_tags_second.volatile_objects == 1
+vcache v1 -expect CACHETAG.vcl2_tags_second.volatile_objects == 1
 
 client c_probe {
 	txreq -url "/probe"
@@ -145,6 +145,6 @@ client c_probe {
 	expect resp.http.objects == 1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl2_tags_second.volatile_edges == 1
+vcache v1 -expect CACHETAG.vcl2_tags_second.volatile_edges == 1
 
 server s1 -wait

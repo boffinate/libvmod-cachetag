@@ -5,7 +5,7 @@ server s1 -repeat 92 {
 	txresp -body "object"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -126,9 +126,9 @@ client c_cancel_compact {
 	expect resp.http.result == 65
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_objects == 1
-vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_object_table_slots >= 128
-vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.object_shrink_calls == 0
+vcache v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_objects == 1
+vcache v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_object_table_slots >= 128
+vcache v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.object_shrink_calls == 0
 
 client c_cancel_refill -repeat 2 {
 	txreq -url "/cancel-keep" -hdr "Load: 1"
@@ -146,9 +146,9 @@ client c_cancel_no_ready {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_objects == 3
-vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_object_table_slots >= 128
-vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.object_shrink_calls == 0
+vcache v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_objects == 3
+vcache v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_object_table_slots >= 128
+vcache v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.object_shrink_calls == 0
 
 delay 7
 
@@ -159,9 +159,9 @@ client c_cancel_stats {
 	expect resp.http.result == 3
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.resize_low_water_rearms >= 1
-vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.object_shrink_calls >= 1
-vinyl v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_object_table_slots < 128
+vcache v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.resize_low_water_rearms >= 1
+vcache v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.object_shrink_calls >= 1
+vcache v1 -expect CACHETAG.vcl1_cancel_low_water_cancel.volatile_object_table_slots < 128
 
 client c_rollback_init {
 	txreq -req INIT_ROLLBACK
@@ -205,7 +205,7 @@ client c_rollback_drain {
 	expect resp.http.result == 128
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_rollback_low_water_rollback.volatile_objects == 24
-vinyl v1 -expect CACHETAG.vcl1_rollback_low_water_rollback.volatile_side_table_buckets == 128
+vcache v1 -expect CACHETAG.vcl1_rollback_low_water_rollback.volatile_objects == 24
+vcache v1 -expect CACHETAG.vcl1_rollback_low_water_rollback.volatile_side_table_buckets == 128
 
 server s1 -wait

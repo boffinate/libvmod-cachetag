@@ -5,7 +5,7 @@ server s1 -repeat 65 {
 	txresp -body "object"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -55,8 +55,8 @@ client c_load -repeat 65 {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_objects == 65
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_object_table_slots == 128
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_objects == 65
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_object_table_slots == 128
 
 client c_compact {
 	txreq -req PURGE -hdr "Tag: drop"
@@ -68,13 +68,13 @@ client c_compact {
 	expect resp.http.result == 65
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_last_scanned == 65
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_last_killed == 65
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_last_batches >= 9
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_batch_scanned_max <= 8
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_remaining == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_object_table_slots == 128
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_last_scanned == 65
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_last_killed == 65
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_last_batches >= 9
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_batch_scanned_max <= 8
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_sweep.sweep_remaining == 0
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_object_table_slots == 128
 
 client c_drain {
 	txreq -req LOWREADY
@@ -82,6 +82,6 @@ client c_drain {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_object_table_slots == 0
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_sweep.volatile_object_table_slots == 0
 
 server s1 -wait

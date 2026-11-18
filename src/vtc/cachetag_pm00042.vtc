@@ -6,7 +6,7 @@ server s1 {
 	txresp -body "expires"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -40,7 +40,7 @@ vinyl v1 -vcl+backend {
 
 # Keep the namespace compatible so this case isolates callback draining;
 # an incompatible replacement would retire the object before expiry.
-vinyl v1 -cliok {vcl.inline vcl2 << EOF
+vcache v1 -cliok {vcl.inline vcl2 << EOF
 	vcl 4.1;
 
 	backend default {
@@ -91,7 +91,7 @@ client c_wait {
 	expect resp.http.result == true
 } -run
 
-vinyl v1 -cliok "vcl.use vcl2"
+vcache v1 -cliok "vcl.use vcl2"
 
 client c_release {
 	txreq -url "/release"
@@ -102,8 +102,8 @@ client c_release {
 # ObjUnsubscribeEvents takes the object-event write lock. The paused expiry
 # owns the matching read lock until vcl2 releases it, so this cannot complete
 # unless cold waits for the callback before destroying the old namespace.
-vinyl v1 -cliok "vcl.discard vcl1"
+vcache v1 -cliok "vcl.discard vcl1"
 client c_release -wait
-vinyl v1 -cliok "vcl.list"
+vcache v1 -cliok "vcl.list"
 
 server s1 -wait

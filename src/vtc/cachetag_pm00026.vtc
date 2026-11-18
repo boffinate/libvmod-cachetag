@@ -5,7 +5,7 @@ server s1 -repeat 9 {
 	txresp -body "object"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -146,9 +146,9 @@ client c_exact_identity_survives {
 	expect resp.http.hit == 1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_side_fingerprint_collisions.volatile_objects == 5
-vinyl v1 -expect CACHETAG.vcl1_tags_side_fingerprint_collisions.volatile_edges == 5
-vinyl v1 -expect CACHETAG.vcl1_tags_side_fingerprint_collisions.volatile_side_table_bytes == 128
-vinyl v1 -expect CACHETAG.vcl1_tags_side_fingerprint_collisions.volatile_attach_failures == 0
+vcache v1 -expect CACHETAG.vcl1_tags_side_fingerprint_collisions.volatile_objects == 5
+vcache v1 -expect CACHETAG.vcl1_tags_side_fingerprint_collisions.volatile_edges == 5
+vcache v1 -expect CACHETAG.vcl1_tags_side_fingerprint_collisions.volatile_side_table_bytes == 128
+vcache v1 -expect CACHETAG.vcl1_tags_side_fingerprint_collisions.volatile_attach_failures == 0
 
 server s1 -wait

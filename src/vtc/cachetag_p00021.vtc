@@ -5,7 +5,7 @@ server s1 {
 	txresp
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/purgemap-checkpoint.stv,100MB,1MB,64KB" \
@@ -70,23 +70,23 @@ client c1 {
 	rxresp
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_entries == 4
-vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_hard_floor == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_soft_floor == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.persist_checkpoint_entries == 4
-vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.persist_checkpoint_wal_sequence == 6
+vcache v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_entries == 4
+vcache v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_hard_floor == 1
+vcache v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_soft_floor == 2
+vcache v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.persist_checkpoint_entries == 4
+vcache v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.persist_checkpoint_wal_sequence == 6
 
 shell {
 	test "$(find ${tmpdir}/tag-persist -maxdepth 1 -name 'checkpoint-*.vtc' | wc -l)" -eq 1
 	test "$(find ${tmpdir}/tag-persist/wal -maxdepth 1 -name '*.vtw' | wc -l)" -eq 1
 }
 
-vinyl v1 -stop
-vinyl v1 -start
+vcache v1 -stop
+vcache v1 -start
 
-vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_entries == 4
-vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_hard_floor == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_soft_floor == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_seq == 6
-vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.persist_checkpoint_entries == 4
-vinyl v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.persist_replay_records == 0
+vcache v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_entries == 4
+vcache v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_hard_floor == 1
+vcache v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_soft_floor == 2
+vcache v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.purgemap_seq == 6
+vcache v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.persist_checkpoint_entries == 4
+vcache v1 -expect CACHETAG.vcl1_tags_checkpoint_pm.persist_replay_records == 0

@@ -17,7 +17,7 @@ Every purge writes history for a tag, and every cached object remembers the purg
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant V as Vinyl
+    participant V as Cache
     participant I as Tag index
     participant B as Backend
     C->>V: PURGE product:123

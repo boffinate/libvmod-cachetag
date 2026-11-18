@@ -46,7 +46,7 @@ server s1 {
 	txresp -hdr "X-Source: hold-new" -body "hold-new"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/purgemap-soft-batch.stv,100MB,1MB,64KB" \
@@ -121,22 +121,22 @@ client c_soft_batch {
 	expect resp.http.result == -1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_seq == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.persist_wal_records == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_entries == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_soft_floor == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_hard_floor == 0
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_seq == 1
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.persist_wal_records == 1
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_entries == 2
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_soft_floor == 0
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_hard_floor == 0
 
 # Exercise WAL replay before a soft probe reduces either object's TTL to zero
 # and makes it ineligible for Fellow resurrection.
-vinyl v1 -stop
-vinyl v1 -start
+vcache v1 -stop
+vcache v1 -start
 
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_seq == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_entries == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_soft_floor == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_hard_floor == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.fellow_replayed_records == 1
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_seq == 1
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_entries == 2
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_soft_floor == 0
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_hard_floor == 0
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.fellow_replayed_records == 1
 
 client c_replayed_soft_batch {
 	txreq -url "/one"
@@ -167,18 +167,18 @@ client c_soft_cap {
 	expect resp.http.result == -1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_seq == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_entries == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_soft_floor == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_hard_floor == 0
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_seq == 2
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_entries == 1
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_soft_floor == 1
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_hard_floor == 0
 
-vinyl v1 -stop
-vinyl v1 -start
+vcache v1 -stop
+vcache v1 -start
 
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_seq == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_entries == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_soft_floor == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_hard_floor == 0
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_seq == 2
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_entries == 1
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_soft_floor == 1
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.purgemap_hard_floor == 0
 
 client c_restarted_soft {
 	txreq -url "/one"
@@ -213,6 +213,6 @@ client c_restarted_fresh {
 	expect resp.http.X-Source == "hold-new"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_soft_batch.fellow_replayed_records == 0
+vcache v1 -expect CACHETAG.vcl1_tags_soft_batch.fellow_replayed_records == 0
 
 server s1 -wait

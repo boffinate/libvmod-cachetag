@@ -5,7 +5,7 @@ server s1 -repeat 2 {
 	txresp -body "limited"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -74,8 +74,8 @@ client c1 {
 	expect resp.http.purged == -1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_many_many.limit_rejections == 1
-vinyl v1 -expect CACHETAG.vcl1_long_long.limit_rejections == 1
-vinyl v1 -expect CACHETAG.vcl1_bytes_bytes.limit_rejections == 1
-vinyl v1 -expect CACHETAG.vcl1_parsed_parsed.parse_errors == 1
-vinyl v1 -expect CACHETAG.vcl1_tokened_tokened.limit_rejections == 0
+vcache v1 -expect CACHETAG.vcl1_many_many.limit_rejections == 1
+vcache v1 -expect CACHETAG.vcl1_long_long.limit_rejections == 1
+vcache v1 -expect CACHETAG.vcl1_bytes_bytes.limit_rejections == 1
+vcache v1 -expect CACHETAG.vcl1_parsed_parsed.parse_errors == 1
+vcache v1 -expect CACHETAG.vcl1_tokened_tokened.limit_rejections == 0

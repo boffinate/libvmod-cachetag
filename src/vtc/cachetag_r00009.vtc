@@ -44,7 +44,7 @@ barrier b_hold2 sock 2
 barrier b_memo3 sock 2
 barrier b_hold3 sock 2
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -129,8 +129,8 @@ client c1b {
 	expect resp.http.Stale == "0"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_calls == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_memo_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_default.stale_calls == 3
+vcache v1 -expect CACHETAG.vcl1_tags_default.stale_memo_hits == 1
 
 # Case 2: hard purge lands strictly between the two calls. The
 # deliver-phase call must recompute and return true, and the killed object
@@ -243,10 +243,10 @@ client c1c {
 	expect resp.http.Stale == "0"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_calls == 16
-vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_detected >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_memo_hits == 2
+vcache v1 -expect CACHETAG.vcl1_tags_default.stale_calls == 16
+vcache v1 -expect CACHETAG.vcl1_tags_default.stale_detected >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_default.stale_memo_hits == 2
 # /case1 twice-requested but one object, the refetched /case2, /case3, and the
 # refetched /case4. Both killed originals must be gone; with sweeping disabled
 # nothing else may have removed membership behind the test's back.
-vinyl v1 -expect CACHETAG.vcl1_tags_default.volatile_objects == 4
+vcache v1 -expect CACHETAG.vcl1_tags_default.volatile_objects == 4

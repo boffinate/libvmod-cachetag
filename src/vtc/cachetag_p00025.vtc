@@ -24,7 +24,7 @@ server s1 {
 	txresp -hdr "Connection: close" -hdr "X-Source: three-new" -body "three-new"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/purgemap-header-cap.stv,100MB,1MB,64KB" \
@@ -90,9 +90,9 @@ client c1 {
 	expect resp.http.purged == -1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_header_cap.purgemap_seq == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_header_cap.purgemap_entries <= 4
-vinyl v1 -expect CACHETAG.vcl1_tags_header_cap.purgemap_hard_floor >= 2
+vcache v1 -expect CACHETAG.vcl1_tags_header_cap.purgemap_seq == 3
+vcache v1 -expect CACHETAG.vcl1_tags_header_cap.purgemap_entries <= 4
+vcache v1 -expect CACHETAG.vcl1_tags_header_cap.purgemap_hard_floor >= 2
 
 client c2 {
 	txreq -url "/one"

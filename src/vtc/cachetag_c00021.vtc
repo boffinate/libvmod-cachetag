@@ -6,7 +6,7 @@ server s1 {
 	txresp -body "probe1"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -39,5 +39,5 @@ client c1 {
 	expect resp.http.Stale == false
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_calls == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_default.stale_detected == 0
+vcache v1 -expect CACHETAG.vcl1_tags_default.stale_calls == 1
+vcache v1 -expect CACHETAG.vcl1_tags_default.stale_detected == 0

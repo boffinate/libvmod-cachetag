@@ -5,7 +5,7 @@ server s1 -repeat 57 {
 	txresp -body "object"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -149,13 +149,13 @@ client c_drain_all {
 	expect resp.http.result == 0
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.volatile_objects == 57
-vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.volatile_object_table_slots == 128
-vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.volatile_side_table_buckets == 256
-vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.volatile_attach_failures == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.side_resize_attach_grow_publishes == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.side_resize_attach_grow_old_buckets_max == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.object_emergency_segment_allocations >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_resize_worker.object_emergency_segment_old_capacity_max == 0
+vcache v1 -expect CACHETAG.vcl1_tags_resize_worker.volatile_objects == 57
+vcache v1 -expect CACHETAG.vcl1_tags_resize_worker.volatile_object_table_slots == 128
+vcache v1 -expect CACHETAG.vcl1_tags_resize_worker.volatile_side_table_buckets == 256
+vcache v1 -expect CACHETAG.vcl1_tags_resize_worker.volatile_attach_failures == 0
+vcache v1 -expect CACHETAG.vcl1_tags_resize_worker.side_resize_attach_grow_publishes == 0
+vcache v1 -expect CACHETAG.vcl1_tags_resize_worker.side_resize_attach_grow_old_buckets_max == 0
+vcache v1 -expect CACHETAG.vcl1_tags_resize_worker.object_emergency_segment_allocations >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_resize_worker.object_emergency_segment_old_capacity_max == 0
 
 server s1 -wait

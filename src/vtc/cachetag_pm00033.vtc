@@ -7,7 +7,7 @@ server s1 -repeat 2 {
 	txresp -body "object"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -51,9 +51,9 @@ barrier b_tagged sync
 client c_left -wait
 client c_right -wait
 
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_sets == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_set_refs == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_set_misses == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_set_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_sets == 1
+vcache v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_set_refs == 2
+vcache v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_set_misses == 1
+vcache v1 -expect CACHETAG.vcl1_tags_intern_publish_race.volatile_interned_set_hits == 1
 
 server s1 -wait

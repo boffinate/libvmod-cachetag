@@ -8,7 +8,7 @@ server s1 {
 	txresp -hdr "Cache-Tag: site, other" -body "two"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {

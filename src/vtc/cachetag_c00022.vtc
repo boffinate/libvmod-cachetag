@@ -26,7 +26,7 @@ server s1 {
 	txresp -body "soft-other-old"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -109,4 +109,4 @@ client c1 {
 	expect resp.body == "soft-other-old"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_probe_soft_hits >= 2
+vcache v1 -expect CACHETAG.vcl1_tags_default.purgemap_probe_soft_hits >= 2

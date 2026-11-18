@@ -6,7 +6,7 @@ server s1 {
 	txresp -body "cached"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {

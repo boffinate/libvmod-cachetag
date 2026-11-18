@@ -5,7 +5,7 @@ server s1 -repeat 8 {
 	txresp -body "object"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -137,8 +137,8 @@ client c_make_tombstones {
 	expect resp.http.result == 4
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.volatile_objects == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.volatile_side_table_buckets == 16
+vcache v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.volatile_objects == 2
+vcache v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.volatile_side_table_buckets == 16
 
 client c_failed_alloc {
 	txreq -req FAILNEXT
@@ -150,7 +150,7 @@ client c_failed_alloc {
 	expect resp.status == 500
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.side_destination_alloc_failures >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.side_destination_alloc_failures >= 1
 
 client c_rebuild {
 	txreq -req START16
@@ -186,8 +186,8 @@ client c_load_after_rebuild {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.volatile_objects == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.volatile_attach_failures == 0
+vcache v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.volatile_objects == 3
+vcache v1 -expect CACHETAG.vcl1_tags_side_migrate_rebuild.volatile_attach_failures == 0
 
 client c_shrink {
 	txreq -req START8

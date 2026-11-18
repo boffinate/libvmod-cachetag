@@ -1,6 +1,6 @@
-ACLOCAL_AMFLAGS = -I m4 -I ${VINYLAPI_DATAROOTDIR}/aclocal
+ACLOCAL_AMFLAGS = -I m4 -I ${VCACHEAPI_DATAROOTDIR}/aclocal
 
-DISTCHECK_CONFIGURE_FLAGS = RST2MAN=: $(CACHETAG_ENABLED_CONFIGURE_FLAGS)
+DISTCHECK_CONFIGURE_FLAGS = RST2MAN=: --with-vcache=$(CACHETAG_ENGINE) $(CACHETAG_ENABLED_CONFIGURE_FLAGS)
 
 SUBDIRS = src
 
@@ -26,10 +26,13 @@ EXTRA_DIST = \
 	patches/fellow/0012-fellow-storage-skip-global-shutdown-drain.patch \
 	patches/fellow/0013-fellow-object-attr-add-read-failure-test-hook.patch
 
-.PHONY: check-with-vinyl-cache check-fellow-with-vinyl-cache
+.PHONY: check-with-vinyl-cache check-with-varnish-cache check-fellow-with-vinyl-cache
 
 check-with-vinyl-cache:
 	scripts/test-with-vinyl-cache.sh "$(VINYL_CACHE_SRC)"
+
+check-with-varnish-cache:
+	scripts/test-with-varnish-cache.sh "$(VARNISH_CACHE_SRC)"
 
 check-fellow-with-vinyl-cache:
 	scripts/test-fellow-with-vinyl-cache.sh "$(VINYL_CACHE_SRC)"

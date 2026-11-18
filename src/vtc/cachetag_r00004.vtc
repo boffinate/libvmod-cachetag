@@ -11,7 +11,7 @@ server s1 {
 	chunkedlen 0
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 

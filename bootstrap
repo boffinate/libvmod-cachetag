@@ -1,16 +1,46 @@
 #!/bin/sh
-
-set -e
-set -u
+set -eu
 
 ROOT_DIR=$(dirname "$0")
+PKG_CONFIG=${PKG_CONFIG:-pkg-config}
 
-pkg-config --exists --print-errors vinylapi
+# Match configure's preference, including explicit selection when both SDKs
+# are installed. An older SDK may provide macros without VCACHE_REQUIRE.
+flavors="vinyl varnish"
+expect_flavor=no
+for arg in "$@"; do
+    if [ "$expect_flavor" = yes ]; then
+        flavors=$arg
+        expect_flavor=no
+        continue
+    fi
+    case "$arg" in
+        --with-vcache=*) flavors=${arg#--with-vcache=} ;;
+        --with-vcache) expect_flavor=yes ;;
+    esac
+done
+if [ "$expect_flavor" = yes ]; then
+    echo "--with-vcache requires an engine name" >&2
+    exit 1
+fi
 
-VINYLAPI_DATAROOTDIR=$(pkg-config --variable=datarootdir vinylapi)
-export VINYLAPI_DATAROOTDIR
+VCACHEAPI_DATAROOTDIR=
+for flavor in $flavors; do
+    version=$("$PKG_CONFIG" --modversion "$flavor"api 2>/dev/null) || continue
+    # pkg-config sorts "trunk" below numeric versions; configure warns about
+    # these builds and their strict ABI remains the binding identity.
+    case "$version" in
+        [0-9]*) "$PKG_CONFIG" --atleast-version=9.1.0 "$flavor"api || continue ;;
+    esac
+    VCACHEAPI_DATAROOTDIR=$("$PKG_CONFIG" --variable=datarootdir "$flavor"api)
+    break
+done
+if [ -z "$VCACHEAPI_DATAROOTDIR" ]; then
+    echo "A Varnish Cache or Vinyl Cache 9.1+ development SDK is required (pkg-config: $flavors)." >&2
+    exit 1
+fi
+export VCACHEAPI_DATAROOTDIR
 
 mkdir -p m4
 autoreconf -i "$ROOT_DIR"
-
 "$ROOT_DIR"/configure "$@"

@@ -5,7 +5,7 @@ server s1 -repeat 96 {
 	txresp -body "object"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -69,10 +69,10 @@ client c_keep -repeat 24 {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 96
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 96
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots >= 128
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets >= 256
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 96
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 96
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots >= 128
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets >= 256
 
 client c1 {
 	txreq -req PURGE -hdr "Tag: drop"
@@ -84,11 +84,11 @@ client c1 {
 	expect resp.http.result == 72
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 24
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 24
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots >= 128
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets >= 256
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.sweep_last_killed == 72
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 24
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 24
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots >= 128
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets >= 256
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.sweep_last_killed == 72
 
 client c1_drain {
 	txreq -req LOWREADY
@@ -100,12 +100,12 @@ client c1_drain {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 24
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 24
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots <= 64
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets <= 128
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_shrinks >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_shrinks >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 24
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 24
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots <= 64
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets <= 128
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_shrinks >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_shrinks >= 1
 
 client c2 {
 	txreq -req PURGE -hdr "Tag: keep"
@@ -117,11 +117,11 @@ client c2 {
 	expect resp.http.result == 24
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots <= 64
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets <= 128
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.purgemap_table_slots == 0
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots <= 64
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets <= 128
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.purgemap_table_slots == 0
 
 client c2_drain {
 	txreq -req LOWREADY
@@ -133,9 +133,9 @@ client c2_drain {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets == 0
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_object_table_slots == 0
+vcache v1 -expect CACHETAG.vcl1_tags_fill_drain.volatile_side_table_buckets == 0
 
 server s1 -wait

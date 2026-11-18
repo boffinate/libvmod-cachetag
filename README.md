@@ -1,6 +1,6 @@
-# Cachetag: tag-based invalidation VMOD for Vinyl Cache
+# Cachetag: tag-based invalidation VMOD for Varnish Cache and Vinyl Cache
 
-Cachetag is a new approach to tag-based cache invalidation, which is memory efficient and gives [stricter freshness guarantees](docs/strictness.md) than `xkey`. It requires [Vinyl Cache](https://vinyl-cache.org/) 9.x (Varnish Cache support is planned) and supports multiple storage engines.
+Cachetag is a new approach to tag-based cache invalidation, which is memory efficient and gives [stricter freshness guarantees](docs/strictness.md) than `xkey`. It supports [Varnish Cache](https://varnish.org/) and [Vinyl Cache](https://vinyl-cache.org/) from version 9.1, with native builds for either engine and support for multiple storage engines.
 
 > [!TIP]
 > Help me make Cachetag faster for your workloads! [Read more](#optimize-cachetag)
@@ -9,19 +9,19 @@ Cachetag is a new approach to tag-based cache invalidation, which is memory effi
 
 ![cachetag-vs-xkey-approach](./docs/_images/cachetag-vs-xkey-approach.svg)
 
-This generational approach saves memory (workload dependent, 20-80%), the saving increasing with cache size. It also allows us to work efficiently with Fellow on-disk storage.
+This generational approach saves memory (workload dependent, 20-80%), the saving increasing with cache size. [Set interning](#help-me-optimize-cachetag-for-your-workloads) saves even more.
 
 ## Requirements
 
-- Vinyl Cache 9.x or trunk
+- Varnish Cache 9.1 or Vinyl Cache 9.1, or a compatible trunk build
 - A supported storage engine:
-  - Vinyl's bundled in-memory storage
-  - Buddy
-  - Fellow (patches required)
+  - The engine's bundled in-memory storage
+  - Buddy on Vinyl Cache
+  - Fellow on Vinyl Cache (patches required)
 
 ## Installation
 
-See [our installation guide](docs/install.md).
+See [our installation guide](docs/install.md). Select the engine with `./bootstrap --with-vcache=varnish` or `./bootstrap --with-vcache=vinyl`. Cachetag uses a strict ABI, so build a separate VMOD binary against the exact engine you run.
 
 ## Quickstart VCL
 

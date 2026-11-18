@@ -6,7 +6,7 @@ server s1 {
 	txresp -hdr "X-Source: backend-old" -body "old-body"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/purgemap-wal-fail.stv,100MB,1MB,64KB" \
@@ -70,7 +70,7 @@ client c2 {
 	expect resp.body == "old-body"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_entries == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_seq == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_entries == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_seq == 0
 
 server s1 -wait

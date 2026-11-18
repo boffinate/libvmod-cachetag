@@ -6,7 +6,7 @@ server s1 {
 	txresp -body "healthy"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -19,7 +19,7 @@ vinyl v1 -vcl+backend {
 	}
 } -start
 
-vinyl v1 -errvcl {VCL "vcl2" Failed initialization} {
+vcache v1 -errvcl {VCL "vcl2" Failed initialization} {
 	import cachetag;
 
 	backend default {
@@ -41,6 +41,6 @@ client c1 {
 	expect resp.body == "healthy"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_live_volatile.volatile_objects == 1
+vcache v1 -expect CACHETAG.vcl1_live_volatile.volatile_objects == 1
 
 server s1 -wait

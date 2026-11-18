@@ -13,7 +13,7 @@ server s1 {
 	txresp -hdr "X-Source: backend-new" -body "new-body"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -50,7 +50,7 @@ client c_old {
 
 barrier b_tagged sync
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -82,7 +82,7 @@ vinyl v1 -vcl+backend {
 	}
 }
 
-vinyl v1 -cliok "vcl.use vcl2"
+vcache v1 -cliok "vcl.use vcl2"
 
 client c_purge {
 	txreq -req PURGE

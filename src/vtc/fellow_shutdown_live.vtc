@@ -5,7 +5,7 @@ server s1 -repeat 256 {
 	txresp -body "persistent object"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/live.stv,100MB,1MB,64KB" \
@@ -35,5 +35,5 @@ client c1 -repeat 256 {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -stop
+vcache v1 -stop
 server s1 -wait

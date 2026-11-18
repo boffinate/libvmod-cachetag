@@ -10,7 +10,7 @@ server s1 {
 	txresp -hdr "X-Source: backend-new" -body "new-body"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -32,7 +32,7 @@ client c_seed {
 	expect resp.body == "old-body"
 } -run
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -46,8 +46,8 @@ vinyl v1 -vcl+backend {
 	}
 }
 
-vinyl v1 -cliok "vcl.use vcl2"
-vinyl v1 -cliok "vcl.discard vcl1"
+vcache v1 -cliok "vcl.use vcl2"
+vcache v1 -cliok "vcl.discard vcl1"
 
 client c_reload {
 	txreq -url "/mode-change"

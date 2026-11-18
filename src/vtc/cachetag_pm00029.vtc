@@ -10,7 +10,7 @@ server s1 {
 	txresp -body "content-2"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -106,9 +106,9 @@ client c1 {
 	expect resp.http.generation == 0
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_demo_diag.purgemap_seq == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_demo_diag.purgemap_entries == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_demo_diag.purgemap_table_slots == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_demo_diag.purgemap_auto_reclaimed_entries == 2
+vcache v1 -expect CACHETAG.vcl1_tags_demo_diag.purgemap_seq == 2
+vcache v1 -expect CACHETAG.vcl1_tags_demo_diag.purgemap_entries == 0
+vcache v1 -expect CACHETAG.vcl1_tags_demo_diag.purgemap_table_slots == 0
+vcache v1 -expect CACHETAG.vcl1_tags_demo_diag.purgemap_auto_reclaimed_entries == 2
 
 server s1 -wait

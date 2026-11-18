@@ -5,7 +5,7 @@ server s1 {
 	txresp -body "old"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -59,4 +59,4 @@ client c1 {
 	expect resp.http.Tag-Edges == 1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_probe_soft_hits >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_default.purgemap_probe_soft_hits >= 1

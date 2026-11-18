@@ -1,4 +1,4 @@
-AM_CFLAGS = $(VINYLAPI_CFLAGS)
+AM_CFLAGS = $(VCACHEAPI_CFLAGS)
 
 vmod_cachetag_symbols_regex = Vmod_cachetag_Data
 
@@ -9,7 +9,7 @@ vmod_LTLIBRARIES = \
 
 libvmod_cachetag_la_LDFLAGS = \
 	-export-symbols-regex 'Vmod_cachetag_Data' \
-	$(VINYLAPI_LIBS) \
+	$(VCACHEAPI_LIBS) \
 	$(VMOD_LDFLAGS)
 
 libvmod_cachetag_la_SOURCES = \
@@ -35,7 +35,7 @@ nodist_libvmod_cachetag_la_SOURCES = \
 
 # vmod_cachetag.vcc is a build product: the always-on core fragment plus the
 # fragments selected by configure options are concatenated into the VCC file
-# consumed by vmodtool (VINYL_VMODS_GENERATED in configure.ac makes vmodtool
+# consumed by vmodtool (VCACHE_VMODS_GENERATED in configure.ac makes vmodtool
 # prefer the builddir copy). The Makefile dependency reruns the concatenation
 # when configure flags change.
 
@@ -78,7 +78,7 @@ check_PROGRAMS = \
 	cachetag_counter_dump
 
 # Parity between src/cachetag.vsc and the src/cachetag_counters.h inventory the
-# C side is generated from.  The dump program needs no Vinyl headers and no
+# C side is generated from.  The dump program needs no engine headers and no
 # link dependencies; the script diffs it against the schema.
 
 cachetag_counter_dump_SOURCES = \
@@ -103,19 +103,19 @@ cachetag_wal_test_CFLAGS = \
 	$(AM_CFLAGS)
 
 cachetag_wal_test_LDADD = \
-	$(VINYLAPI_LIBS)
+	$(VCACHEAPI_LIBS)
 
 AM_TESTS_ENVIRONMENT = \
-	PATH="$(abs_builddir):$(VINYL_TEST_PATH):$(PATH)" \
-	LD_LIBRARY_PATH="$(VINYL_LIBRARY_PATH)" \
+	PATH="$(abs_builddir):$(VCACHE_TEST_PATH):$(PATH)" \
+	LD_LIBRARY_PATH="$(VCACHE_LIBRARY_PATH)" \
 	CACHETAG_SRCDIR='$(srcdir)' \
 	CACHETAG_COUNTER_DUMP='$(abs_builddir)/cachetag_counter_dump' \
 	CACHE_TAG_TEST_VSC_PUBLISH_SYNC=1
 TEST_EXTENSIONS = .vtc
-VTC_LOG_COMPILER = vinyltest -v
+VTC_LOG_COMPILER = vtest -v -E$(VTESTEXT)
 AM_VTC_LOG_FLAGS = \
-	-p vcl_path="$(abs_top_srcdir)/vcl:$(VINYLAPI_VCLDIR)" \
-	-p vmod_path="$(abs_builddir)/.libs:$(vmoddir):$(VINYLAPI_VMODDIR)"
+	-p vcl_path="$(abs_top_srcdir)/vcl:$(VCACHEAPI_VCLDIR)" \
+	-p vmod_path="$(abs_builddir)/.libs:$(vmoddir):$(VCACHEAPI_VMODDIR)"
 
 # Both runtime modes need identical core scenarios. Generate interned copies
 # from the checked-in default/direct core so their coverage cannot drift apart.

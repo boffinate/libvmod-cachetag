@@ -15,7 +15,7 @@ server s1 {
 	txresp -body "block"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -86,9 +86,9 @@ client c1 {
 	expect resp.http.result == -1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_entries == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaim_deferred_pending >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.reclaim_pending == 1
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_entries == 1
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaim_deferred_pending >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.reclaim_pending == 1
 
 barrier b_old_continue sync
 client c_old -wait
@@ -107,8 +107,8 @@ client c2 {
 	expect resp.http.result == 0
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_entries == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaim_passes >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_entries == 1
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaim_passes >= 1
 
 barrier b_block_continue sync
 client c_block -wait
@@ -119,13 +119,13 @@ client c3 {
 	expect resp.http.result == 0
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_entries == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_table_slots == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaimed_entries == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaim_defer_last_usec >= 0
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaim_filter_last_usec >= 0
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.reclaim_pending == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.publication_readers_phase0 == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.publication_readers_phase1 == 0
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_entries == 0
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_table_slots == 0
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaimed_entries == 1
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaim_defer_last_usec >= 0
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.purgemap_auto_reclaim_filter_last_usec >= 0
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.reclaim_pending == 0
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.publication_readers_phase0 == 0
+vcache v1 -expect CACHETAG.vcl1_tags_mixed_reclaim.publication_readers_phase1 == 0
 
 server s1 -wait

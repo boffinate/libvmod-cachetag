@@ -8,7 +8,7 @@ server s1 {
 	txresp -body "new"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -100,12 +100,12 @@ client c1 {
 	expect resp.http.purged == -1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_prunes >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_pruned_entries >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_hard_floor >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_rebuilds_shrink >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_entries <= 4
-vinyl v1 -expect CACHETAG.vcl1_tags_default.purgemap_empty_slots >= 2
+vcache v1 -expect CACHETAG.vcl1_tags_default.purgemap_prunes >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_default.purgemap_pruned_entries >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_default.purgemap_hard_floor >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_default.purgemap_rebuilds_shrink >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_default.purgemap_entries <= 4
+vcache v1 -expect CACHETAG.vcl1_tags_default.purgemap_empty_slots >= 2
 
 client c2 {
 	txreq

@@ -19,7 +19,7 @@ server s1 {
 	txresp -body "new"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -86,8 +86,8 @@ client c2 {
 	expect resp.http.result == 1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_new_phase.reclaim_pending == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_new_phase.purgemap_entries == 1
+vcache v1 -expect CACHETAG.vcl1_tags_new_phase.reclaim_pending == 1
+vcache v1 -expect CACHETAG.vcl1_tags_new_phase.purgemap_entries == 1
 
 client c_new {
 	txreq -url "/new"
@@ -108,9 +108,9 @@ client c3 {
 	expect resp.body == "new"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_new_phase.purgemap_entries == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_new_phase.reclaim_pending == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_new_phase.publication_readers_phase0 == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_new_phase.publication_readers_phase1 == 0
+vcache v1 -expect CACHETAG.vcl1_tags_new_phase.purgemap_entries == 0
+vcache v1 -expect CACHETAG.vcl1_tags_new_phase.reclaim_pending == 0
+vcache v1 -expect CACHETAG.vcl1_tags_new_phase.publication_readers_phase0 == 0
+vcache v1 -expect CACHETAG.vcl1_tags_new_phase.publication_readers_phase1 == 0
 
 server s1 -wait

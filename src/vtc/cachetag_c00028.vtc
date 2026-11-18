@@ -6,7 +6,7 @@ server s1 {
 	txresp -body "hot"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -32,17 +32,17 @@ client c1 {
 	expect resp.body == "hot"
 } -run
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	sub vcl_recv {
 		return (synth(204));
 	}
 }
 
-vinyl v1 -cliok "vcl.use vcl2"
-vinyl v1 -cliok "vcl.discard vcl1"
+vcache v1 -cliok "vcl.use vcl2"
+vcache v1 -cliok "vcl.discard vcl1"
 
 # Cooling vcl1 takes a namespace with live volatile membership through the
 # complete detach path. The child panic this guards against made the CLI fail.
-vinyl v1 -cliok "vcl.list"
+vcache v1 -cliok "vcl.list"
 
 server s1 -wait

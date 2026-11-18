@@ -13,7 +13,7 @@ server s1 {
 	txresp -hdr "X-Source: backend" -body "after-crash-body"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-pauto_restart=off" \
 	-arg "-E${libvmod_slash}" \
@@ -50,8 +50,8 @@ shell {
 	kill -9 "$worker_pid"
 }
 
-vinyl v1 -wait-stopped
-vinyl v1 -start
+vcache v1 -wait-stopped
+vcache v1 -start
 
 client c1 {
 	txreq -url "/after-crash"
@@ -63,4 +63,4 @@ client c1 {
 
 server s1 -wait
 
-vinyl v1 -expectexit 0x40
+vcache v1 -expectexit 0x40

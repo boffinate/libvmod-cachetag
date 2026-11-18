@@ -5,7 +5,7 @@ server s1 -repeat 65 {
 	txresp -body "object"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -63,10 +63,10 @@ client c_keep_63 -repeat 23 {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 63
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 128
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.object_emergency_segment_allocations >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.object_emergency_segment_old_capacity_max == 0
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 63
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 128
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.object_emergency_segment_allocations >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.object_emergency_segment_old_capacity_max == 0
 
 client c_keep_64 {
 	txreq -url "/keep"
@@ -74,8 +74,8 @@ client c_keep_64 {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 64
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 128
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 64
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 128
 
 client c_keep_65 {
 	txreq -url "/keep"
@@ -83,8 +83,8 @@ client c_keep_65 {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 65
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 128
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 65
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 128
 
 client c_compact_drop {
 	txreq -req PURGE -hdr "Tag: drop"
@@ -96,9 +96,9 @@ client c_compact_drop {
 	expect resp.http.result == 40
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 25
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_edges == 25
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 128
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 25
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_edges == 25
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 128
 
 client c_drain_drop {
 	txreq -req LOWREADY
@@ -106,8 +106,8 @@ client c_drain_drop {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 64
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_shrinks >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 64
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_shrinks >= 1
 
 client c_compact_keep {
 	txreq -req PURGE -hdr "Tag: keep"
@@ -119,10 +119,10 @@ client c_compact_keep {
 	expect resp.http.result == 25
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_edges == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 64
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_side_table_buckets == 128
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 64
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_side_table_buckets == 128
 
 client c_drain_keep {
 	txreq -req LOWREADY
@@ -130,7 +130,7 @@ client c_drain_keep {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_side_table_buckets == 0
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_object_table_slots == 0
+vcache v1 -expect CACHETAG.vcl1_tags_segmented_growth.volatile_side_table_buckets == 0
 
 server s1 -wait

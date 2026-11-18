@@ -18,7 +18,7 @@ server s1 {
 	txresp -body "new"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -127,6 +127,6 @@ client c_refetch {
 	expect resp.body == "new"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_publish_gap.stale_calls == 4
-vinyl v1 -expect CACHETAG.vcl1_tags_publish_gap.stale_detected == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_publish_gap.stale_memo_hits == 0
+vcache v1 -expect CACHETAG.vcl1_tags_publish_gap.stale_calls == 4
+vcache v1 -expect CACHETAG.vcl1_tags_publish_gap.stale_detected == 1
+vcache v1 -expect CACHETAG.vcl1_tags_publish_gap.stale_memo_hits == 0

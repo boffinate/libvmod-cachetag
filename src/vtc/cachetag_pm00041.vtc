@@ -27,7 +27,7 @@ server s1 {
 	txresp -body "direct-new"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -75,7 +75,7 @@ client c_direct_park {
 
 barrier b_direct_enter sync
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -110,7 +110,7 @@ vinyl v1 -vcl+backend {
 	}
 }
 
-vinyl v1 -cliok "vcl.use vcl2"
+vcache v1 -cliok "vcl.use vcl2"
 # VCL2 retires VCL1's incompatible direct index while c_direct_park keeps
 # VCL1 live. The delayed fetch creates VCL2's own membership.
 delay 2.1
@@ -121,17 +121,17 @@ client c_intern_flip {
 	expect resp.body == "interned-new"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_reload.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reload.volatile_edges == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reload.volatile_interned_sets == 0
-vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_objects == 1
-vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_edges == 2
-vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_sets == 1
-vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_set_refs == 1
+vcache v1 -expect CACHETAG.vcl1_tags_reload.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_tags_reload.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_tags_reload.volatile_interned_sets == 0
+vcache v1 -expect CACHETAG.vcl2_tags_reload.volatile_objects == 1
+vcache v1 -expect CACHETAG.vcl2_tags_reload.volatile_edges == 2
+vcache v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_sets == 1
+vcache v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_set_refs == 1
 
 barrier b_direct_release sync
 client c_direct_park -wait
-vinyl v1 -cliok "vcl.discard vcl1"
+vcache v1 -cliok "vcl.discard vcl1"
 
 client c_intern_park {
 	txreq -url "/park-interned"
@@ -141,7 +141,7 @@ client c_intern_park {
 
 barrier b_intern_enter sync
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -161,7 +161,7 @@ vinyl v1 -vcl+backend {
 	}
 }
 
-vinyl v1 -cliok "vcl.use vcl3"
+vcache v1 -cliok "vcl.use vcl3"
 # VCL3 retires VCL2's incompatible interned index while c_intern_park keeps
 # VCL2 live.
 delay 2.1
@@ -172,17 +172,17 @@ client c_direct_again {
 	expect resp.body == "direct-new"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_edges == 0
-vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_sets == 0
-vinyl v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_set_refs == 0
-vinyl v1 -expect CACHETAG.vcl3_tags_reload.volatile_objects == 1
-vinyl v1 -expect CACHETAG.vcl3_tags_reload.volatile_edges == 2
-vinyl v1 -expect CACHETAG.vcl3_tags_reload.volatile_interned_sets == 0
+vcache v1 -expect CACHETAG.vcl2_tags_reload.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl2_tags_reload.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_sets == 0
+vcache v1 -expect CACHETAG.vcl2_tags_reload.volatile_interned_set_refs == 0
+vcache v1 -expect CACHETAG.vcl3_tags_reload.volatile_objects == 1
+vcache v1 -expect CACHETAG.vcl3_tags_reload.volatile_edges == 2
+vcache v1 -expect CACHETAG.vcl3_tags_reload.volatile_interned_sets == 0
 
 barrier b_intern_release sync
 client c_intern_park -wait
-vinyl v1 -cliok "vcl.discard vcl2"
-vinyl v1 -cliok "vcl.list"
+vcache v1 -cliok "vcl.discard vcl2"
+vcache v1 -cliok "vcl.list"
 
 server s1 -wait

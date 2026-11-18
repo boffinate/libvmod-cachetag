@@ -1,8 +1,8 @@
 # Installing cachetag
 
-Cachetag builds against Vinyl Cache internals: `cache/cache.h`, the object event subscription API, `HSH_Kill`, `EXP_Reduce`, and fields of `struct objcore` - just like `xkey`. So when you upgrade Vinyl Cache you'll want to rebuild Cachetag.
+Cachetag builds natively against Varnish Cache 9.1 or Vinyl Cache 9.1 using their common VMOD SDK. It uses private cache headers and structures, just like `xkey`, so each binary belongs to the exact engine build it was compiled against. Rebuild Cachetag when you change engine or upgrade it; the same binary cannot be shared between Varnish and Vinyl.
 
-This guide covers Vinyl's Default storage and Slash's Buddy and Fellow storage engines.
+This guide covers the bundled in-memory storage on both engines, plus Slash's Buddy and Fellow storage engines on Vinyl.
 
 The commands use `/opt/vinyl` as the installation prefix. Change it to match your setup.
 
@@ -10,11 +10,11 @@ The commands use `/opt/vinyl` as the installation prefix. Change it to match you
 
 You need:
 
-- a compatible Vinyl Cache source checkout and installed development prefix;
+- an installed Varnish Cache or Vinyl Cache 9.1 development SDK;
 - this `libvmod-cachetag` checkout;
 - for Buddy or Fellow, a Slash checkout.
 
-Use a Vinyl build that provides `vinylapi` through `pkg-config`, has persistent-storage support enabled, and includes the private headers that this VMOD needs. The supported and tested target is Vinyl Cache 9.x.
+The SDK must provide `varnishapi` or `vinylapi` through `pkg-config`, including the common autotools macros, VMOD tools, and private `cache/cache_int.h` header. Older 9.0 SDKs are not supported by this source tree.
 
 Set the paths you will use below:
 
@@ -30,16 +30,30 @@ On platforms that use an architecture-specific pkg-config directory, add it as w
 
 ## Install the cachetag VMOD
 
-Build and install cachetag against the Vinyl prefix:
+For Varnish, point `PKG_CONFIG_PATH` and `PATH` at its installation prefix, then build with:
 
 ```sh
+export VARNISH_PREFIX=/opt/varnish
+export PKG_CONFIG_PATH="$VARNISH_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH}"
+export PATH="$VARNISH_PREFIX/sbin:$VARNISH_PREFIX/bin:${PATH}"
 cd "$CACHETAG_SRC"
-./bootstrap --prefix="$VINYL_PREFIX"
+./bootstrap --prefix="$VARNISH_PREFIX" --with-vcache=varnish
 make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
 sudo make install
 ```
 
-The configure summary prints the VMOD directory. `make install` puts `libvmod_cachetag.so` there, normally under the Vinyl prefix's VMOD directory. If Vinyl runs from another prefix or has a custom `vmod_path`, make that directory available to the daemon.
+Configure inherits the selected SDK's installation prefix unless you supply `--prefix`. For a system installation, the development package may already be on the default `pkg-config` search path.
+
+For Vinyl, using the paths above:
+
+```sh
+cd "$CACHETAG_SRC"
+./bootstrap --prefix="$VINYL_PREFIX" --with-vcache=vinyl
+make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+sudo make install
+```
+
+The configure summary identifies the selected engine and VMOD directory. `make install` puts `libvmod_cachetag.so` there. If the daemon runs from another prefix or has a custom `vmod_path`, make that directory available to it. Without `--with-vcache`, configure tries a compatible Vinyl SDK first, then Varnish. Select the engine explicitly when both SDKs are installed.
 
 ### Optional diagnostic build flags
 
@@ -50,7 +64,17 @@ A default build exposes only the production VCL surface. Direct and interned vol
 
 Pass them to `./bootstrap` (or `./configure`) like any other configure argument, for example `./bootstrap --prefix="$VINYL_PREFIX" --enable-demo-diagnostics`. The generated VCC interface, the manual page, and the VTC test list all follow the selected surface, so VCL that calls a gated method fails to compile against a build without its flag.
 
-Restart Vinyl after installing the VMOD, load the VCL for your selected storage backend, and confirm that Vinyl compiles it successfully before sending production traffic.
+Restart the cache daemon after installing the VMOD, load the VCL for your selected storage backend, and confirm that it compiles successfully before sending production traffic.
+
+## Varnish Cache's built-in storage
+
+Start Varnish with its bundled `malloc` storage; this example allocates 4 GiB:
+
+```sh
+varnishd -smalloc,4G -f /etc/varnish/default.vcl
+```
+
+Use the same Cachetag VCL shown in the [quickstart](../README.md#quickstart-vcl). Tag registration, purging, freshness checks, and namespace settings work the same way on both engines.
 
 ## Vinyl Cache's built-in ("Default") storage
 

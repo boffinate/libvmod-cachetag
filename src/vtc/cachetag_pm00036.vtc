@@ -14,7 +14,7 @@ server s1 {
 	txresp -body "two"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -52,7 +52,7 @@ client c1 {
 
 # objects() published synchronously, so the exact value is in the segment at
 # once.  The thread cannot have contributed: its first tick is 60s away.
-vinyl v1 -expect CACHETAG.vcl1_tags_slow_publish.volatile_objects == 1
+vcache v1 -expect CACHETAG.vcl1_tags_slow_publish.volatile_objects == 1
 
 client c2 {
 	txreq -url "/two"
@@ -64,7 +64,7 @@ client c2 {
 # still read one.  -expect retries until it matches, so asserting the *old*
 # value is what proves the segment did not move.
 delay 1
-vinyl v1 -expect CACHETAG.vcl1_tags_slow_publish.volatile_objects == 1
+vcache v1 -expect CACHETAG.vcl1_tags_slow_publish.volatile_objects == 1
 
 client c3 {
 	txreq -url "/probe"
@@ -72,6 +72,6 @@ client c3 {
 	expect resp.http.objects == 2
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_slow_publish.volatile_objects == 2
+vcache v1 -expect CACHETAG.vcl1_tags_slow_publish.volatile_objects == 2
 
 server s1 -wait

@@ -1,15 +1,13 @@
 # Agent Runbook
 
-This repository is a standalone Vinyl Cache VMOD. Do not copy these sources into
-the Vinyl Cache tree, and do not use host-local builds as verification. Build
-and test it in Docker against a Vinyl development prefix.
+This repository is a standalone VMOD for Varnish Cache 9.1 and Vinyl Cache 9.1. Do not copy these sources into either engine tree, and do not use host-local builds as verification. Build and test it in Docker against the selected engine's development prefix.
 
 ## Layout
 
 - `../vinyl-cache` is the expected sibling Vinyl Cache checkout.
 - `vinyl-cache-ubuntu-build` is the expected local Docker image.
 - `src/` contains the VMOD sources, VCC interface, VSC counters, and VTC tests.
-- `scripts/test-with-vinyl-cache.sh` is the authoritative test entry point.
+- `scripts/test-with-vinyl-cache.sh` and `scripts/test-with-varnish-cache.sh` are the authoritative test entry points; both use `scripts/test-with-vcache.sh`.
 - `scripts/benchmark-cachetag-vmod.sh` builds the standalone VMOD for benchmark
   VTCs; it also does not modify the Vinyl checkout.
 
@@ -44,6 +42,7 @@ Full standalone distribution check:
 
 ```sh
 scripts/test-with-vinyl-cache.sh ../vinyl-cache
+scripts/test-with-varnish-cache.sh ../varnish-cache
 ```
 
 Fast standalone test suite, skipping `distcheck` install/uninstall/archive
@@ -75,14 +74,14 @@ make check-with-vinyl-cache VINYL_CACHE_SRC=../vinyl-cache
 
 ## What The Test Wrapper Does
 
-`scripts/test-with-vinyl-cache.sh`:
+`scripts/test-with-vcache.sh` (called by the engine wrappers):
 
-1. Starts Docker with the Vinyl checkout mounted read-only.
-2. Configures and builds Vinyl in `/tmp/vinyl-build`.
-3. Installs Vinyl into `/tmp/vinyl-prefix`.
+1. Starts Docker with the selected engine checkout mounted read-only.
+2. Configures and builds the engine in `/tmp/engine-build`.
+3. Installs it into `/tmp/engine-prefix`.
 4. Copies this VMOD source into `/tmp/cachetag-src`, excluding ignored build
    artifacts.
-5. Runs `./bootstrap --prefix=/tmp/vinyl-prefix` with `CACHE_TAG_CONFIGURE_ARGS`, which defaults to `--enable-demo-diagnostics --enable-test-hooks` so the full diagnostic VCL surface the suite expects is built. Set `CACHE_TAG_CONFIGURE_ARGS=""` to build and test the production surface instead; the VTC lists in `src/Makefile.am` omit tests for the gated methods automatically.
+5. Runs `./bootstrap --prefix=/tmp/engine-prefix --with-vcache=ENGINE` with `CACHE_TAG_CONFIGURE_ARGS`, which defaults to `--enable-demo-diagnostics --enable-test-hooks` so the full diagnostic VCL surface the suite expects is built. Set `CACHE_TAG_CONFIGURE_ARGS=""` to build and test the production surface instead; the VTC lists in `src/Makefile.am` omit tests for the gated methods automatically.
 6. Runs `make`.
 7. Runs `make distcheck` by default, or `CACHE_TAG_CHECK_TARGET` when set. `distcheck` reconfigures with the same diagnostic flags as the outer build (`DISTCHECK_CONFIGURE_FLAGS` propagation in `Makefile.am`/`configure.ac`).
 
@@ -121,8 +120,7 @@ libvmod-cachetag-1.0.3.tar.gz
 ## When Debugging Failures
 
 - If Docker cannot connect, fix Docker/OrbStack first.
-- If `vinylapi` is missing inside the VMOD configure step, the Vinyl install
-  phase failed or `PKG_CONFIG_PATH` was not set.
+- If `vinylapi` or `varnishapi` is missing inside the VMOD configure step, the selected engine install phase failed or `PKG_CONFIG_PATH` was not set.
 - If VTCs cannot import `cachetag`, check `src/.libs/libvmod_cachetag.so` inside
   the container build and the `vmod_path` from `src/Makefile.am`.
 - If `distcheck` fails but `check` passes, inspect archive/distribution

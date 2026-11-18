@@ -5,7 +5,7 @@ server s1 -repeat 8 {
 	txresp -body "object"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -57,10 +57,10 @@ client c_first {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_sets == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_refs == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_misses == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_candidate_discards == 0
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_sets == 1
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_refs == 1
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_misses == 1
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_candidate_discards == 0
 
 client c_arm_then_shared_hit {
 	txreq -req FAILINTERN
@@ -72,11 +72,11 @@ client c_arm_then_shared_hit {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_attach_failures == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_sets == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_refs == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_hits == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_candidate_discards == 0
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_attach_failures == 0
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_sets == 1
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_refs == 2
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_candidate_discards == 0
 
 client c_unique_failure_then_retry {
 	txreq -url "/unique" -hdr "Load: 1"
@@ -88,11 +88,11 @@ client c_unique_failure_then_retry {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_attach_failures == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_sets == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_refs == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_misses == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_candidate_discards == 0
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_attach_failures == 1
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_sets == 2
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_refs == 3
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_misses == 2
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_candidate_discards == 0
 
 client c_thresholds {
 	txreq -url "/eight-a" -hdr "Load: 1"
@@ -112,10 +112,10 @@ client c_thresholds {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_sets == 4
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_refs == 7
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_misses == 4
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_hits == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_candidate_discards == 1
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_sets == 4
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_refs == 7
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_misses == 4
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_set_hits == 3
+vcache v1 -expect CACHETAG.vcl1_tags_intern_lookup_first.volatile_interned_candidate_discards == 1
 
 server s1 -wait

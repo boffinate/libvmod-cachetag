@@ -22,7 +22,7 @@ server s1 {
 	txresp -body "fragment"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -81,8 +81,8 @@ client c_restart {
 	expect resp.body == "restart-b"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_calls == 5
-vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_memo_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_task_scope.stale_calls == 5
+vcache v1 -expect CACHETAG.vcl1_tags_task_scope.stale_memo_hits == 1
 
 client c_page_warm {
 	txreq -url "/page"
@@ -91,8 +91,8 @@ client c_page_warm {
 	expect resp.body == "fragment"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_calls == 7
-vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_memo_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_task_scope.stale_calls == 7
+vcache v1 -expect CACHETAG.vcl1_tags_task_scope.stale_memo_hits == 1
 
 client c_page_hit {
 	txreq -url "/page"
@@ -101,8 +101,8 @@ client c_page_hit {
 	expect resp.body == "fragment"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_calls == 11
-vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_detected == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_task_scope.stale_memo_hits == 3
+vcache v1 -expect CACHETAG.vcl1_tags_task_scope.stale_calls == 11
+vcache v1 -expect CACHETAG.vcl1_tags_task_scope.stale_detected == 0
+vcache v1 -expect CACHETAG.vcl1_tags_task_scope.stale_memo_hits == 3
 
 server s1 -wait

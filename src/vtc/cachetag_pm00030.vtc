@@ -26,7 +26,7 @@ server s1 {
 	txresp -body "e-old"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -96,11 +96,11 @@ client c_a {
 	expect resp.http.edges == 3
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 56
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 0
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 56
 
 client c_b {
 	txreq -url "/b"
@@ -113,11 +113,11 @@ client c_b {
 	expect resp.http.edges == 6
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 56
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 2
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 56
 
 client c_c {
 	txreq -url "/c"
@@ -130,11 +130,11 @@ client c_c {
 	expect resp.http.edges == 8
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 104
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 2
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 3
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 104
 
 client c_d {
 	txreq -url "/d"
@@ -147,12 +147,12 @@ client c_d {
 	expect resp.http.edges == 9
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 104
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_inline_folds == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 2
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 3
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 104
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_inline_folds == 1
 
 client c_purge_gamma {
 	txreq -req HARDPURGE -hdr "Tag: gamma"
@@ -168,11 +168,11 @@ client c_purge_gamma {
 	expect resp.http.objects == 2
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 48
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_bytes == 48
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
 
 client c_fail_seam {
 	txreq -req ARM_INTERN_FAIL
@@ -192,10 +192,10 @@ client c_fail_seam {
 	rxresp
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_attach_failures == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_attach_failures == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_sets == 1
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_refs == 2
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_hits == 2
+vcache v1 -expect CACHETAG.vcl1_tags_stream5_intern.volatile_interned_set_misses == 2
 
 server s1 -wait

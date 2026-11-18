@@ -27,6 +27,7 @@ RUN apt-get update \
 	libjemalloc-dev \
 	libncurses-dev \
 	libpcre2-dev \
+	libssl-dev \
 	libtool \
 	liburing-dev \
 	pkg-config \

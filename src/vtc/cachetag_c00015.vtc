@@ -10,7 +10,7 @@ server s1 {
 	txresp -body "two"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -92,4 +92,4 @@ client c1 {
 	expect resp.body == "two"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_short_short.purgemap_entries == 0
+vcache v1 -expect CACHETAG.vcl1_short_short.purgemap_entries == 0

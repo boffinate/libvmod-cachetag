@@ -13,7 +13,7 @@ server s1 {
 	txresp -hdr "X-Source: backend-new" -body "new-body"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/mode-reload.stv,100MB,1MB,64KB" \
@@ -48,11 +48,11 @@ client c_seed {
 	expect resp.body == "old-body"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_mode_reload_pm.purgemap_fellow_attr_objects_written == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_mode_reload_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_mode_reload_pm.volatile_interned_sets == 0
+vcache v1 -expect CACHETAG.vcl1_tags_mode_reload_pm.purgemap_fellow_attr_objects_written == 1
+vcache v1 -expect CACHETAG.vcl1_tags_mode_reload_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_tags_mode_reload_pm.volatile_interned_sets == 0
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -60,10 +60,10 @@ vinyl v1 -vcl+backend {
 	}
 }
 
-vinyl v1 -cliok "vcl.use vcl2"
-vinyl v1 -cliok "vcl.discard vcl1"
+vcache v1 -cliok "vcl.use vcl2"
+vcache v1 -cliok "vcl.discard vcl1"
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import slash from "${libvmod_slash}";
 	import cachetag;
 
@@ -98,8 +98,8 @@ vinyl v1 -vcl+backend {
 	}
 }
 
-vinyl v1 -cliok "vcl.use vcl3"
-vinyl v1 -cliok "vcl.discard vcl2"
+vcache v1 -cliok "vcl.use vcl3"
+vcache v1 -cliok "vcl.discard vcl2"
 
 client c_reload {
 	txreq -url "/mode-reload"
@@ -120,15 +120,15 @@ client c_reload {
 	expect resp.body == "new-body"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_fellow_direct_probes >= 1
-vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_fellow_namespace_records_probed >= 1
-vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_probe_hard_hits >= 1
-vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.persist_wal_records >= 1
-vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.volatile_interned_sets == 0
+vcache v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_fellow_direct_probes >= 1
+vcache v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_fellow_namespace_records_probed >= 1
+vcache v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_probe_hard_hits >= 1
+vcache v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.persist_wal_records >= 1
+vcache v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.volatile_interned_sets == 0
 
-vinyl v1 -stop
-vinyl v1 -start
+vcache v1 -stop
+vcache v1 -start
 
 client c_restart {
 	txreq -url "/mode-reload"
@@ -138,10 +138,10 @@ client c_restart {
 	expect resp.body == "new-body"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.persist_replay_records >= 1
-vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_fellow_direct_probes >= 1
-vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_fellow_namespace_records_probed >= 1
-vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.volatile_interned_sets == 0
+vcache v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.persist_replay_records >= 1
+vcache v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_fellow_direct_probes >= 1
+vcache v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.purgemap_fellow_namespace_records_probed >= 1
+vcache v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl3_tags_mode_reload_pm.volatile_interned_sets == 0
 
 server s1 -wait

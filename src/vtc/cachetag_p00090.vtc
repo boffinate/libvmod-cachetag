@@ -10,7 +10,7 @@ server s1 {
 	txresp -hdr "X-Source: backend-new" -body "new-body"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/purgemap-missing-attr.stv,100MB,1MB,64KB" \
@@ -54,10 +54,10 @@ client c1 {
 	expect resp.body == "new-body"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_absent >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_read_failures == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_absent >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_read_failures == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
 
 server s1 -wait

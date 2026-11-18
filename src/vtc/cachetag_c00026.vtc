@@ -22,7 +22,7 @@ server s1 {
 	txresp -body "body-second"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -90,10 +90,10 @@ client c_both {
 	expect resp.http.Stale-B == <undef>
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_calls == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_memo_hits == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_b_beta.stale_calls == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_b_beta.stale_memo_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_calls == 3
+vcache v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_memo_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_b_beta.stale_calls == 3
+vcache v1 -expect CACHETAG.vcl1_tags_b_beta.stale_memo_hits == 1
 
 # Cache /slow, then replay it parked inside vcl_hit with both memos live.
 client c_slow_warm {
@@ -111,7 +111,7 @@ client c_slow {
 	expect resp.http.Stale-B == 1
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -136,23 +136,23 @@ vinyl v1 -vcl+backend {
 	}
 }
 
-vinyl v1 -cliok "vcl.use vcl2"
-vinyl v1 -cliok "vcl.discard vcl1"
+vcache v1 -cliok "vcl.use vcl2"
+vcache v1 -cliok "vcl.discard vcl1"
 
 barrier b_hit sync
 barrier b_deliver sync
 
-vinyl v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_calls == 6
-vinyl v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_memo_hits == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_b_beta.stale_calls == 6
-vinyl v1 -expect CACHETAG.vcl1_tags_b_beta.stale_memo_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_calls == 6
+vcache v1 -expect CACHETAG.vcl1_tags_a_alpha.stale_memo_hits == 1
+vcache v1 -expect CACHETAG.vcl1_tags_b_beta.stale_calls == 6
+vcache v1 -expect CACHETAG.vcl1_tags_b_beta.stale_memo_hits == 1
 
 barrier b_release sync
 client c_slow -wait
 
 # vcl1 cools only after the parked request drains; the memo objects die with
 # their request tasks, never touching the torn-down index.
-vinyl v1 -cliok "vcl.list"
+vcache v1 -cliok "vcl.list"
 
 client c_second {
 	txreq -url "/second"
@@ -164,4 +164,4 @@ client c_second {
 
 # A miss never reaches vcl_hit, so the fresh namespace sees exactly the
 # deliver-phase call.
-vinyl v1 -expect CACHETAG.vcl2_fresh_gamma.stale_calls == 1
+vcache v1 -expect CACHETAG.vcl2_fresh_gamma.stale_calls == 1

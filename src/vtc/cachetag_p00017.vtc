@@ -72,7 +72,7 @@ server s1 {
 	txresp -body "new-duplicate-namespace"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/purgemap-corruption-matrix.stv,100MB,1MB,64KB" \
@@ -160,20 +160,20 @@ client c1 {
 	expect resp.body == "old-duplicate-namespace"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_attr_objects_written == 6
-vinyl v1 -expect CACHETAG.vcl1_right_right_pm.purgemap_fellow_attr_objects_written == 6
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_edges == 0
-vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_attr_objects_written == 6
+vcache v1 -expect CACHETAG.vcl1_right_right_pm.purgemap_fellow_attr_objects_written == 6
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_right_right_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_right_right_pm.volatile_edges == 0
 
-vinyl v1 -stop
-vinyl v1 -start
-vinyl v1 -expect n_vampireobject == 6
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_edges == 0
-vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_edges == 0
+vcache v1 -stop
+vcache v1 -start
+vcache v1 -expect n_vampireobject == 6
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_right_right_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_right_right_pm.volatile_edges == 0
 
 client c2 {
 	txreq -req PURGE -url "/record-len"
@@ -231,16 +231,16 @@ client c2 {
 	expect resp.body == "new-duplicate-namespace"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_direct_probes >= 6
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_attr_invalid >= 6
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_attr_read_failures == 0
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_probe_hard_hits >= 6
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_store_invariant_failures == 0
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_edges == 0
-vinyl v1 -expect CACHETAG.vcl1_left_left_pm.volatile_side_table_bytes == 0
-vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_edges == 0
-vinyl v1 -expect CACHETAG.vcl1_right_right_pm.volatile_side_table_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_direct_probes >= 6
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_attr_invalid >= 6
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_attr_read_failures == 0
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_probe_hard_hits >= 6
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.purgemap_fellow_store_invariant_failures == 0
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_left_left_pm.volatile_side_table_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_right_right_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_right_right_pm.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_right_right_pm.volatile_side_table_bytes == 0
 
 server s1 -wait

@@ -6,7 +6,7 @@ server s1 {
 	txresp -body "hard-1"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -61,25 +61,25 @@ client c1 {
 	expect resp.http.result == 1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_entries == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_table_slots == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_auto_reclaim_passes >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_auto_reclaimed_entries == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_auto_reclaim_filter_last_usec >= 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_auto_reclaim_transient_bytes > 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_auto_reclaim_table_slots_before >= 16
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_auto_reclaim_table_slots_after == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.volatile_attached == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.sweep_total_last_usec >= 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.sweep_obj_mtx_hold_last_usec >= 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.sweep_last_scanned == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.sweep_last_killed == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.sweep_last_objects_before == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.sweep_last_objects_after == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.publication_readers_phase0 == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.publication_readers_phase1 == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.volatile_object_table_slots == 64
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_entries == 0
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_table_slots == 0
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_auto_reclaim_passes >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_auto_reclaimed_entries == 1
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_auto_reclaim_filter_last_usec >= 0
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_auto_reclaim_transient_bytes > 0
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_auto_reclaim_table_slots_before >= 16
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.purgemap_auto_reclaim_table_slots_after == 0
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.volatile_attached == 1
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.sweep_total_last_usec >= 0
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.sweep_obj_mtx_hold_last_usec >= 0
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.sweep_last_scanned == 1
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.sweep_last_killed == 1
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.sweep_last_objects_before == 1
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.sweep_last_objects_after == 0
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.publication_readers_phase0 == 0
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.publication_readers_phase1 == 0
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.volatile_object_table_slots == 64
 
 client c_drain {
 	txreq -req LOWREADY
@@ -87,6 +87,6 @@ client c_drain {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_reclaim.volatile_object_table_slots == 0
+vcache v1 -expect CACHETAG.vcl1_tags_reclaim.volatile_object_table_slots == 0
 
 server s1 -wait

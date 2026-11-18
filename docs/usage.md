@@ -1,6 +1,6 @@
 # Using cachetag
 
-The step-zero expectation we have is your backend response contains each object's tags in a HTTP header. Vinyl's VCL then registers the tags with cachetag.
+The step-zero expectation we have is your backend response contains each object's tags in a HTTP header. VCL then registers the tags with cachetag on either Varnish Cache or Vinyl Cache.
 
 ## Example
 
@@ -78,7 +78,7 @@ sub vcl_deliver {
 }
 ```
 
-A `PURGE` request without a `Cache-Tag-Purge` header falls through to Vinyl's ordinary URL purge.
+A `PURGE` request without a `Cache-Tag-Purge` header falls through to the engine's ordinary URL purge.
 
 ## Checking for stale objects
 
@@ -114,7 +114,7 @@ Interning saves memory when many objects carry exactly the same tags. Each uniqu
 - Objects with no tags have no overhead
 - Objects with a single tag store it inline
 
-The setting covers objects in Vinyl's built-in (Default) storage and in Buddy, plus the in-memory fallbacks a persistent namespace uses. If you're using on-disk storage, objects stored in Fellow store their tags in an attribute on the object, so interning has no effect.
+The setting covers objects in either engine's bundled in-memory storage and in Buddy on Vinyl, plus the in-memory fallbacks a persistent namespace uses. If you're using on-disk storage, objects stored in Fellow store their tags in an attribute on the object, so interning has no effect.
 
 `interning` is fixed when the namespace is created. Changing it means loading a new VCL, which purges every tagged in-memory object cached under the old setting (see [VCL reloads](#vcl-reloads)).
 
@@ -124,7 +124,7 @@ Cached objects outlive the VCL that fetched them, so cachetag has to decide what
 
 A memory-only namespace in the new VCL shares the old VCL's index when it has the same name and the same values for `interning`, `max_keys_per_object`, `max_key_length`, `max_tag_header_bytes`, `sweep_interval`, `purge_history_max_entries`, `sweep_batch_objects`, `sweep_batch_hold` and `sweep_batch_yield`. The old VCL must still be loaded, and its index must not have been retired (see below). Objects cached before the reload keep their tags, and a purge sent through the new VCL reaches them. The index stays in service while either VCL is warm.
 
-When a VCL that imports cachetag becomes warm, cachetag retires every index belonging to another VCL that the new VCL doesn't share. That covers namespaces whose settings changed, namespaces that were renamed, and namespaces that were dropped. Retiring an index kills its tagged objects, as the new VCL has no tag record for them and a later tag purge would miss them. Vinyl normally warms a VCL as part of `vcl.load`, so this happens before you switch to it with `vcl.use`. Expect a spike in backend traffic after a reload like this.
+When a VCL that imports cachetag becomes warm, cachetag retires every index belonging to another VCL that the new VCL doesn't share. That covers namespaces whose settings changed, namespaces that were renamed, and namespaces that were dropped. Retiring an index kills its tagged objects, as the new VCL has no tag record for them and a later tag purge would miss them. Both engines normally warm a VCL as part of `vcl.load`, so this happens before you switch to it with `vcl.use`. Expect a spike in backend traffic after a reload like this.
 
 A retired index is sealed. A fetch still running under the old VCL can't register its object, so the object is killed and not cached. The request can still reach `vcl_deliver`; if that calls `stale()` as in the example above, it sees the object is dead and restarts instead of delivering the old response. The seal is permanent, so switching back to the old VCL with `vcl.use` doesn't bring back tagged caching.
 
@@ -163,7 +163,7 @@ Soft purges are supported and don't remove matching objects. They are treated as
 set req.http.purged = tags.purge_header(req.http.Cache-Tag-Purge, mode = soft);
 ```
 
-## Vinyl Counters
+## Counters
 
 Cachetag publishes VSC counters at three levels:
 
@@ -171,7 +171,7 @@ Cachetag publishes VSC counters at three levels:
 - `diag`: what you'll want during an incident. The memory breakdown, resize and publication state, and the denominators behind the `info` counters.
 - `debug`: implementation internals and opt-in instrumentation, for working on cachetag itself.
 
-The interactive (curses) view of `vinylstat` filters by level and starts at `info`. One-shot (`-1`) and JSON (`-j`) output include every counter, whatever its level.
+The interactive (curses) view of `varnishstat` or `vinylstat` filters by level and starts at `info`. One-shot (`-1`) and JSON (`-j`) output include every counter, whatever its level.
 
 Each namespace has a background thread that publishes its counters every 0.1 s by default, so a value you read is at most one interval old. `objects()`, `pending()`, `edges()` and `compact()` publish straight away, so after a request calls one of them the counters are exact. The `vsc_publish_interval` constructor parameter changes the interval, and `0s` makes every VMOD call publish synchronously.
 

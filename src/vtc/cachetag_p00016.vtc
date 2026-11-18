@@ -17,7 +17,7 @@ server s1 {
 	txresp -hdr "Connection: close" -hdr "X-Source: backend-new" -body "new-body"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/concurrent-cold-touch.stv,100MB,1MB,64KB" \
@@ -64,10 +64,10 @@ client c0 {
 	expect resp.body == "old-body"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_objects_written == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_store_invariant_failures == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_objects_written == 1
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_store_invariant_failures == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
 
 client c0 {
 	txreq -req PURGE
@@ -77,13 +77,13 @@ client c0 {
 } -run
 
 barrier b_backend_closed sync
-vinyl v1 -stop
-vinyl v1 -start
-vinyl v1 -expect n_vampireobject == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_direct_probes == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
+vcache v1 -stop
+vcache v1 -start
+vcache v1 -expect n_vampireobject == 1
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_direct_probes == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
 
 client c1 {
 	barrier b_clients sync
@@ -127,14 +127,14 @@ client c2 -wait
 client c3 -wait
 client c4 -wait
 
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_direct_probes >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_namespace_records_probed >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_probe_hard_hits >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_invalid == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_read_failures == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_store_invariant_failures == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_direct_probes >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_namespace_records_probed >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_probe_hard_hits >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_invalid == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_attr_read_failures == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.purgemap_fellow_store_invariant_failures == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl1_tags_persistent_pm.volatile_side_table_bytes == 0
 
 server s1 -wait

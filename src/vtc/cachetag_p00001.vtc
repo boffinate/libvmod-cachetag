@@ -6,7 +6,7 @@ server s1 {
 	txresp -hdr "X-Source: backend" -body "provider-live"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/provider-lifecycle.stv,100MB,1MB,64KB" \
@@ -22,7 +22,7 @@ vinyl v1 \
 	}
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -30,10 +30,10 @@ vinyl v1 -vcl+backend {
 	}
 }
 
-vinyl v1 -cliok "vcl.use vcl2"
-vinyl v1 -cliok "vcl.discard vcl1"
+vcache v1 -cliok "vcl.use vcl2"
+vcache v1 -cliok "vcl.discard vcl1"
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import slash from "${libvmod_slash}";
 	import cachetag;
 
@@ -50,8 +50,8 @@ vinyl v1 -vcl+backend {
 	}
 }
 
-vinyl v1 -cliok "vcl.use vcl3"
-vinyl v1 -cliok "vcl.discard vcl2"
+vcache v1 -cliok "vcl.use vcl3"
+vcache v1 -cliok "vcl.discard vcl2"
 
 client c1 {
 	txreq -url "/after-reregister"
@@ -61,9 +61,9 @@ client c1 {
 	expect resp.body == "provider-live"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl3_tags_second_pm.purgemap_fellow_attr_objects_written == 1
-vinyl v1 -expect CACHETAG.vcl3_tags_second_pm.purgemap_fellow_store_invariant_failures == 0
-vinyl v1 -expect CACHETAG.vcl3_tags_second_pm.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl3_tags_second_pm.volatile_edges == 0
+vcache v1 -expect CACHETAG.vcl3_tags_second_pm.purgemap_fellow_attr_objects_written == 1
+vcache v1 -expect CACHETAG.vcl3_tags_second_pm.purgemap_fellow_store_invariant_failures == 0
+vcache v1 -expect CACHETAG.vcl3_tags_second_pm.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl3_tags_second_pm.volatile_edges == 0
 
 server s1 -wait

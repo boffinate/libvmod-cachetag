@@ -6,7 +6,7 @@ server s1 {
 	txresp -body "overflow"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -64,8 +64,8 @@ client c1 {
 	expect resp.http.edges == 0
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_limits.volatile_attach_failures == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_limits.publication_readers_phase0 == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_limits.publication_readers_phase1 == 0
+vcache v1 -expect CACHETAG.vcl1_tags_limits.volatile_attach_failures == 1
+vcache v1 -expect CACHETAG.vcl1_tags_limits.publication_readers_phase0 == 0
+vcache v1 -expect CACHETAG.vcl1_tags_limits.publication_readers_phase1 == 0
 
 server s1 -wait

@@ -18,7 +18,7 @@ server s1 {
 	txresp -body "right-refetched"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/duplicate-namespace.stv,100MB,1MB,64KB" \
@@ -72,14 +72,14 @@ client c1 {
 	expect resp.body == "old"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_left_duplicate_pm.purgemap_fellow_attr_objects_written == 0
-vinyl v1 -expect CACHETAG.vcl1_right_duplicate_pm.purgemap_fellow_attr_objects_written == 0
-vinyl v1 -expect CACHETAG.vcl1_left_duplicate_pm.purgemap_volatile_fallback_attaches == 1
-vinyl v1 -expect CACHETAG.vcl1_right_duplicate_pm.purgemap_volatile_fallback_attaches == 1
-vinyl v1 -expect CACHETAG.vcl1_left_duplicate_pm.purgemap_fellow_store_invariant_failures == 0
-vinyl v1 -expect CACHETAG.vcl1_right_duplicate_pm.purgemap_fellow_store_invariant_failures == 0
-vinyl v1 -expect CACHETAG.vcl1_left_duplicate_pm.volatile_objects == 1
-vinyl v1 -expect CACHETAG.vcl1_right_duplicate_pm.volatile_objects == 1
+vcache v1 -expect CACHETAG.vcl1_left_duplicate_pm.purgemap_fellow_attr_objects_written == 0
+vcache v1 -expect CACHETAG.vcl1_right_duplicate_pm.purgemap_fellow_attr_objects_written == 0
+vcache v1 -expect CACHETAG.vcl1_left_duplicate_pm.purgemap_volatile_fallback_attaches == 1
+vcache v1 -expect CACHETAG.vcl1_right_duplicate_pm.purgemap_volatile_fallback_attaches == 1
+vcache v1 -expect CACHETAG.vcl1_left_duplicate_pm.purgemap_fellow_store_invariant_failures == 0
+vcache v1 -expect CACHETAG.vcl1_right_duplicate_pm.purgemap_fellow_store_invariant_failures == 0
+vcache v1 -expect CACHETAG.vcl1_left_duplicate_pm.volatile_objects == 1
+vcache v1 -expect CACHETAG.vcl1_right_duplicate_pm.volatile_objects == 1
 
 client c2 {
 	txreq -req PURGE -hdr "Namespace: left"

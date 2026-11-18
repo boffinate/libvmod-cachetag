@@ -6,7 +6,7 @@ server s1 {
 	txresp -body "private-ok"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/private-degraded.stv,100MB,1MB,64KB" \

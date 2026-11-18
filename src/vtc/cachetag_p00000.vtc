@@ -6,7 +6,7 @@ server s1 {
 	txresp -hdr "X-Source: backend" -body "fellow-body"
 } -start
 
-vinyl v1 \
+vcache v1 \
 	-arg "-jnone" \
 	-arg "-E${libvmod_slash}" \
 	-arg "-sfellow=fellow,${tmpdir}/fellow-smoke.stv,100MB,1MB,64KB" \
@@ -35,9 +35,9 @@ client c1 {
 
 server s1 -wait
 
-vinyl v1 -stop
-vinyl v1 -start
-vinyl v1 -expect n_vampireobject == 1
+vcache v1 -stop
+vcache v1 -start
+vcache v1 -expect n_vampireobject == 1
 
 client c1 {
 	txreq -url "/fellow-smoke"

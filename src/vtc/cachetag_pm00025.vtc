@@ -5,7 +5,7 @@ server s1 -repeat 74 {
 	txresp -body "object"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -110,20 +110,20 @@ client c_low_compact {
 	expect resp.http.result == 65
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_segments == 2
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_published_slots == 128
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_published_bytes == 3072
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_count_published_bytes == 128
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.volatile_object_table_bytes == 3072
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.volatile_object_count_sidecar_bytes == 128
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.volatile_object_count_overflow_bytes == 0
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_active == 1
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_starts == 1
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_observed_live == 1
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_target_objects == 64
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.side_resize_state == 2
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.side_resize_reason == 3
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_detached_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_segments == 2
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_published_slots == 128
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_published_bytes == 3072
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_count_published_bytes == 128
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.volatile_object_table_bytes == 3072
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.volatile_object_count_sidecar_bytes == 128
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.volatile_object_count_overflow_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_active == 1
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_starts == 1
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_observed_live == 1
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_target_objects == 64
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.side_resize_state == 2
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.side_resize_reason == 3
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_detached_bytes == 0
 
 client c_low_drain {
 	txreq -req DRAIN_LOW
@@ -131,19 +131,19 @@ client c_low_drain {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_active == 0
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.side_resize_state == 0
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_published_slots == 64
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_segment_detach_batches >= 1
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_segment_free_usec >= 0
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_retiring_bytes == 0
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_detached_bytes == 0
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_published_bytes == 1536
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_count_published_bytes == 64
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_active_bytes == 2112
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_reconciled_bytes == 2112
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_emergency_segment_allocations >= 1
-vinyl v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_emergency_segment_old_capacity_max == 0
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_low_water_active == 0
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.side_resize_state == 0
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_published_slots == 64
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_segment_detach_batches >= 1
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_segment_free_usec >= 0
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_retiring_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_detached_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_published_bytes == 1536
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_count_published_bytes == 64
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_active_bytes == 2112
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.resize_reconciled_bytes == 2112
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_emergency_segment_allocations >= 1
+vcache v1 -expect CACHETAG.vcl1_low_resize_vsc_low.object_emergency_segment_old_capacity_max == 0
 
 client c_side_init {
 	txreq -req INIT_SIDE
@@ -163,18 +163,18 @@ client c_side_start {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_state == 1
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_reason == 3
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_primary_buckets == 16
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_retiring_buckets == 64
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_retiring_bytes == 512
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_buckets_remaining == 64
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_live_remaining == 8
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.object_published_bytes == 1536
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.object_count_published_bytes == 64
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_active_bytes == 1728
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_retiring_bytes == 512
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_reconciled_bytes == 2240
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_state == 1
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_reason == 3
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_primary_buckets == 16
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_retiring_buckets == 64
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_retiring_bytes == 512
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_buckets_remaining == 64
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_live_remaining == 8
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.object_published_bytes == 1536
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.object_count_published_bytes == 64
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_active_bytes == 1728
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_retiring_bytes == 512
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_reconciled_bytes == 2240
 
 client c_side_finish {
 	txreq -req MIGRATE_SIDE
@@ -182,20 +182,20 @@ client c_side_finish {
 	expect resp.http.result == 1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_state == 0
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_primary_buckets == 16
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_retiring_buckets == 0
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_batches >= 1
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_inspected_buckets == 64
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_moved_entries == 8
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_completions >= 1
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_retired_free_usec >= 0
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_retiring_bytes == 0
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_detached_bytes == 0
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_active_bytes == 1728
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_reconciled_bytes == 1728
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.volatile_attach_failures == 0
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_attach_grow_publishes == 0
-vinyl v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_attach_grow_old_buckets_max == 0
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_state == 0
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_primary_buckets == 16
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_retiring_buckets == 0
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_batches >= 1
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_inspected_buckets == 64
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_moved_entries == 8
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_migration_completions >= 1
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_retired_free_usec >= 0
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_retiring_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_detached_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_active_bytes == 1728
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.resize_reconciled_bytes == 1728
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.volatile_attach_failures == 0
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_attach_grow_publishes == 0
+vcache v1 -expect CACHETAG.vcl1_side_resize_vsc_side.side_resize_attach_grow_old_buckets_max == 0
 
 server s1 -wait

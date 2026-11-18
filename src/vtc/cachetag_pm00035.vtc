@@ -10,7 +10,7 @@ server s1 {
 	txresp -body "idle-1"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -35,14 +35,14 @@ client c1 {
 # Registration and insert are mutating sites and no longer publish, and no read
 # probe runs here.  Only the publisher thread can move the segment off the zero
 # that VCL warm published.
-vinyl v1 -expect CACHETAG.vcl1_tags_idle_publish.volatile_objects == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_idle_publish.volatile_edges == 1
+vcache v1 -expect CACHETAG.vcl1_tags_idle_publish.volatile_objects == 1
+vcache v1 -expect CACHETAG.vcl1_tags_idle_publish.volatile_edges == 1
 
 # Expiry is a mutating site too, and it happens with no request in flight at
 # all: nothing but the thread is left to publish the accounting.
 delay 3
-vinyl v1 -expect MAIN.n_expired >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_idle_publish.volatile_objects == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_idle_publish.volatile_edges == 0
+vcache v1 -expect MAIN.n_expired >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_idle_publish.volatile_objects == 0
+vcache v1 -expect CACHETAG.vcl1_tags_idle_publish.volatile_edges == 0
 
 server s1 -wait

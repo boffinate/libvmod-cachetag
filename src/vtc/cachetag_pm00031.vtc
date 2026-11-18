@@ -5,7 +5,7 @@ server s1 -repeat 7 {
 	txresp -body "object"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -131,12 +131,12 @@ client c_state_before_steps {
 	expect resp.http.active > 0
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_sets == 5
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_set_refs == 5
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_set_misses == 5
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_table_bytes > 0
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_old_table_bytes > 0
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_migration_active == 1
+vcache v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_sets == 5
+vcache v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_set_refs == 5
+vcache v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_set_misses == 5
+vcache v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_table_bytes > 0
+vcache v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_old_table_bytes > 0
+vcache v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_migration_active == 1
 
 client c_hit_from_old_or_active {
 	txreq -req MIGRATE
@@ -152,9 +152,9 @@ client c_hit_from_old_or_active {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_sets == 5
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_set_refs == 7
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_set_hits == 2
+vcache v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_sets == 5
+vcache v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_set_refs == 7
+vcache v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_set_hits == 2
 
 client c_remove_old_set {
 	txreq -req PURGE -hdr "Tag: alpha"
@@ -166,7 +166,7 @@ client c_remove_old_set {
 	expect resp.http.result >= 1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_sets == 4
+vcache v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_sets == 4
 
 client c_finish_worker {
 	txreq -req RELEASEWORKER
@@ -182,7 +182,7 @@ client c_finish_worker {
 	expect resp.http.old == 0
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_old_table_bytes == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_detached_table_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_old_table_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_tags_intern_migration.volatile_interned_detached_table_bytes == 0
 
 server s1 -wait

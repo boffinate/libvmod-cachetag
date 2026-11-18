@@ -18,7 +18,7 @@ server s1 {
 	txresp -body "b2"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -75,7 +75,7 @@ client c1 {
 	expect resp.body == "b2"
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_tags_swap_delete.volatile_objects == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_swap_delete.volatile_edges == 2
+vcache v1 -expect CACHETAG.vcl1_tags_swap_delete.volatile_objects == 2
+vcache v1 -expect CACHETAG.vcl1_tags_swap_delete.volatile_edges == 2
 
 server s1 -wait

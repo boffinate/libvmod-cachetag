@@ -3,7 +3,7 @@
 
 # VMOD cachetag
 
-`cachetag` provides explicit cache-tag registration and purge-map based invalidation for Vinyl Cache. A successful purge publishes durable (when configured) purge history; it does not walk objects or report an affected object count.
+`cachetag` provides explicit cache-tag registration and purge-map based invalidation for Varnish Cache 9.1 and Vinyl Cache 9.1. A successful purge publishes durable (when configured) purge history; it does not walk objects or report an affected object count.
 
 ## Namespace Object
 

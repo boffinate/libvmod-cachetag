@@ -264,7 +264,7 @@ cachetag_fellow_common_test() {
 	dst="$fellow_common_dir/$base"
 	mkdir -p "$fellow_common_dir"
 	awk -v stv="\${tmpdir}/fellow-common-$base.stv" '"'"'
-		/^vinyl[[:space:]]+[[:alnum:]_]+[[:space:]]+-vcl/ {
+		/^vcache[[:space:]]+[[:alnum:]_]+[[:space:]]+-vcl/ {
 			sub(/ -vcl/, " -arg \"-E${libvmod_slash}\" -arg \"-sfellow=fellow," stv ",100MB,1MB,64KB\" -vcl")
 		}
 		/^[[:space:]]*import cachetag;/ {

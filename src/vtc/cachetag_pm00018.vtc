@@ -18,7 +18,7 @@ server s1 {
 	txresp -body "new-1"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -96,16 +96,16 @@ client c_new {
 
 client c_compact -wait
 
-vinyl v1 -expect CACHETAG.vcl1_tags_batched.sweep_last_scanned == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_batched.sweep_last_killed == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_batched.sweep_last_batches == 3
-vinyl v1 -expect CACHETAG.vcl1_tags_batched.sweep_batch_scanned_max == 1
-vinyl v1 -expect CACHETAG.vcl1_tags_batched.sweep_remaining == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_batched.volatile_objects == 2
-vinyl v1 -expect CACHETAG.vcl1_tags_batched.purgemap_entries == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_batched.purgemap_auto_reclaim_passes >= 1
-vinyl v1 -expect CACHETAG.vcl1_tags_batched.publication_readers_phase0 == 0
-vinyl v1 -expect CACHETAG.vcl1_tags_batched.publication_readers_phase1 == 0
+vcache v1 -expect CACHETAG.vcl1_tags_batched.sweep_last_scanned == 3
+vcache v1 -expect CACHETAG.vcl1_tags_batched.sweep_last_killed == 2
+vcache v1 -expect CACHETAG.vcl1_tags_batched.sweep_last_batches == 3
+vcache v1 -expect CACHETAG.vcl1_tags_batched.sweep_batch_scanned_max == 1
+vcache v1 -expect CACHETAG.vcl1_tags_batched.sweep_remaining == 0
+vcache v1 -expect CACHETAG.vcl1_tags_batched.volatile_objects == 2
+vcache v1 -expect CACHETAG.vcl1_tags_batched.purgemap_entries == 0
+vcache v1 -expect CACHETAG.vcl1_tags_batched.purgemap_auto_reclaim_passes >= 1
+vcache v1 -expect CACHETAG.vcl1_tags_batched.publication_readers_phase0 == 0
+vcache v1 -expect CACHETAG.vcl1_tags_batched.publication_readers_phase1 == 0
 
 client c_hit {
 	txreq -url "/new"

@@ -5,7 +5,7 @@ server s1 -repeat 58 {
 	txresp -body "object"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -93,11 +93,11 @@ client c_emergency_fail {
 	expect resp.http.edges == 0
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_table_slots == 0
-vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_table_bytes == 0
-vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_count_sidecar_bytes == 0
-vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.object_segment_alloc_failures == 1
-vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_attach_failures == 1
+vcache v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_table_slots == 0
+vcache v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_table_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_count_sidecar_bytes == 0
+vcache v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.object_segment_alloc_failures == 1
+vcache v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_attach_failures == 1
 
 client c_emergency_retry {
 	txreq -url "/emergency-ok" -hdr "Load: 1"
@@ -110,11 +110,11 @@ client c_emergency_retry {
 	expect resp.http.edges == 1
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_table_slots == 64
-vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_table_bytes == 1536
-vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_count_sidecar_bytes == 64
-vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.object_published_bytes == 1536
-vinyl v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.object_count_published_bytes == 64
+vcache v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_table_slots == 64
+vcache v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_table_bytes == 1536
+vcache v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.volatile_object_count_sidecar_bytes == 64
+vcache v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.object_published_bytes == 1536
+vcache v1 -expect CACHETAG.vcl1_emergency_stream5_emergency.object_count_published_bytes == 64
 
 client c_prepared_keep {
 	txreq -url "/prepared-keep" -hdr "Namespace: prepared"
@@ -128,8 +128,8 @@ client c_prepared_below_runway -repeat 54 {
 	expect resp.status == 200
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_objects == 55
-vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_object_table_slots == 64
+vcache v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_objects == 55
+vcache v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_object_table_slots == 64
 
 client c_prepared_fail_and_recover {
 	txreq -req ARM_PREPARED
@@ -155,12 +155,12 @@ client c_prepared_fail_and_recover {
 	expect resp.http.edges == 56
 } -run
 
-vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.object_segment_alloc_failures >= 1
-vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_attach_failures == 0
-vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_object_table_slots == 128
-vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_object_table_bytes == 3072
-vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_object_count_sidecar_bytes == 128
-vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.object_published_bytes == 3072
-vinyl v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.object_count_published_bytes == 128
+vcache v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.object_segment_alloc_failures >= 1
+vcache v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_attach_failures == 0
+vcache v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_object_table_slots == 128
+vcache v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_object_table_bytes == 3072
+vcache v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.volatile_object_count_sidecar_bytes == 128
+vcache v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.object_published_bytes == 3072
+vcache v1 -expect CACHETAG.vcl1_prepared_stream5_prepared.object_count_published_bytes == 128
 
 server s1 -wait

@@ -17,7 +17,7 @@ server s1 {
 	txresp -hdr "X-Source: backend-new" -body "new-body"
 } -start
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 	import vtc;
 
@@ -63,7 +63,7 @@ client c_park {
 
 barrier b_parked sync
 
-vinyl v1 -vcl+backend {
+vcache v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
@@ -82,7 +82,7 @@ vinyl v1 -vcl+backend {
 	}
 }
 
-vinyl v1 -cliok "vcl.use vcl2"
+vcache v1 -cliok "vcl.use vcl2"
 
 client c_renamed {
 	txreq -url "/rename"
@@ -94,6 +94,6 @@ client c_renamed {
 
 barrier b_release sync
 client c_park -wait
-vinyl v1 -cliok "vcl.discard vcl1"
+vcache v1 -cliok "vcl.discard vcl1"
 
 server s1 -wait
