@@ -110,19 +110,21 @@ Redirects often expose this. Vinyl assigns TTLs by status before your backend-re
 | 302, 307 | Explicit Cache-Control freshness or `Expires`; otherwise negative |
 | Other statuses, including 303 and 308 | Negative, even with explicit Cache-Control freshness |
 
-A 302 without freshness—or a 308 even with `max-age`—hits the backend on every request under the builtin policy. `add_header()` succeeds and `pending()` drops back to zero, but no tags are stored and repeat requests increment `MAIN.cache_hitmiss`. The namespace's `transient_discards` counter tracks how many inserted objects had their registrations dropped (counting objects, not tags; pass fetches and abandoned requests are excluded). When a transaction log is available, cachetag also logs a backend-transaction `Notice` with the discarded key count and object kind:
+A 302 without freshness—or a 308 even with `max-age`—hits the backend on every request under the builtin policy. `add_header()` succeeds and `pending()` drops back to zero, but no tags are stored and repeat requests increment `MAIN.cache_hitmiss`. The namespace's `transient_discards` counter tracks how many inserted objects had their registrations dropped (counting objects, not tags; pass fetches and abandoned requests are excluded). With `log_transient_discards = true` and a transaction log available, cachetag also logs a backend-transaction `Notice` with the discarded key count and object kind:
 
 ```text
 vmod_cachetag: Discarded 1 tag registration(s), object is hit-for-miss
 ```
 
-If both flags are set, hit-for-pass takes precedence. Cachetag uses transaction logs to flag issues an operator needs to fix, not for per-request accounting. By default, this Notice is logged once per affected insert without rate limiting. Its volume tracks your backend fetch rate for tagged uncacheable responses. To silence it, set `log_transient_discards = false` on the namespace; `transient_discards` still tracks the discards:
+If both flags are set, hit-for-pass takes precedence. Notices are disabled by default because discarding tags can be routine for uncacheable responses. The `transient_discards` counter remains active. To diagnose which backend transactions discard tags, enable Notices on the namespace:
 
 ```vcl
 sub vcl_init {
-    new tags = cachetag.namespace("default", log_transient_discards = false);
+    new tags = cachetag.namespace("default", log_transient_discards = true);
 }
 ```
+
+When enabled, the Notice is logged once per affected insert and namespace without rate limiting. Its volume follows the backend fetch rate for tagged uncacheable responses. Set `log_transient_discards = false` to disable it again; the counter continues to track all discards.
 
 `purge()` returns `-1` once a purge is published, whether or not any cached objects currently carry the tag. It records purge history rather than scanning for matching objects. Strict freshness still holds: hit-for-miss and hit-for-pass objects never serve cached content anyway.
 
@@ -263,7 +265,7 @@ Cachetag publishes VSC counters at three levels:
 - `diag`: Incident troubleshooting. Memory breakdowns, table resize/compaction state, and underlying denominators for `info` rates.
 - `debug`: Internal mechanics and opt-in instrumentation for cachetag development.
 
-Monitor `CACHETAG.*.transient_discards` in production. It counts objects whose pending tags were dropped upon inserting a hit-for-miss or hit-for-pass response. It tracks object count (not tag count) and ignores pass fetches and aborted requests. A rising count usually indicates backend headers or VCL rules preventing cacheability. Unless silenced via `log_transient_discards = false`, backend `vmod_cachetag:` notices will detail the discarded tag count and object type.
+Monitor `CACHETAG.*.transient_discards` in production. It counts objects whose pending tags were dropped upon inserting a hit-for-miss or hit-for-pass response. It tracks object count (not tag count) and ignores pass fetches and aborted requests. A rising count indicates that backend headers or VCL rules prevent tagged responses from being cached; this can be intentional. Notices are disabled by default. Set `log_transient_discards = true` to diagnose affected backend transactions, including the discarded tag count and object type.
 
 `varnishstat` and `vinylstat` curses interfaces default to `info` level. One-shot (`-1`) and JSON (`-j`) modes dump all counters regardless of level.
 

@@ -22,7 +22,7 @@ vinyl v1 -vcl+backend {
 	import cachetag;
 
 	sub vcl_init {
-		new tags = cachetag.namespace("default", vsc_publish_interval = 0s);
+		new tags = cachetag.namespace("default", vsc_publish_interval = 0s, log_transient_discards = true);
 	}
 
 	sub vcl_backend_response {
@@ -587,11 +587,13 @@ vinyl v3 -vcl {
 	}
 
 	sub vcl_init {
-		new tags = cachetag.namespace("default", vsc_publish_interval = 0s, log_transient_discards = false);
+		new tags = cachetag.namespace("default", vsc_publish_interval = 0s);
+		new quiet = cachetag.namespace("quiet", vsc_publish_interval = 0s, log_transient_discards = false);
 	}
 
 	sub vcl_backend_response {
 		tags.add_header(beresp.http.Cache-Tag);
+		quiet.add_header(beresp.http.Cache-Tag);
 		if (bereq.url == "/hfp") {
 			return (pass(10s));
 		}
@@ -627,5 +629,7 @@ logexpect l3 -wait
 vinyl v3 -expect MAIN.cache_hitmiss == 1
 vinyl v3 -expect CACHETAG.vcl1_tags_default.transient_discards == 3
 vinyl v3 -expect CACHETAG.vcl1_tags_default.volatile_objects == 0
+vinyl v3 -expect CACHETAG.vcl1_quiet_quiet.transient_discards == 3
+vinyl v3 -expect CACHETAG.vcl1_quiet_quiet.volatile_objects == 0
 
 server s3 -wait
